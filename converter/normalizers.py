@@ -15,6 +15,7 @@ from typing import Any
 
 import phonenumbers
 import unicodedata
+from phonenumbers import geocoder as _geo
 from dateutil import parser as du_parser
 from email_validator import EmailNotValidError, validate_email
 from nameparser import HumanName
@@ -127,8 +128,10 @@ def _prep_phone(value: str) -> str:
     # International exit codes before the US country code: 011 1 …, 00 1 …, +011 1 …
     v = re.sub(r"^\s*\+?\s*(?:011|00)[\s.\-]*(?=1\D?\d)", "+", v)
     # "+" followed by 10 digits that can't start a country code of their own → the "1" was left out.
+    # Only when that gives a real North American number; otherwise it's a foreign number (+51 1 4567890 = Lima).
     m = re.match(r"^\s*\+\s*([2-9][\d\s().\-]*)$", v)
-    if m and len(re.sub(r"\D", "", m.group(1))) == 10:
+    if m and len(digits := re.sub(r"\D", "", m.group(1))) == 10 and phonenumbers.is_valid_number(
+            phonenumbers.PhoneNumber(country_code=1, national_number=int(digits))):
         v = "+1 " + m.group(1)
     return v
 
@@ -162,8 +165,48 @@ def _digits_fallback(text: str) -> tuple[phonenumbers.PhoneNumber | None, str | 
         return None, "not a phone number"
 
 
+_DOUBLE_CC_RE = re.compile(r"^\s*\+\s*1[\s.\-]*(\+\s*\d.*)$")
+
+
+@lru_cache(maxsize=1000)
+def _area_code_in_use(npa: str) -> bool:
+    """Whether any number in this North American area code can exist (US, territories or Canada…)."""
+    if not re.fullmatch(r"[2-9]\d\d", npa):
+        return False
+    for nxx in range(200, 1000):
+        if phonenumbers.is_valid_number(phonenumbers.PhoneNumber(country_code=1, national_number=int(f"{npa}{nxx}4567"))):
+            return True
+    return False
+
+
+def _foreign_reason(num: phonenumbers.PhoneNumber) -> str:
+    """'not a US number — Canada (area code 514, Quebec)' / 'not a US number — Peru (+51, Pasco)'."""
+    country = _geo.country_name_for_number(num, "en") or phonenumbers.region_code_for_number(num) or "another country"
+    place = _geo.description_for_number(num, "en")
+    place = "" if place == country else place
+    if num.country_code == 1:
+        detail = f"area code {str(num.national_number)[:3]}" + (f", {place}" if place else "")
+    else:
+        detail = f"+{num.country_code}" + (f", {place}" if place else "")
+    return f"not a US number — {country} ({detail})"
+
+
 @lru_cache(maxsize=200_000)
 def _parse_phone(value: str, region: str, countries: tuple[str, ...], fmt: str) -> tuple[str, str | None]:
+    # "+1 +51 63 171059": a system put +1 in front of a number that already had a country code.
+    m = _DOUBLE_CC_RE.match(unicodedata.normalize("NFKC", value))
+    if m:
+        out, err = _parse_phone(m.group(1), region, countries, fmt)
+        if err is None:
+            return out, None
+        if err.startswith("not a US number"):
+            return "", err + " — the file put +1 in front of its own country code"
+        try:
+            cc = phonenumbers.parse(m.group(1), None).country_code
+        except phonenumbers.NumberParseException:
+            cc = None
+        return "", ("has two country codes (+1 and " + (f"+{cc}" if cc else "another") + ") and isn't a valid "
+                    "number either way")
     prepped = _prep_phone(value)
     fixed, err = _fix_numeric_artifacts(prepped)
     if err:
@@ -192,11 +235,11 @@ def _parse_phone(value: str, region: str, countries: tuple[str, ...], fmt: str) 
             continue
         cc = phonenumbers.region_code_for_number(num)
         if countries and cc not in countries:
-            foreign = foreign or (cc, num.country_code)
+            foreign = foreign or num
             continue
         return _format_phone(num, fmt), None
     if foreign:
-        return "", f"not a US number ({foreign[0]}, +{foreign[1]})"
+        return "", _foreign_reason(foreign)
     digits = re.sub(r"\D", "", _EXT_RE.sub("", fixed))
     if len(digits) == 7:
         return "", "missing area code (only 7 digits)"
@@ -204,6 +247,11 @@ def _parse_phone(value: str, region: str, countries: tuple[str, ...], fmt: str) 
         return "", f"too few digits ({len(digits)})"
     if len(digits) > 11 and len(candidates) == 1:
         return "", f"too many digits ({len(digits)})"
+    if len(digits) == 10 or (len(digits) == 11 and digits[0] == "1"):
+        npa, nxx = digits[-10:-7], digits[-7:-4]
+        if not _area_code_in_use(npa):
+            return "", f"not a real US number (area code {npa} isn't in use)"
+        return "", f"not a real US number ({nxx} isn't a working exchange in area code {npa})"
     return "", "not a real US number (area code or exchange doesn't exist)"
 
 
