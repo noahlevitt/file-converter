@@ -95,6 +95,7 @@ def convert(
     row_numbers: list[int] | None = None,
     overrides: dict[str, dict[str, str]] | None = None,
     progress: ProgressFn | None = None,
+    timezone: str | None = None,
 ) -> ConversionResult:
     """Convert a source DataFrame (text columns) into the target schema.
 
@@ -102,6 +103,8 @@ def convert(
     overrides: optional {field_name: {raw_value: final_output_value}} — user-approved repairs. A raw value
                listed here skips normalization and outputs the approved value (already validated).
     progress: optional callback(fraction, stage) called regularly; raising from it aborts the conversion.
+    timezone: IANA zone for this import (e.g. America/New_York). Times in the file that carry a zone, and Unix
+              timestamps, are converted to it; times without a zone are kept as written.
     """
     mapping = mapping.normalized(schema, list(df.columns))
     overrides = overrides or {}
@@ -143,6 +146,8 @@ def convert(
         fixes = overrides.get(f.name, {})
         cleaned = [N.clean_text(v) for v in raw]
         ctx = N.prepare(f, [v for i, v in enumerate(cleaned) if not blank[i]], params)
+        if timezone:
+            ctx["tz"] = timezone
         passthrough = fm.transform in ("copy", "coalesce")
 
         cache: dict[str, tuple[str, str | None]] = {}
@@ -300,10 +305,11 @@ def _fmt_issue(schema: TargetSchema, x: RowIssue) -> str:
     return f"{header}: {x.reason}" + (f" ('{x.value[:40]}')" if x.value else "")
 
 
-def preview_values(df: pd.DataFrame, schema: TargetSchema, mapping: Mapping, limit: int = 3) -> dict[str, str]:
+def preview_values(df: pd.DataFrame, schema: TargetSchema, mapping: Mapping, limit: int = 3,
+                   timezone: str | None = None) -> dict[str, str]:
     """Return a short sample of converted output per field for the mapping review screen."""
     head = df.head(200)
-    res = convert(head, schema, mapping)
+    res = convert(head, schema, mapping, timezone=timezone)
     out = {}
     for f in schema.fields:
         fm = mapping.get(f.name)
