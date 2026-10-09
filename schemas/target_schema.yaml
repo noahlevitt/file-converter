@@ -1,0 +1,125 @@
+# ---------------------------------------------------------------------------
+# TARGET SCHEMA — PLACEHOLDER
+# Replace the fields below with the real import format once it is provided.
+# Every part of the tool (auto-mapping, Claude prompts, validation, output file)
+# reads from this file; no code changes are needed when it changes.
+#
+# Field attributes:
+#   name          internal id (snake_case) — used in templates and dedupe keys
+#   header        exact column header written to the output file
+#   type          string | phone | date | datetime | email | zip | state |
+#                 integer | decimal | boolean | enum
+#   required      true → rows missing/invalid in this field are rejected (bad rows)
+#   format        date/datetime: strftime pattern, e.g. "%m/%d/%Y"
+#                 phone: E164 (+15165550100) | digits10 (5165550100) |
+#                        digits11 (15165550100) | national ((516) 555-0100) |
+#                        dashed (516-555-0100)
+#                 zip: zip5 | zip5_4
+#   on_invalid    reject | blank  (default: reject if required, blank otherwise)
+#   max_length, truncate, case (none|upper|lower|title|name), allowed_values,
+#   default, countries (phone), true_value / false_value (boolean)
+#   synonyms      other header names that mean this field (improves auto-mapping)
+# ---------------------------------------------------------------------------
+
+name: Contact Import (PLACEHOLDER)
+version: "0.1"
+description: Placeholder contact schema used until the real import schema is supplied.
+
+output:
+  format: csv          # csv | xlsx
+  delimiter: ","
+  encoding: utf-8
+  include_header: true
+  quote_all: false
+  line_terminator: "\n"
+
+# Rows count as duplicates only when ALL keys match.
+# Same phone + different signup date = NOT a duplicate (both rows import).
+dedupe:
+  keys: [phone, signup_date]
+  keep: first
+
+fields:
+  - name: phone
+    header: Phone
+    type: phone
+    required: true
+    format: E164
+    countries: [US]
+    description: Mobile phone number that receives texts
+    synonyms: [mobile, mobile phone, mobile number, cell, cell phone, cell number, phone number,
+               telephone, tel, contact number, sms number, primary phone, "phone #", "cell #"]
+
+  - name: first_name
+    header: First Name
+    type: string
+    case: name
+    max_length: 50
+    truncate: true
+    synonyms: [first, fname, given name, first nm, customer first name]
+
+  - name: last_name
+    header: Last Name
+    type: string
+    case: name
+    max_length: 50
+    truncate: true
+    synonyms: [last, lname, surname, family name, last nm, customer last name]
+
+  - name: email
+    header: Email
+    type: email
+    synonyms: [email address, e-mail, e mail, mail, customer email]
+
+  - name: birthday
+    header: Birthday
+    type: date
+    format: "%m/%d/%Y"
+    synonyms: [birth date, birthdate, dob, date of birth, bday]
+
+  - name: signup_date
+    header: Signup Date
+    type: date
+    format: "%m/%d/%Y"
+    description: Date the contact joined / subscribed / first visited
+    synonyms: [join date, joined, date joined, subscribed, subscribe date, opt in date, created,
+               created at, date added, signup, sign up date, registration date, first visit]
+
+  - name: address1
+    header: Address 1
+    type: string
+    max_length: 100
+    truncate: true
+    synonyms: [address, street, street address, address line 1, addr1, mailing address]
+
+  - name: address2
+    header: Address 2
+    type: string
+    max_length: 100
+    truncate: true
+    synonyms: [address line 2, addr2, apt, suite, unit, apartment]
+
+  - name: city
+    header: City
+    type: string
+    case: title
+    max_length: 50
+    synonyms: [town, municipality, locality]
+
+  - name: state
+    header: State
+    type: state
+    synonyms: [st, province, region, state code]
+
+  - name: zip
+    header: Zip
+    type: zip
+    format: zip5
+    synonyms: [zip code, zipcode, postal code, postal, postcode, zip5]
+
+  - name: notes
+    header: Notes
+    type: string
+    max_length: 500
+    truncate: true
+    synonyms: [note, comments, comment, remarks]
