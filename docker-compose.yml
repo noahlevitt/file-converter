@@ -1,0 +1,11 @@
+services:
+  app:
+    build: .
+    container_name: file-converter
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8501:8501"          # put a reverse proxy with HTTPS in front (see README) before exposing publicly
+    volumes:
+      - ./data:/app/data                 # users, templates, job history (SQLite)
+      - ./schemas:/app/schemas:ro        # target schema — edit on the host, picked up automatically
