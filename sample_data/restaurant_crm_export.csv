@@ -1,0 +1,9 @@
+Customer Name,Mobile,Email,Opt-In Status,Last Visit,Last Order Total,Total Visits,Last Call,Last Text Received,Last Campaign Sent,Last Reward Redeemed,Birthday,Anniversary,Created
+Maria Lopez,(516) 555-0100,maria@example.com,Yes,10/05/2026 7:42 PM,$38.50,12,10/01/2026 12:15 PM,10/04/2026 6:01 PM,10/03/2026 11:00 AM,09/28/2026 8:30 PM,09/12,06/20/2015,2024-01-15
+Tom Becker,+1 631-555-0101,tom@example.com,No,2026-10-03 18:15:00,$12.00,3,,,2026-10-03 11:00:00,,Mar 3,,2025-05-02
+Aisha Khan,917.555.0123,aisha@example.com,true,Oct 2 2026 1:05pm,$64.20,25,,10/02/2026 1:30 PM,10/03/2026 11:00 AM,10/02/2026 1:10 PM,1985-07-04,,2023-11-30
+Maria Lopez,(516) 555-0100,maria@example.com,Yes,10/05/2026 7:42 PM,$38.50,12,10/01/2026 12:15 PM,10/04/2026 6:01 PM,10/03/2026 11:00 AM,09/28/2026 8:30 PM,09/12,06/20/2015,2024-01-15
+Maria Lopez,516-555-0100,maria@example.com,Yes,10/07/2026 8:10 PM,$22.00,13,10/01/2026 12:15 PM,10/04/2026 6:01 PM,10/03/2026 11:00 AM,09/28/2026 8:30 PM,09/12,06/20/2015,2024-01-15
+No Phone Guest,,nophone@example.com,Yes,10/06/2026 9:00 PM,$15.00,1,,,,,,,2026-10-06
+Short Number,555-0199,short@example.com,,10/06/2026 9:15 PM,$9.99,1,,,,,02/30,,2026-10-06
+Daniel Cho,6315550188,,No,0000-00-00 00:00:00,$0.00,0,,,,,September 12th,12/31,2026-10-07
