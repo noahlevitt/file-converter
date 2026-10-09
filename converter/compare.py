@@ -55,7 +55,7 @@ class ColumnPlan:
     unused: set[str]
     feeds: dict[str, list[str]]        # source column -> target headers it feeds
     origin: dict[str, str]             # target field name -> short "from …" description
-    each_field: str = ""               # field using 'One row per value' (one row per different number), if any
+    each_field: str = ""               # field using 'One row per phone number' (one row per different number), if any
     each_sources: tuple[str, ...] = ()
 
 
