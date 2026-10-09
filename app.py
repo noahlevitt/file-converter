@@ -1,5 +1,7 @@
 """Import File Converter — internal web app.
 
+Pages: New import · Imports (tracker, progress, results, side-by-side comparison) · Templates · Target format · Users
+
 Run locally:   streamlit run app.py
 Run on server: docker compose up -d   (see README.md)
 """
@@ -17,19 +19,22 @@ import streamlit as st
 from converter import __version__
 from converter.ai import AIError
 from converter.auth import logout, require_login
+from converter.compare import (FILTERS, build_compare_html, column_plan, comparison_xlsx, field_change_summary,
+                               filter_rows, status_counts)
 from converter.config import get_settings
 from converter.editor import FROM_LABEL, LABELS, OPTION_HELP, apply_row_edit, option_text, row_problem
-from converter.engine import ConversionResult, convert, preview_values
+from converter.engine import preview_values
+from converter.jobs import ImportRunner
 from converter.mapping import Mapping, profile_columns
-from converter.output import (output_filename, rejects_filename, timestamp, write_output, write_rejects,
-                              write_summary)
 from converter.reader import SUPPORTED_EXTENSIONS, ReadError, read_file
 from converter.schema import TargetSchema, load_schema
 from converter.services import initial_mapping, make_assistant, merge, validate_repairs
-from converter.storage import Store
+from converter.storage import ImportRecord, Store
+from converter.ui_format import fmt_dt, fmt_duration, fmt_eta, fmt_size, status_color, status_text
 
 APP_TITLE = os.getenv("APP_TITLE", "Import File Converter")
 settings = get_settings()
+TZ = settings.timezone
 
 st.set_page_config(page_title=APP_TITLE, page_icon="🔄", layout="wide")
 
@@ -38,12 +43,17 @@ COL_PREVIEW, COL_CHECK, COL_BY, COL_WHY = "Sample output", "Check", "Mapped by",
 
 
 # ---------------------------------------------------------------------------
-# Shared resources
+# Shared resources (one per server process)
 # ---------------------------------------------------------------------------
 
 @st.cache_resource
 def get_store() -> Store:
     return Store(settings.db_path)
+
+
+@st.cache_resource
+def get_runner() -> ImportRunner:
+    return ImportRunner(get_store(), workers=settings.import_workers, retention_days=settings.file_retention_days)
 
 
 @st.cache_resource
@@ -61,7 +71,14 @@ def get_assistant():
     return make_assistant(settings)
 
 
+@st.cache_data(max_entries=6, show_spinner=False)
+def load_import_tables(import_id: int, folder: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    d = Path(folder)
+    return pd.read_parquet(d / "source.parquet"), pd.read_parquet(d / "audit.parquet")
+
+
 store = get_store()
+runner = get_runner()
 try:
     schema = get_schema()
 except Exception as exc:  # bad YAML should be obvious, not a stack trace
@@ -76,11 +93,11 @@ ss.setdefault("uploader_version", 0)
 
 
 # ---------------------------------------------------------------------------
-# State helpers
+# New import: state helpers
 # ---------------------------------------------------------------------------
 
-FILE_KEYS = ["file_sig", "file_name", "file_bytes", "read", "profiles", "mapping", "map_meta", "result",
-             "overrides", "pending", "repair_proposals", "edit_errors", "ai_used", "template_name", "last_outputs"]
+FILE_KEYS = ["file_sig", "file_name", "file_bytes", "read", "profiles", "mapping", "map_meta", "pending",
+             "edit_errors", "ai_used", "template_name", "read_error"]
 
 
 def reset_file_state() -> None:
@@ -105,10 +122,7 @@ def load_and_map(sheet: str | None = None, header_row: int | None | str = "auto"
                    "template": sug.template.name if sug.template else None, "similarity": sug.similarity}
     ss.template_name = sug.template.name if (sug.template and sug.similarity == 1.0) else Path(ss.file_name).stem
     ss.ai_used = sug.source == "rules+ai"
-    ss.result = None
-    ss.overrides = {}
     ss.pending = None
-    ss.repair_proposals = None
     ss.edit_errors = []
     ss.editor_version += 1
 
@@ -119,9 +133,9 @@ def template_key() -> str:
 
 def origin_label(fm) -> str:
     names = {"template": "Template", "rule": "Rules", "ai": "Claude", "user": "You", "": ""}
-    label = names.get(fm.origin, fm.origin)
     if fm.transform == "none":
         return ""
+    label = names.get(fm.origin, fm.origin)
     return f"{label} · {fm.confidence}" if fm.confidence else label
 
 
@@ -136,36 +150,22 @@ def on_map_edit(key: str) -> None:
             errors.append(f"{f.header}: {err}")
     ss.mapping = mapping  # incomplete rows stay visible and are flagged in the Check column
     ss.edit_errors = errors
-    ss.result = None
     ss.editor_version += 1
 
 
-def mapping_diff(before: Mapping, changes: Mapping) -> pd.DataFrame:
+def mapping_diff(sch: TargetSchema, before: Mapping, changes: Mapping) -> pd.DataFrame:
     rows = []
     for name, fm in changes.fields.items():
         old = before.get(name)
         if (old.transform, old.sources, old.params) == (fm.transform, fm.sources, fm.params):
             continue
-        rows.append({"Field": schema.field(name).header, "Before": old.summary(), "After": fm.summary(),
+        rows.append({"Field": sch.field(name).header, "Before": old.summary(), "After": fm.summary(),
                      "Why": fm.reason})
     return pd.DataFrame(rows, columns=["Field", "Before", "After", "Why"])
 
 
-def run_conversion() -> None:
+def start_import() -> int:
     rr = ss.read
-    rows = [rr.excel_row_number(i) for i in range(len(rr.df))]
-    with st.spinner(f"Converting {len(rr.df):,} rows…"):
-        result = convert(rr.df, schema, ss.mapping, row_numbers=rows, overrides=ss.get("overrides") or {})
-    ss.result = result
-    ts = timestamp()
-    ss.last_outputs = {
-        "output_name": output_filename(schema, ss.file_name, ts),
-        "output_bytes": write_output(result.output, schema),
-        "rejects_name": rejects_filename(ss.file_name, len(result.rejects), ts),
-        "rejects_bytes": write_rejects(result),
-        "summary_name": f"{Path(ss.file_name).stem}_SUMMARY_{ts}.txt",
-        "summary_bytes": write_summary(result, schema, ss.file_name, user["username"], __version__),
-    }
     tpl_name = None
     typed = (ss.get(template_key()) or "").strip()
     if ss.get("remember_mapping", True) and typed:
@@ -173,18 +173,42 @@ def run_conversion() -> None:
         store.save_template(tpl_name, list(rr.df.columns), ss.mapping,
                             {"sheet": rr.sheet, "header_row": rr.header_row}, schema.name, user["username"])
         store.mark_template_used(tpl_name)
-    store.log_job(user["username"], ss.file_name, tpl_name, schema.label, result.summary_dict(),
-                  bool(ss.get("ai_used")))
+    import_id = store.create_import(
+        username=user["username"], filename=ss.file_name, data=ss.file_bytes, schema_label=schema.label,
+        schema_json=schema.model_dump_json(), mapping=ss.mapping,
+        read_options={"sheet": rr.sheet, "header_row": rr.header_row}, template_name=tpl_name,
+        ai_used=bool(ss.get("ai_used")))
+    runner.submit(import_id)
+    return import_id
+
+
+def rerun_import(rec: ImportRecord, overrides: dict | None = None, ai_used: bool | None = None) -> int:
+    """Start a new import from a previous one's original file and mapping, with the current target format."""
+    data = store.source_path(rec).read_bytes()
+    merged = dict(rec.overrides)
+    for k, v in (overrides or {}).items():
+        merged.setdefault(k, {}).update(v)
+    new_id = store.create_import(
+        username=user["username"], filename=rec.filename, data=data, schema_label=schema.label,
+        schema_json=schema.model_dump_json(), mapping=rec.mapping, read_options=rec.read_options,
+        overrides=merged, template_name=rec.template_name,
+        ai_used=rec.ai_used if ai_used is None else ai_used, parent_id=rec.id)
+    runner.submit(new_id)
+    return new_id
+
+
+def open_import(import_id: int) -> None:
+    st.switch_page(PAGE_IMPORTS, query_params={"id": str(import_id)})
 
 
 # ---------------------------------------------------------------------------
-# Pages
+# Page: New import
 # ---------------------------------------------------------------------------
 
-def page_convert() -> None:
-    st.header("Convert a file")
-    st.caption(f"Target format: **{schema.label}** · one file at a time · "
-               f"supported: {', '.join(e.lstrip('.') for e in SUPPORTED_EXTENSIONS)}")
+def page_new_import() -> None:
+    st.header("New import")
+    st.caption(f"Target format: **{schema.label}** · supported files: "
+               f"{', '.join(e.lstrip('.') for e in SUPPORTED_EXTENSIONS)}")
 
     top = st.columns([4, 1], vertical_alignment="bottom")
     with top[0]:
@@ -208,8 +232,9 @@ def page_convert() -> None:
         load_and_map()
 
     if not ss.get("file_name"):
-        st.info("Upload a CSV or Excel file to begin. Columns are matched automatically; you review the mapping "
-                "before anything is converted.")
+        st.info("Upload a CSV or Excel file. Columns are matched automatically and you review the mapping; the "
+                "import then runs in the background and appears under **Imports**, where you can follow its "
+                "progress and compare the original and converted files side by side.")
         return
     if ss.get("read_error"):
         st.error(ss.read_error)
@@ -219,7 +244,7 @@ def page_convert() -> None:
 
     # ---------------- Step 1: file
     st.subheader("1 · File")
-    info = [f"**{ss.file_name}**", f"{len(df):,} rows", f"{len(df.columns)} columns"]
+    info = [f"**{ss.file_name}**", fmt_size(len(ss.file_bytes)), f"{len(df):,} rows", f"{len(df.columns)} columns"]
     if rr.sheet:
         info.append(f"sheet '{rr.sheet}'")
     if rr.encoding:
@@ -251,43 +276,38 @@ def page_convert() -> None:
     if meta["source"] == "template":
         st.success(f"Recognised this layout — using saved template **{meta['template']}**.")
     elif meta["source"] == "rules+ai":
-        st.info("Columns matched by rules and Claude. Check the rows marked low/medium before converting.")
+        st.info("Columns matched by rules and Claude. Check the rows marked low/medium before importing.")
     else:
         st.info("Columns matched by rules" + ("" if assistant else " (Claude is not configured)") +
-                ". Check every mapping before converting.")
+                ". Check every mapping before importing.")
     for n in meta["notes"]:
-        if n.startswith("Matched saved template"):
-            continue
-        st.caption("ℹ️ " + n)
+        if not n.startswith("Matched saved template"):
+            st.caption("ℹ️ " + n)
 
     mapping: Mapping = ss.mapping
     preview = preview_values(df, schema, mapping)
     grid = pd.DataFrame([
         {
-            COL_FIELD: f.header + (" *" if f.required else ""),
+            COL_FIELD: f.header + (" *" if f.required else "") + (" 🔒" if f.fixed_blank else ""),
             COL_TYPE: f.type,
             COL_HOW: LABELS[mapping.get(f.name).transform],
             COL_SRC: mapping.get(f.name).sources,
             COL_OPT: option_text(mapping.get(f.name), f),
             COL_PREVIEW: preview.get(f.name, ""),
             COL_CHECK: ("⚠ " + p) if (p := row_problem(schema, mapping, f.name)) else "",
-            COL_BY: origin_label(mapping.get(f.name)),
-            COL_WHY: mapping.get(f.name).reason,
+            COL_BY: "Fixed" if f.fixed_blank else origin_label(mapping.get(f.name)),
+            COL_WHY: "Always blank — required by the import format; can't be changed" if f.fixed_blank
+            else mapping.get(f.name).reason,
         }
         for f in schema.fields
     ])
     key = f"map_editor_{ss.editor_version}"
     st.data_editor(
-        grid,
-        key=key,
-        on_change=on_map_edit,
-        args=(key,),
-        hide_index=True,
-        num_rows="fixed",
-        width="stretch",
+        grid, key=key, on_change=on_map_edit, args=(key,), hide_index=True, num_rows="fixed", width="stretch",
         disabled=[COL_FIELD, COL_TYPE, COL_PREVIEW, COL_CHECK, COL_BY, COL_WHY],
         column_config={
-            COL_FIELD: st.column_config.TextColumn(help="Target field. * = required.", pinned=True),
+            COL_FIELD: st.column_config.TextColumn(help="Target field. * = required. 🔒 = always blank (locked).",
+                                                   pinned=True),
             COL_HOW: st.column_config.SelectboxColumn(options=list(FROM_LABEL), required=True,
                                                       help="How the value is built from the source column(s)."),
             COL_SRC: st.column_config.MultiselectColumn(options=list(df.columns),
@@ -300,12 +320,10 @@ def page_convert() -> None:
     )
     for e in ss.get("edit_errors") or []:
         st.error(e)
-
     unused = [c for c in df.columns if c not in mapping.used_sources()]
     if unused:
         st.caption("Columns not imported: " + ", ".join(f"`{c}`" for c in unused))
 
-    # Claude: instructions + re-map
     with st.container(border=True):
         st.markdown("**Instructions for Claude**")
         if not assistant:
@@ -316,9 +334,8 @@ def page_convert() -> None:
                 "Tell Claude how to treat specific columns",
                 placeholder="e.g. 'Cust Ph' is the phone number · Join Date is day-first · put 'VIP Level' into "
                             "Notes · split 'Contact' into first and last name",
-                label_visibility="collapsed", height=80, disabled=not assistant,
-            )
-            b1, b2 = st.columns([1, 1])
+                label_visibility="collapsed", height=80, disabled=not assistant)
+            b1, b2 = st.columns(2)
             ask = b1.form_submit_button("Apply instruction", type="primary", disabled=not assistant,
                                         width="stretch")
             remap = b2.form_submit_button("Re-check whole mapping with Claude", disabled=not assistant,
@@ -327,21 +344,20 @@ def page_convert() -> None:
             try:
                 with st.spinner("Claude is reading your instruction…"):
                     res = assistant.apply_instruction(schema, ss.profiles, mapping, instruction)
-                ss.pending = {"kind": "instruction", "changes": res.mapping, "notes": res.notes,
-                              "dropped": res.dropped}
+                ss.pending = {"changes": res.mapping, "notes": res.notes, "dropped": res.dropped}
             except AIError as exc:
                 st.error(str(exc))
         if remap:
             try:
                 with st.spinner("Claude is reviewing the mapping…"):
                     res = assistant.propose_mapping(schema, ss.profiles, current=mapping)
-                ss.pending = {"kind": "remap", "changes": res.mapping, "notes": res.notes, "dropped": res.dropped}
+                ss.pending = {"changes": res.mapping, "notes": res.notes, "dropped": res.dropped}
             except AIError as exc:
                 st.error(str(exc))
 
         pending = ss.get("pending")
         if pending:
-            diff = mapping_diff(mapping, pending["changes"])
+            diff = mapping_diff(schema, mapping, pending["changes"])
             if pending["notes"]:
                 st.markdown(f"**Claude:** {pending['notes']}")
             if pending["dropped"]:
@@ -360,119 +376,369 @@ def page_convert() -> None:
                     ss.mapping = merge(mapping, changed).normalized(schema, list(df.columns))
                     ss.ai_used = True
                     ss.pending = None
-                    ss.result = None
                     ss.editor_version += 1
                     st.rerun()
                 if a2.button("Discard", width="stretch"):
                     ss.pending = None
                     st.rerun()
 
-    # ---------------- Step 3: convert
-    st.subheader("3 · Convert")
+    # ---------------- Step 3: start
+    st.subheader("3 · Start import")
     problems = ss.mapping.problems(schema)
     if problems:
-        st.warning("Fix before converting: " + "; ".join(f"**{schema.field(k).header}** — {v}"
-                                                         for k, v in problems.items()))
+        st.warning("Fix before importing: " + "; ".join(f"**{schema.field(k).header}** — {v}"
+                                                        for k, v in problems.items()))
     c1, c2, c3 = st.columns([1.2, 2.5, 1.3], vertical_alignment="bottom")
     c1.checkbox("Remember this mapping", value=True, key="remember_mapping",
                 help="Saves the mapping as a template; the next file with the same columns maps instantly.")
     c2.text_input("Template name", value=ss.get("template_name") or "", key=template_key(),
                   disabled=not ss.get("remember_mapping", True))
-    if c3.button("Convert file", type="primary", disabled=bool(problems), width="stretch"):
-        run_conversion()
+    if c3.button("Start import", type="primary", disabled=bool(problems), width="stretch"):
+        import_id = start_import()
+        reset_file_state()
+        ss.uploader_version += 1
+        open_import(import_id)
 
-    result: ConversionResult | None = ss.get("result")
-    if result is not None:
-        show_result(result)
+
+# ---------------------------------------------------------------------------
+# Page: Imports (list + detail)
+# ---------------------------------------------------------------------------
+
+def page_imports() -> None:
+    qid = st.query_params.get("id")
+    if qid and str(qid).isdigit():
+        page_import_detail(int(qid))
+        return
+
+    st.header("Imports")
+    f1, f2, f3, f4 = st.columns([1.2, 2.6, 2, 0.8], vertical_alignment="bottom")
+    who = f1.segmented_control("Show", ["Everyone", "Mine"], default="Everyone", key="imp_who")
+    statuses = f2.pills("Status", ["running", "queued", "completed", "failed", "cancelled", "interrupted"],
+                        selection_mode="multi", key="imp_status",
+                        format_func=lambda s: s.capitalize())
+    search = f3.text_input("Search", placeholder="file name, template or #id", key="imp_search")
+    if f4.button("↻ Refresh", width="stretch"):
+        st.rerun()
+
+    active = store.active_imports()
+    live = st.fragment(run_every=1.5 if active else None)(_import_list)
+    live(who == "Mine", list(statuses or []), search, bool(active))
 
 
-def show_result(result: ConversionResult) -> None:
-    out = ss.last_outputs
-    if result.rejected:
-        st.error(f"**{result.rejected:,} bad row{'s' if result.rejected != 1 else ''} were NOT imported.** "
-                 "Download *Rejected rows* to see the reason for each one.  \n" + result.flag_message(), icon="⚠️")
-    elif result.imported == 0:
-        st.error("No rows could be converted. " + result.flag_message())
+def _import_list(mine: bool, statuses: list[str], search: str, polling: bool) -> None:
+    active = store.active_imports()
+    if polling and not active:
+        st.rerun(scope="app")  # everything finished: switch the page back to static mode
+
+    if active:
+        st.markdown(f"**In progress ({len(active)})**")
+        for rec in active:
+            with st.container(border=True):
+                a, b = st.columns([5, 1.2], vertical_alignment="center")
+                with a:
+                    st.markdown(f"**#{rec.id} · {rec.filename}** · {rec.username} · {fmt_size(rec.file_size)}")
+                    pct = int(rec.progress * 100)
+                    if rec.status == "queued":
+                        st.progress(0.0, text=f"Waiting for a free worker · queued {fmt_duration(rec.elapsed())}")
+                    else:
+                        st.progress(rec.progress, text=f"{pct}% · {rec.stage} · {fmt_duration(rec.elapsed())} "
+                                                       f"elapsed · {fmt_eta(rec.eta())} left")
+                with b:
+                    if st.button("Open", key=f"open_{rec.id}", width="stretch"):
+                        open_import(rec.id)
+                    if st.button("Cancel", key=f"cancel_{rec.id}", width="stretch",
+                                 disabled=rec.cancel_requested):
+                        runner.cancel(rec.id)
+                        st.toast(f"Cancelling import #{rec.id}…")
+
+    recs = store.list_imports(limit=500, username=user["username"] if mine else None,
+                              statuses=statuses or None, search=search or None)
+    if not recs:
+        st.info("No imports yet." if not (mine or statuses or search) else "No imports match these filters.")
+        return
+    table = pd.DataFrame([{
+        "#": r.id,
+        "File": r.filename,
+        "By": r.username,
+        "Status": status_text(r),
+        "Progress": r.progress,
+        "Started": fmt_dt(r.started_at or r.created_at, TZ),
+        "Duration": fmt_duration(r.elapsed()),
+        "Rows": r.total_rows,
+        "Converted": r.imported,
+        "Bad rows": r.rejected,
+        "Duplicates": r.duplicates,
+        "Template": r.template_name or "",
+    } for r in recs])
+    st.caption("Select a row to open the import.")
+    event = st.dataframe(
+        table, hide_index=True, width="stretch", on_select="rerun", selection_mode="single-row",
+        key="imports_table",
+        column_config={
+            "#": st.column_config.NumberColumn(width="small", format="%d"),
+            "Progress": st.column_config.ProgressColumn(min_value=0, max_value=1, format="percent", width="small"),
+            "Rows": st.column_config.NumberColumn(format="localized"),
+            "Converted": st.column_config.NumberColumn(format="localized"),
+            "Bad rows": st.column_config.NumberColumn(format="localized"),
+            "Duplicates": st.column_config.NumberColumn(format="localized"),
+        },
+    )
+    sel = event.selection.rows if event and event.selection else []
+    if sel:
+        open_import(int(table.iloc[sel[0]]["#"]))
+
+
+def page_import_detail(import_id: int) -> None:
+    if st.button("← All imports"):
+        st.query_params.clear()
+        st.rerun()
+    rec = store.get_import(import_id)
+    if rec is None:
+        st.error(f"Import #{import_id} not found.")
+        return
+
+    st.header(f"Import #{rec.id} · {rec.filename}")
+    meta = [f"by **{rec.username}**", f"uploaded {fmt_dt(rec.created_at, TZ)}", fmt_size(rec.file_size),
+            f"target: {rec.schema_label}"]
+    if rec.template_name:
+        meta.append(f"template: {rec.template_name}")
+    if rec.ai_used:
+        meta.append("Claude used")
+    st.caption(" · ".join(meta))
+    if rec.parent_id:
+        if st.button(f"Re-run of import #{rec.parent_id} — open original", type="tertiary"):
+            open_import(rec.parent_id)
+
+    if rec.active:
+        st.fragment(run_every=1)(_live_progress)(import_id)
+        return
+
+    if rec.status in ("failed", "cancelled", "interrupted"):
+        st.badge(rec.status.capitalize(), color=status_color(rec.status))
+        if rec.error:
+            st.error(rec.error)
+        else:
+            st.warning(f"This import was {rec.status}.")
+        _rerun_button(rec)
+        return
+
+    _completed_view(rec)
+
+
+def _live_progress(import_id: int) -> None:
+    rec = store.get_import(import_id)
+    if rec is None or not rec.active:
+        st.rerun(scope="app")
+    st.badge(rec.status.capitalize(), color=status_color(rec.status))
+    if rec.status == "queued":
+        st.progress(0.0, text="Waiting for a free worker…")
     else:
-        st.success("✅ " + result.flag_message())
+        st.progress(rec.progress, text=f"{int(rec.progress * 100)}% · {rec.stage}")
+    m = st.columns(4)
+    m[0].metric("Elapsed", fmt_duration(rec.elapsed()))
+    m[1].metric("Time left", fmt_eta(rec.eta()) if rec.status == "running" else "—")
+    m[2].metric("Started", fmt_dt(rec.started_at, TZ, with_date=False) if rec.started_at else "not yet")
+    m[3].metric("Progress", f"{int(rec.progress * 100)}%")
+    if st.button("Cancel import", disabled=rec.cancel_requested):
+        runner.cancel(rec.id)
+        st.toast("Cancelling…")
+    if rec.cancel_requested:
+        st.caption("Cancelling…")
 
-    m = st.columns(5)
-    m[0].metric("Rows in file", f"{result.total_rows:,}")
-    m[1].metric("Converted", f"{result.imported:,}")
-    m[2].metric("Bad rows", f"{result.rejected:,}")
-    m[3].metric("Duplicates removed", f"{result.duplicates:,}")
-    m[4].metric("Empty rows skipped", f"{result.blank_rows:,}")
 
-    d = st.columns(3)
-    d[0].download_button(f"⬇ Converted file ({result.imported:,} rows)", out["output_bytes"], out["output_name"],
-                         type="primary", width="stretch", on_click="ignore",
-                         disabled=result.imported == 0)
-    d[1].download_button(f"⬇ Rejected rows ({len(result.rejects):,})", out["rejects_bytes"], out["rejects_name"],
-                         mime="text/csv", width="stretch", on_click="ignore", disabled=result.rejects.empty)
-    d[2].download_button("⬇ Summary", out["summary_bytes"], out["summary_name"], mime="text/plain",
-                         width="stretch", on_click="ignore")
+def _rerun_button(rec: ImportRecord) -> None:
+    if rec.files_purged or not store.source_path(rec).exists():
+        st.caption("The original file is no longer stored, so this import can't be re-run.")
+        return
+    if st.button("↻ Re-run this import", help="Runs the same original file and mapping again with the current "
+                                              "target format. Creates a new import."):
+        open_import(rerun_import(rec))
 
-    if result.reason_counts or result.blanked_counts:
-        rows = [{"Problem": r, "Rows": c, "Effect": "row not imported"} for r, c in result.reason_counts.most_common()]
-        rows += [{"Problem": r, "Rows": c, "Effect": "value left blank"} for r, c in result.blanked_counts.most_common()]
-        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
 
-    t1, t2, t3 = st.tabs(["Converted rows", "Rejected & duplicate rows", "Field fill rate"])
-    with t1:
-        st.dataframe(result.output.head(500), hide_index=True, width="stretch")
-        if result.imported > 500:
-            st.caption(f"Showing 500 of {result.imported:,} rows.")
-    with t2:
-        if result.rejects.empty:
+def _completed_view(rec: ImportRecord) -> None:
+    rec_schema = TargetSchema.model_validate_json(rec.schema_json)
+    s = rec.summary
+    if rec.rejected:
+        st.error(f"**{rec.rejected:,} bad row{'s' if rec.rejected != 1 else ''} were NOT imported.** "
+                 "See *Side by side → Bad rows* or download *Rejected rows* for the reason on each row.  \n"
+                 + s.get("message", ""), icon="⚠️")
+    elif not rec.imported:
+        st.error("No rows could be converted. " + s.get("message", ""))
+    else:
+        st.success(s.get("message", "Completed."), icon="✅")
+    for w in s.get("warnings", []):
+        st.caption("ℹ️ File note: " + w)
+
+    m = st.columns(6)
+    m[0].metric("Rows in file", f"{rec.total_rows:,}")
+    m[1].metric("Converted", f"{rec.imported:,}")
+    m[2].metric("Bad rows", f"{rec.rejected:,}")
+    m[3].metric("Duplicates removed", f"{rec.duplicates:,}")
+    m[4].metric("Empty rows", f"{rec.blank_rows:,}")
+    m[5].metric("Took", fmt_duration(rec.elapsed()))
+
+    if rec.files_purged:
+        st.info(f"The files for this import were deleted after {settings.file_retention_days} days. "
+                "The counts above are kept.")
+        return
+
+    # Downloads
+    folder = store.files_root / str(rec.id)
+    d = st.columns(5)
+    out_p = store.file_path(rec, "output")
+    if out_p:
+        d[0].download_button(f"⬇ Converted file ({rec.imported:,})", out_p.read_bytes(), out_p.name, type="primary",
+                             width="stretch", on_click="ignore", disabled=not rec.imported)
+    rej_p = store.file_path(rec, "rejects")
+    if rej_p:
+        n_rej = (rec.rejected or 0) + (rec.duplicates or 0)
+        d[1].download_button(f"⬇ Rejected rows ({n_rej:,})", rej_p.read_bytes(),
+                             rec.files.get("rejects_download", "rejected.csv"), mime="text/csv", width="stretch",
+                             on_click="ignore", disabled=not n_rej)
+    sum_p = store.file_path(rec, "summary")
+    if sum_p:
+        d[2].download_button("⬇ Summary", sum_p.read_bytes(), rec.files.get("summary_download", "summary.txt"),
+                             mime="text/plain", width="stretch", on_click="ignore")
+    src_p = store.source_path(rec)
+    if src_p.exists():
+        d[3].download_button("⬇ Original file", src_p.read_bytes(), rec.filename, width="stretch",
+                             on_click="ignore")
+    xkey = f"cmp_xlsx_{rec.id}"
+    src_df, audit = load_import_tables(rec.id, str(folder))
+    plan = column_plan(rec_schema, rec.mapping, list(src_df.columns))
+    if xkey in ss:
+        d[4].download_button("⬇ Side-by-side (Excel)", ss[xkey], f"{Path(rec.filename).stem}_side_by_side.xlsx",
+                             width="stretch", on_click="ignore")
+    elif d[4].button("Prepare side-by-side Excel", width="stretch"):
+        with st.spinner("Building the side-by-side workbook…"):
+            ss[xkey] = comparison_xlsx(src_df, audit, rec_schema, plan,
+                                       f"Import #{rec.id} — {rec.filename} → {rec.schema_label}")
+        st.rerun()
+
+    tabs = st.tabs(["Side by side", "What changed", "Converted file", "Bad & duplicate rows", "Mapping used"])
+    with tabs[0]:
+        _side_by_side(rec, rec_schema, src_df, audit, plan)
+    with tabs[1]:
+        st.caption("How each target field was produced across all rows of the file.")
+        st.dataframe(field_change_summary(audit, rec_schema, rec.mapping), hide_index=True, width="stretch",
+                     column_config={"Examples": st.column_config.TextColumn(width="large")})
+        reasons = [{"Problem": r, "Rows": c, "Effect": "row not imported"} for r, c in s.get("reasons", {}).items()]
+        reasons += [{"Problem": r, "Rows": c, "Effect": "value left blank"} for r, c in s.get("blanked", {}).items()]
+        if reasons:
+            st.markdown("**Problems found**")
+            st.dataframe(pd.DataFrame(reasons), hide_index=True, width="stretch")
+        fills = s.get("fill_rates", {})
+        if fills:
+            st.markdown("**How full each column is in the converted file**")
+            st.dataframe(pd.DataFrame([{"Field": k, "Filled": v} for k, v in fills.items()]), hide_index=True,
+                         width="stretch", column_config={
+                             "Filled": st.column_config.ProgressColumn(min_value=0, max_value=1, format="percent")})
+    with tabs[2]:
+        imported = audit[audit["_status"] == "imported"]
+        out = pd.DataFrame({f.header: imported[f"out.{f.name}"].values for f in rec_schema.fields})
+        st.caption(f"{len(out):,} rows" + (" · showing the first 1,000" if len(out) > 1000 else ""))
+        st.dataframe(out.head(1000), hide_index=True, width="stretch")
+    with tabs[3]:
+        bad = audit[audit["_status"].isin(["rejected", "duplicate"])]
+        if bad.empty:
             st.caption("None.")
         else:
-            st.dataframe(result.rejects.head(1000), hide_index=True, width="stretch")
-    with t3:
-        st.dataframe(pd.DataFrame([{"Field": k, "Filled": f"{v:.0%}"} for k, v in result.fill_rates.items()]),
-                     hide_index=True, width="stretch")
+            view = pd.concat([
+                pd.DataFrame({"File row": bad["_row"].values, "Status": bad["_status"].str.capitalize().values,
+                              "Reason": bad["_reason"].values}),
+                src_df.loc[bad.index].reset_index(drop=True)], axis=1)
+            st.dataframe(view, hide_index=True, width="stretch",
+                         column_config={"Reason": st.column_config.TextColumn(width="large")})
+    with tabs[4]:
+        st.dataframe(pd.DataFrame([{
+            "Field": f.header, "Built from": rec.mapping.get(f.name).summary(),
+            "Option": option_text(rec.mapping.get(f.name), f), "Mapped by": origin_label(rec.mapping.get(f.name)),
+        } for f in rec_schema.fields]), hide_index=True, width="stretch")
+        n_fix = sum(len(v) for v in rec.overrides.values())
+        if n_fix:
+            st.caption(f"{n_fix} value fix{'es' if n_fix != 1 else ''} approved from Claude suggestions were applied.")
+        st.caption(f"Read options: sheet {rec.read_options.get('sheet') or '—'}, header row "
+                   f"{'none' if rec.read_options.get('header_row') is None else rec.read_options['header_row'] + 1}")
 
-    if result.failed_values and assistant:
-        n_vals = sum(len(v) for v in result.failed_values.values())
-        with st.expander(f"Try to fix {n_vals:,} unconvertible value{'s' if n_vals != 1 else ''} with Claude"):
-            st.caption("Claude only reformats values (e.g. 'Jan 5th 24', '516 5OO 0100'). Every suggestion is "
-                       "re-checked; suggestions that add or change data are refused. Nothing changes until you apply.")
-            if st.button("Suggest fixes"):
-                proposals = {}
-                try:
-                    with st.spinner("Claude is reviewing the values…"):
-                        for fname, values in result.failed_values.items():
-                            f = schema.field(fname)
-                            good = [v for v in result.output[f.header].tolist() if v][:5]
-                            pairs, _ = assistant.repair_values(f, values, good)
-                            accepted, rejected = validate_repairs(schema, ss.mapping, fname, pairs)
-                            fixed = set(accepted) | {r[0] for r in rejected}
-                            proposals[fname] = {"accepted": accepted, "rejected": rejected,
-                                                "unfixable": [v for v in values if v not in fixed]}
-                    ss.repair_proposals = proposals
-                except AIError as exc:
-                    st.error(str(exc))
-            props = ss.get("repair_proposals")
-            if props:
-                rows = []
-                for fname, p in props.items():
-                    h = schema.field(fname).header
-                    rows += [{"Field": h, "Original": a, "Fix": b, "Status": "✓ will apply"}
-                             for a, b in p["accepted"].items()]
-                    rows += [{"Field": h, "Original": a, "Fix": b, "Status": f"✗ refused: {why}"}
-                             for a, b, why in p["rejected"]]
-                    rows += [{"Field": h, "Original": a, "Fix": "", "Status": "can't be fixed"} for a in p["unfixable"]]
-                st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
-                n_ok = sum(len(p["accepted"]) for p in props.values())
-                if n_ok and st.button(f"Apply {n_ok} fix{'es' if n_ok != 1 else ''} and re-convert", type="primary"):
-                    overrides = ss.get("overrides") or {}
-                    for fname, p in props.items():
-                        overrides.setdefault(fname, {}).update(p["accepted"])
-                    ss.overrides = overrides
-                    ss.ai_used = True
-                    ss.repair_proposals = None
-                    run_conversion()
-                    st.rerun()
+    st.divider()
+    a, b = st.columns([1, 3])
+    with a:
+        _rerun_button(rec)
+    with b:
+        _repair_section(rec, rec_schema, audit)
 
+
+def _side_by_side(rec: ImportRecord, rec_schema: TargetSchema, src_df: pd.DataFrame, audit: pd.DataFrame,
+                  plan) -> None:
+    counts = status_counts(audit, rec_schema)
+    c1, c2 = st.columns([3.2, 1.6], vertical_alignment="bottom")
+    mode = c1.segmented_control(
+        "Show", [k for k in FILTERS if counts.get(k, 0) or k in ("all", "changed")],
+        format_func=lambda k: f"{FILTERS[k]} ({counts.get(k, 0):,})", default="all", key=f"cmp_mode_{rec.id}")
+    search = c2.text_input("Find", placeholder="value or row number", key=f"cmp_q_{rec.id}")
+    rows = filter_rows(audit, src_df, rec_schema, mode or "all", search)
+
+    o1, o2, o3 = st.columns([1.6, 1, 2.4], vertical_alignment="bottom")
+    show_was = o1.toggle("Show original under changed values", value=True, key=f"cmp_was_{rec.id}")
+    per_page = o2.selectbox("Rows per page", [50, 100, 250], index=1, key=f"cmp_pp_{rec.id}")
+    pages = max(1, -(-len(rows) // per_page))
+    page = o3.number_input(f"Page (of {pages:,})", min_value=1, max_value=pages, value=1, step=1,
+                           key=f"cmp_page_{rec.id}_{mode}_{search}_{per_page}")
+    start = (page - 1) * per_page
+    page_rows = rows[start:start + per_page]
+    st.caption(f"Showing rows {start + 1 if page_rows else 0:,}–{start + len(page_rows):,} of {len(rows):,}. "
+               "Left: the original file exactly as uploaded. Right: what was produced for the import. "
+               "Headers show where each column went.")
+    st.html(build_compare_html(src_df, audit, page_rows, rec_schema, plan, file_label=f"Original · {rec.filename}",
+                               target_label=f"Converted · {rec.schema_label}", show_was=show_was))
+
+
+def _repair_section(rec: ImportRecord, rec_schema: TargetSchema, audit: pd.DataFrame) -> None:
+    failed = {k: v for k, v in rec.summary.get("failed_values", {}).items() if k in rec_schema.field_names}
+    if not failed or not assistant:
+        return
+    n_vals = sum(len(v) for v in failed.values())
+    pkey = f"repairs_{rec.id}"
+    with st.expander(f"Try to fix {n_vals:,} unconvertible value{'s' if n_vals != 1 else ''} with Claude"):
+        st.caption("Claude only reformats values (e.g. 'Jan 5th 24', '516 5OO 0100'). Every suggestion is re-checked "
+                   "and suggestions that add or change data are refused. Approved fixes run as a new import.")
+        if st.button("Suggest fixes", key=f"suggest_{rec.id}"):
+            proposals = {}
+            try:
+                with st.spinner("Claude is reviewing the values…"):
+                    for fname, values in failed.items():
+                        f = rec_schema.field(fname)
+                        good = [v for v in audit.loc[audit["_status"] == "imported", f"out.{fname}"].tolist() if v][:5]
+                        pairs, _ = assistant.repair_values(f, values, good)
+                        accepted, rejected = validate_repairs(rec_schema, rec.mapping, fname, pairs)
+                        fixed = set(accepted) | {r[0] for r in rejected}
+                        proposals[fname] = {"accepted": accepted, "rejected": rejected,
+                                            "unfixable": [v for v in values if v not in fixed]}
+                ss[pkey] = proposals
+            except AIError as exc:
+                st.error(str(exc))
+        props = ss.get(pkey)
+        if props:
+            rows = []
+            for fname, p in props.items():
+                h = rec_schema.field(fname).header
+                rows += [{"Field": h, "Original": a, "Fix": b, "Status": "✓ will apply"} for a, b in p["accepted"].items()]
+                rows += [{"Field": h, "Original": a, "Fix": b, "Status": f"✗ refused: {why}"}
+                         for a, b, why in p["rejected"]]
+                rows += [{"Field": h, "Original": a, "Fix": "", "Status": "can't be fixed"} for a in p["unfixable"]]
+            st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+            n_ok = sum(len(p["accepted"]) for p in props.values())
+            if n_ok and st.button(f"Apply {n_ok} fix{'es' if n_ok != 1 else ''} and re-run", type="primary",
+                                  key=f"apply_{rec.id}"):
+                new_id = rerun_import(rec, overrides={k: p["accepted"] for k, p in props.items() if p["accepted"]},
+                                      ai_used=True)
+                ss.pop(pkey, None)
+                open_import(new_id)
+
+
+# ---------------------------------------------------------------------------
+# Pages: templates, target format, users
+# ---------------------------------------------------------------------------
 
 def page_templates() -> None:
     st.header("Saved templates")
@@ -480,11 +746,11 @@ def page_templates() -> None:
                "columns is uploaded, its template is applied automatically.")
     templates = store.list_templates(schema.name)
     if not templates:
-        st.info("No templates yet. They are saved when you convert a file with 'Remember this mapping' on.")
+        st.info("No templates yet. They are saved when you start an import with 'Remember this mapping' on.")
         return
     st.dataframe(pd.DataFrame([{
         "Name": t.name, "Columns": len(t.headers), "Times used": t.use_count, "Created by": t.created_by,
-        "Updated": t.updated_at.replace("T", " "), "Updated by": t.updated_by,
+        "Updated": fmt_dt(t.updated_at, TZ), "Updated by": t.updated_by,
     } for t in templates]), hide_index=True, width="stretch")
 
     name = st.selectbox("Template", [t.name for t in templates])
@@ -512,47 +778,48 @@ def page_templates() -> None:
         "schema": t.schema_name}, indent=2), f"template_{t.name}.json", mime="application/json", on_click="ignore")
 
 
-def page_history() -> None:
-    st.header("Conversion history")
-    jobs = store.list_jobs(500)
-    if not jobs:
-        st.info("No conversions yet.")
-        return
-    df = pd.DataFrame(jobs).rename(columns={
-        "created_at": "When", "username": "User", "filename": "File", "template_name": "Template",
-        "total_rows": "Rows", "imported": "Converted", "rejected": "Bad rows", "duplicates": "Duplicates",
-        "blank_rows": "Empty", "blanked": "Blanked values", "ai_used": "Claude used"})
-    df["When"] = df["When"].str.replace("T", " ")
-    df["Claude used"] = df["Claude used"].map({1: "yes", 0: ""})
-    st.dataframe(df.drop(columns=["id"]), hide_index=True, width="stretch")
-
-
 def page_schema() -> None:
     st.header("Target format")
     st.markdown(f"**{schema.label}** — {schema.description}")
     st.caption(f"Defined in `{settings.schema_path}`. Edit that file on the server to change the target format; "
                "the app picks up changes automatically.")
+    def _notes(f) -> str:
+        if f.fixed_blank:
+            return "🔒 always blank on every row — can't be mapped or edited"
+        bits = []
+        if f.no_year_value is not None:
+            bits.append(f"month/day with no year → year {f.no_year_value}")
+        if f.type == "datetime" and f.format:
+            bits.append("date-only values get 12:00 AM")
+        if f.type == "phone":
+            bits.append("allowed: " + ", ".join(f.countries))
+        return "; ".join(bits)
+
     st.dataframe(pd.DataFrame([{
-        "Output header": f.header, "Field id": f.name, "Type": f.type, "Required": "yes" if f.required else "",
-        "Format": f.format or "", "If invalid": "reject row" if f.on_invalid == "reject" else "leave blank",
-        "Max length": str(f.max_length or ""), "Allowed values": ", ".join(f.allowed_values),
-    } for f in schema.fields]), hide_index=True, width="stretch")
+        "#": i + 1, "Output header": f.header, "Type": "always blank" if f.fixed_blank else f.type,
+        "Required": "yes" if f.required else "", "Format": f.format or "",
+        "If invalid": "" if f.fixed_blank else ("reject row" if f.on_invalid == "reject" else "leave blank"),
+        "Notes": _notes(f),
+    } for i, f in enumerate(schema.fields)]), hide_index=True, width="stretch")
     o = schema.output
     st.markdown(f"**Output file:** {o.format.upper()}"
                 + (f", delimiter `{repr(o.delimiter)}`, encoding {o.encoding}" if o.format == "csv" else "")
                 + (", header row included" if o.include_header else ", no header row"))
     if schema.dedupe.keys:
         st.markdown("**Duplicates:** a row is removed only when **all** of these match an earlier row: "
-                    + ", ".join(schema.field(k).header for k in schema.dedupe.keys)
-                    + ". Rows with the same phone but a different date are kept.")
+                    + ", ".join(f"`{schema.field(k).header}`" for k in schema.dedupe.keys)
+                    + ". Rows with the same phone but any different date are kept.")
+    st.markdown(f"**Stored files:** each import's original and converted files are kept for "
+                f"{settings.file_retention_days} days" if settings.file_retention_days > 0
+                else "**Stored files:** kept indefinitely")
 
 
-def page_admin() -> None:
+def page_users() -> None:
     st.header("Users")
     users = store.list_users()
-    st.dataframe(pd.DataFrame(users).rename(columns={"username": "User", "is_admin": "Admin", "created_at": "Created",
-                                                     "last_login": "Last sign-in"}),
-                 hide_index=True, width="stretch")
+    st.dataframe(pd.DataFrame([{
+        "User": u["username"], "Admin": "yes" if u["is_admin"] else "", "Created": fmt_dt(u["created_at"], TZ),
+        "Last sign-in": fmt_dt(u["last_login"], TZ)} for u in users]), hide_index=True, width="stretch")
     c1, c2 = st.columns(2)
     with c1, st.form("add_user", clear_on_submit=True):
         st.markdown("**Add user**")
@@ -588,43 +855,41 @@ def page_admin() -> None:
                 st.rerun()
             except Exception as exc:
                 st.error(str(exc))
-    with st.form("own_password"):
-        st.markdown("**Change my password**")
-        p1 = st.text_input("New password", type="password")
-        if st.form_submit_button("Change"):
-            try:
-                store.set_password(user["username"], p1)
-                st.success("Password changed.")
-            except Exception as exc:
-                st.error(str(exc))
 
 
 # ---------------------------------------------------------------------------
-# Layout
+# Navigation
 # ---------------------------------------------------------------------------
+
+_landing = os.getenv("DEFAULT_PAGE", "new")  # "new" or "imports": which page opens first
+PAGE_NEW = st.Page(page_new_import, title="New import", icon="⬆️", url_path="new", default=_landing != "imports")
+PAGE_IMPORTS = st.Page(page_imports, title="Imports", icon="📋", url_path="imports", default=_landing == "imports")
+PAGE_TEMPLATES = st.Page(page_templates, title="Templates", icon="🧩", url_path="templates")
+PAGE_SCHEMA = st.Page(page_schema, title="Target format", icon="🎯", url_path="target-format")
+PAGE_USERS = st.Page(page_users, title="Users", icon="👥", url_path="users")
+
+nav = st.navigation([PAGE_NEW, PAGE_IMPORTS, PAGE_TEMPLATES, PAGE_SCHEMA] + ([PAGE_USERS] if user["is_admin"] else []))
 
 with st.sidebar:
-    st.markdown(f"### 🔄 {APP_TITLE}")
-    pages = ["Convert", "Templates", "History", "Target format"] + (["Users"] if user["is_admin"] else [])
-    page = st.radio("Page", pages, label_visibility="collapsed")
+    running = store.active_imports()
+    if running:
+        st.caption(f"🔵 {len(running)} import{'s' if len(running) != 1 else ''} in progress")
     st.divider()
     st.caption(f"Signed in as **{user['username']}**" + (" (admin)" if user["is_admin"] else ""))
-    if settings.auth_mode != "none" and st.button("Sign out"):
-        logout()
-        st.rerun()
-    if not user["is_admin"]:
-        with st.expander("Change my password"):
-            with st.form("pw_self"):
+    if settings.auth_mode != "none":
+        with st.expander("My account"):
+            with st.form("pw_self", clear_on_submit=True):
                 p1 = st.text_input("New password", type="password")
-                if st.form_submit_button("Change"):
+                if st.form_submit_button("Change password"):
                     try:
                         store.set_password(user["username"], p1)
                         st.success("Changed.")
                     except Exception as exc:
                         st.error(str(exc))
+            if st.button("Sign out"):
+                logout()
+                st.rerun()
     st.caption("Claude: " + (f"connected ({settings.mapping_model})" if assistant else "not configured"))
-    st.caption(f"Target: {schema.label}")
-    st.caption(f"Version {__version__}")
+    st.caption(f"Target: {schema.label} · v{__version__}")
 
-{"Convert": page_convert, "Templates": page_templates, "History": page_history, "Target format": page_schema,
- "Users": page_admin}[page]()
+nav.run()
