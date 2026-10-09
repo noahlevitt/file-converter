@@ -11,6 +11,7 @@ from . import normalizers as N
 from .ai import AIError, AIReviewResult, ClaudeAssistant, accept_repair
 from .checks import Finding, build_review_payload, run_checks
 from .config import Settings
+from .engine import source_rows
 from .heuristics import auto_map
 from .mapping import ColumnProfile, FieldMapping, Mapping
 from .schema import TargetSchema
@@ -140,6 +141,7 @@ def check_for_mistakes(schema: TargetSchema, mapping: Mapping, source: pd.DataFr
                        mask_phones: bool = True, timezone_label: str = "", scope: str = ""
                        ) -> tuple[list[Finding], AIReviewResult | None, str | None]:
     """Rule checks always; Claude's review on top when requested and configured. Returns (findings, ai, error)."""
+    source = source_rows(source, audit)
     findings = run_checks(schema, mapping, source, audit, profiles, timezone_label=timezone_label)
     if not (use_claude and assistant is not None):
         return findings, None, None
