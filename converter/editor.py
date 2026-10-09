@@ -90,6 +90,8 @@ def apply_row_edit(schema: TargetSchema, mapping: Mapping, field_name: str, chan
                    col_how: str, col_sources: str, col_option: str) -> tuple[Mapping, str | None]:
     """Apply one edited grid row to the mapping. Returns (new mapping, option parse error)."""
     f = schema.field(field_name)
+    if f.fixed_blank:
+        return mapping, "always blank — the import format requires this column to stay empty"
     fm = mapping.get(field_name).model_copy(deep=True)
     error = None
 
@@ -130,6 +132,8 @@ def apply_row_edit(schema: TargetSchema, mapping: Mapping, field_name: str, chan
 
 def row_problem(schema: TargetSchema, mapping: Mapping, field_name: str) -> str:
     f = schema.field(field_name)
+    if f.fixed_blank:
+        return ""
     fm = mapping.get(field_name)
     p = check_transform(fm.transform, fm.sources, fm.params)
     if p:
