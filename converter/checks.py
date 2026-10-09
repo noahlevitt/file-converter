@@ -75,7 +75,7 @@ def column_warnings(schema: TargetSchema, mapping: Mapping,
     for f in schema.mappable_fields:
         kind = TYPED.get(f.type)
         fm = mapping.get(f.name)
-        if not kind or fm.transform not in ("copy", "coalesce"):
+        if not kind or fm.transform not in ("copy", "coalesce", "each_row"):
             continue
         for col in fm.sources:
             p = by_name.get(col)
@@ -190,7 +190,7 @@ def run_checks(schema: TargetSchema, mapping: Mapping, source: pd.DataFrame, aud
 
     # Same column feeding two different fields as a plain copy.
     copies = Counter(s for f in schema.mappable_fields for s in mapping.get(f.name).sources
-                     if mapping.get(f.name).transform in ("copy", "coalesce"))
+                     if mapping.get(f.name).transform in ("copy", "coalesce", "each_row"))
     for col, n in copies.items():
         if n > 1:
             fields = [f.header for f in schema.mappable_fields if col in mapping.get(f.name).sources]
