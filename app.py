@@ -23,12 +23,13 @@ from converter.compare import (FILTERS, build_compare_html, column_plan, compari
                                filter_rows, status_counts)
 from converter.config import get_settings
 from converter.editor import FROM_LABEL, LABELS, OPTION_HELP, apply_row_edit, option_text, row_problem
-from converter.engine import preview_values
+from converter.engine import convert, preview_values
 from converter.jobs import ImportRunner
 from converter.mapping import Mapping, profile_columns
 from converter.reader import SUPPORTED_EXTENSIONS, ReadError, read_file
 from converter.schema import TargetSchema, load_schema
-from converter.services import initial_mapping, make_assistant, merge, validate_repairs
+from converter.services import (check_for_mistakes, initial_mapping, make_assistant, merge,
+                                validate_repairs)
 from converter.storage import ImportRecord, Store
 from converter.ui_format import fmt_dt, fmt_duration, fmt_eta, fmt_size, status_color, status_text
 
@@ -101,7 +102,7 @@ ss.setdefault("uploader_version", 0)
 # ---------------------------------------------------------------------------
 
 FILE_KEYS = ["file_sig", "file_name", "file_bytes", "read", "profiles", "mapping", "map_meta", "pending",
-             "edit_errors", "ai_used", "template_name", "read_error", "timezone"]
+             "edit_errors", "ai_used", "template_name", "read_error", "timezone", "notes_result", "check_result"]
 
 
 def reset_file_state() -> None:
@@ -119,8 +120,9 @@ def load_and_map(sheet: str | None = None, header_row: int | None | str = "auto"
     ss.read_error = None
     ss.read = rr
     ss.profiles = profile_columns(rr.df, n_samples=settings.ai_sample_values)
-    with st.spinner("Matching columns" + (" (asking Claude)…" if use_ai and assistant else "…")):
-        sug = initial_mapping(schema, rr.df, ss.profiles, store, assistant, use_ai=use_ai)
+    with st.spinner("Matching columns" + (" (asking Claude)…" if use_ai and assistant and settings.ai_auto_map
+                                          else "…")):
+        sug = initial_mapping(schema, rr.df, ss.profiles, store, assistant, use_ai=use_ai and settings.ai_auto_map)
     ss.mapping = sug.mapping
     ss.map_meta = {"source": sug.source, "notes": sug.notes,
                    "template": sug.template.name if sug.template else None, "similarity": sug.similarity}
@@ -130,6 +132,8 @@ def load_and_map(sheet: str | None = None, header_row: int | None | str = "auto"
                                                        else "America/New_York")
     ss.ai_used = sug.source == "rules+ai"
     ss.pending = None
+    ss.notes_result = None
+    ss.check_result = None
     ss.edit_errors = []
     ss.editor_version += 1
 
@@ -189,7 +193,8 @@ def start_import() -> int:
     return import_id
 
 
-def rerun_import(rec: ImportRecord, overrides: dict | None = None, ai_used: bool | None = None) -> int:
+def rerun_import(rec: ImportRecord, overrides: dict | None = None, ai_used: bool | None = None,
+                 mapping: Mapping | None = None) -> int:
     """Start a new import from a previous one's original file and mapping, with the current target format."""
     data = store.source_path(rec).read_bytes()
     merged = dict(rec.overrides)
@@ -197,7 +202,7 @@ def rerun_import(rec: ImportRecord, overrides: dict | None = None, ai_used: bool
         merged.setdefault(k, {}).update(v)
     new_id = store.create_import(
         username=user["username"], filename=rec.filename, data=data, schema_label=schema.label,
-        schema_json=schema.model_dump_json(), mapping=rec.mapping, read_options=rec.read_options,
+        schema_json=schema.model_dump_json(), mapping=mapping or rec.mapping, read_options=rec.read_options,
         overrides=merged, template_name=rec.template_name,
         ai_used=rec.ai_used if ai_used is None else ai_used, parent_id=rec.id)
     runner.submit(new_id)
@@ -293,8 +298,8 @@ def page_new_import() -> None:
     elif meta["source"] == "rules+ai":
         st.info("Columns matched by rules and Claude. Check the rows marked low/medium before importing.")
     else:
-        st.info("Columns matched by rules" + ("" if assistant else " (Claude is not configured)") +
-                ". Check every mapping before importing.")
+        st.info("Columns matched automatically. Check the rows marked low/medium, edit anything in the grid, or "
+                "add notes on columns below.")
     for n in meta["notes"]:
         if not n.startswith("Matched saved template"):
             st.caption("ℹ️ " + n)
@@ -339,63 +344,7 @@ def page_new_import() -> None:
     if unused:
         st.caption("Columns not imported: " + ", ".join(f"`{c}`" for c in unused))
 
-    with st.container(border=True):
-        st.markdown("**Instructions for Claude**")
-        if not assistant:
-            st.caption("Claude is not configured (set ANTHROPIC_API_KEY on the server). Mapping still works by "
-                       "rules and manual edits.")
-        with st.form("instruction_form", clear_on_submit=False, border=False):
-            instruction = st.text_area(
-                "Tell Claude how to treat specific columns",
-                placeholder="e.g. 'Cust Ph' is the phone number · Join Date is day-first · put 'VIP Level' into "
-                            "Notes · split 'Contact' into first and last name",
-                label_visibility="collapsed", height=80, disabled=not assistant)
-            b1, b2 = st.columns(2)
-            ask = b1.form_submit_button("Apply instruction", type="primary", disabled=not assistant,
-                                        width="stretch")
-            remap = b2.form_submit_button("Re-check whole mapping with Claude", disabled=not assistant,
-                                          width="stretch")
-        if ask and instruction.strip():
-            try:
-                with st.spinner("Claude is reading your instruction…"):
-                    res = assistant.apply_instruction(schema, ss.profiles, mapping, instruction)
-                ss.pending = {"changes": res.mapping, "notes": res.notes, "dropped": res.dropped}
-            except AIError as exc:
-                st.error(str(exc))
-        if remap:
-            try:
-                with st.spinner("Claude is reviewing the mapping…"):
-                    res = assistant.propose_mapping(schema, ss.profiles, current=mapping)
-                ss.pending = {"changes": res.mapping, "notes": res.notes, "dropped": res.dropped}
-            except AIError as exc:
-                st.error(str(exc))
-
-        pending = ss.get("pending")
-        if pending:
-            diff = mapping_diff(schema, mapping, pending["changes"])
-            if pending["notes"]:
-                st.markdown(f"**Claude:** {pending['notes']}")
-            if pending["dropped"]:
-                st.caption("Ignored invalid suggestions: " + "; ".join(pending["dropped"][:5]))
-            if diff.empty:
-                st.caption("No mapping changes proposed.")
-                if st.button("OK"):
-                    ss.pending = None
-                    st.rerun()
-            else:
-                st.dataframe(diff, hide_index=True, width="stretch")
-                a1, a2, _ = st.columns([1, 1, 3])
-                if a1.button("Accept changes", type="primary", width="stretch"):
-                    changed = Mapping(fields={k: v for k, v in pending["changes"].fields.items()
-                                              if schema.field(k).header in set(diff["Field"])})
-                    ss.mapping = merge(mapping, changed).normalized(schema, list(df.columns))
-                    ss.ai_used = True
-                    ss.pending = None
-                    ss.editor_version += 1
-                    st.rerun()
-                if a2.button("Discard", width="stretch"):
-                    ss.pending = None
-                    st.rerun()
+    _notes_and_checks(df)
 
     # ---------------- Step 3: start
     st.subheader("3 · Start import")
@@ -413,6 +362,147 @@ def page_new_import() -> None:
         reset_file_state()
         ss.uploader_version += 1
         open_import(import_id)
+
+
+def on_notes_edit(key: str, columns: list[str]) -> None:
+    state = ss.get(key, {})
+    notes = dict(ss.mapping.column_notes)
+    for idx, changes in state.get("edited_rows", {}).items():
+        if "Your note" in changes:
+            col = columns[int(idx)]
+            text = (changes["Your note"] or "").strip()
+            if text:
+                notes[col] = text
+            else:
+                notes.pop(col, None)
+    ss.mapping = ss.mapping.model_copy(update={"column_notes": notes})
+    ss.notes_version = ss.get("notes_version", 0) + 1
+
+
+def on_general_note(key: str) -> None:
+    ss.mapping = ss.mapping.model_copy(update={"general_note": (ss.get(key) or "").strip()})
+
+
+def _show_changes(changes: Mapping, base: Mapping, columns: list[str], key: str, clear=None) -> None:
+    """Diff of proposed field changes with Accept / Discard (New import page). `clear` hides them afterwards."""
+    clear = clear or (lambda: ss.pop(key, None))
+    diff = mapping_diff(schema, base, changes)
+    if diff.empty:
+        st.caption("No mapping changes proposed.")
+        return
+    st.markdown("**Proposed mapping changes**")
+    st.dataframe(diff, hide_index=True, width="stretch")
+    a1, a2, _ = st.columns([1, 1, 3])
+    if a1.button("Accept changes", type="primary", width="stretch", key=f"accept_{key}"):
+        changed = Mapping(fields={k: v for k, v in changes.fields.items()
+                                  if schema.field(k).header in set(diff["Field"])})
+        ss.mapping = merge(base, changed).normalized(schema, columns)
+        ss.ai_used = True
+        clear()
+        ss.editor_version += 1
+        st.rerun()
+    if a2.button("Discard", width="stretch", key=f"discard_{key}"):
+        clear()
+        st.rerun()
+
+
+def _findings_table(findings, sch: TargetSchema) -> None:
+    if not findings:
+        st.success("No problems found.", icon="✅")
+        return
+    n_err = sum(f.severity == "error" for f in findings)
+    n_warn = sum(f.severity == "warning" for f in findings)
+    st.markdown(f"**{len(findings)} finding{'s' if len(findings) != 1 else ''}** · {n_err} error(s) · "
+                f"{n_warn} warning(s)")
+    st.dataframe(pd.DataFrame([f.as_row(sch) for f in findings]), hide_index=True, width="stretch",
+                 column_config={"": st.column_config.TextColumn(width="small"),
+                                "Issue": st.column_config.TextColumn(width="large"),
+                                "Suggestion": st.column_config.TextColumn(width="large")})
+
+
+def _notes_and_checks(df: pd.DataFrame) -> None:
+    columns = list(df.columns)
+    mapping: Mapping = ss.mapping
+    with st.container(border=True):
+        st.markdown("**Notes on columns**")
+        st.caption("Write what a column is, where it goes or how to read it — e.g. *“this is the last visit "
+                   "date”*, *“actually goes to anniversary”*, *“dates are day-first”*, *“don't import”*. "
+                   + ("Claude applies the notes when you click *Apply notes*. " if assistant else
+                      "Claude isn't configured, so notes are saved with the template as documentation. ")
+                   + "Notes are saved with the template and the import.")
+        feeds: dict[str, list[str]] = {c: [] for c in columns}
+        for f in schema.mappable_fields:
+            for c in mapping.get(f.name).sources:
+                if c in feeds:
+                    feeds[c].append(f.header)
+        samples = {p.name: p.samples for p in ss.profiles}
+        notes_df = pd.DataFrame([{
+            "Column": c,
+            "Sample values": " | ".join(samples.get(c, [])[:3]),
+            "Goes to": ", ".join(feeds[c]) or "— not imported",
+            "Your note": mapping.column_notes.get(c, ""),
+        } for c in columns])
+        nkey = f"notes_editor_{ss.editor_version}_{ss.get('notes_version', 0)}"
+        st.data_editor(notes_df, key=nkey, on_change=on_notes_edit, args=(nkey, columns), hide_index=True,
+                       num_rows="fixed", width="stretch", disabled=["Column", "Sample values", "Goes to"],
+                       column_config={"Your note": st.column_config.TextColumn(width="large"),
+                                      "Sample values": st.column_config.TextColumn(width="medium")})
+        gkey = f"general_note_{ss.file_sig[1][:10]}"
+        st.text_area("General note (optional)", value=mapping.general_note, key=gkey, on_change=on_general_note,
+                     args=(gkey,), height=68,
+                     placeholder="e.g. all dates in this file are day-first · times are in Pacific time")
+
+        b1, b2, _ = st.columns([1.3, 1.3, 2])
+        n_notes = len([n for n in ss.mapping.column_notes.values() if n]) + bool(ss.mapping.general_note)
+        apply_clicked = b1.button("Apply notes with Claude", type="primary", width="stretch",
+                                  disabled=not (assistant and n_notes),
+                                  help=None if assistant else "Set ANTHROPIC_API_KEY on the server to enable.")
+        check_clicked = b2.button("Check for mistakes", width="stretch",
+                                  help="Runs rule checks on the first 1,000 rows" +
+                                       (" and asks Claude to review a sample." if assistant else "."))
+        if apply_clicked:
+            try:
+                with st.spinner("Claude is applying your notes…"):
+                    res = assistant.apply_notes(schema, ss.profiles, ss.mapping, ss.mapping.column_notes,
+                                                ss.mapping.general_note)
+                ss.notes_result = res
+            except AIError as exc:
+                st.error(str(exc))
+        res = ss.get("notes_result")
+        if res is not None:
+            if res.summary:
+                st.markdown(f"**Claude:** {res.summary}")
+            if res.note_results:
+                icon = {"applied": "✅ applied", "already_correct": "✔️ already correct", "not_applied": "⚠️ not applied"}
+                st.dataframe(pd.DataFrame([{"Note on": r.get("column"), "Result": icon.get(r.get("status"), ""),
+                                            "Details": r.get("message", "")} for r in res.note_results]),
+                             hide_index=True, width="stretch",
+                             column_config={"Details": st.column_config.TextColumn(width="large")})
+            if res.dropped:
+                st.caption("Ignored invalid suggestions: " + "; ".join(res.dropped[:5]))
+            _show_changes(res.mapping, ss.mapping, columns, "notes_result")
+
+        if check_clicked:
+            head = df.head(1000)
+            with st.spinner("Checking for mistakes" + (" (rules + Claude)…" if assistant else "…")):
+                prev = convert(head, schema, ss.mapping, timezone=ss.get("timezone"))
+                findings, ai_res, err = check_for_mistakes(
+                    schema, ss.mapping, head, prev.audit, ss.profiles, assistant, use_claude=bool(assistant),
+                    mask_phones=settings.ai_mask_phones, timezone_label=ZONE_LABEL.get(ss.get("timezone"), ""),
+                    scope=f"preview of the first {len(head):,} rows before import")
+            ss.check_result = {"findings": findings, "ai": ai_res, "error": err, "rows": len(head)}
+        chk = ss.get("check_result")
+        if chk is not None:
+            st.markdown(f"**Mistake check** · first {chk['rows']:,} rows"
+                        + (" · rules + Claude" if chk["ai"] else " · rules"))
+            if chk["error"]:
+                st.warning(f"Claude's review didn't run ({chk['error']}). Rule checks are below.")
+            if chk["ai"] and chk["ai"].summary:
+                st.markdown(f"**Claude:** {chk['ai'].summary}")
+            _findings_table(chk["findings"], schema)
+            if chk["ai"] and chk["ai"].mapping.fields and not chk.get("changes_done"):
+                _show_changes(chk["ai"].mapping, ss.mapping, columns, "check_changes",
+                              clear=lambda: chk.update(changes_done=True))
 
 
 # ---------------------------------------------------------------------------
@@ -669,6 +759,12 @@ def _completed_view(rec: ImportRecord) -> None:
             "Field": f.header, "Built from": rec.mapping.get(f.name).summary(),
             "Option": option_text(rec.mapping.get(f.name), f), "Mapped by": origin_label(rec.mapping.get(f.name)),
         } for f in rec_schema.fields]), hide_index=True, width="stretch")
+        if rec.mapping.column_notes or rec.mapping.general_note:
+            st.markdown("**Notes on columns**")
+            notes_rows = [{"Column": c, "Note": n} for c, n in rec.mapping.column_notes.items()]
+            if rec.mapping.general_note:
+                notes_rows.append({"Column": "(general)", "Note": rec.mapping.general_note})
+            st.dataframe(pd.DataFrame(notes_rows), hide_index=True, width="stretch")
         n_fix = sum(len(v) for v in rec.overrides.values())
         if n_fix:
             st.caption(f"{n_fix} value fix{'es' if n_fix != 1 else ''} approved from Claude suggestions were applied.")
@@ -678,11 +774,56 @@ def _completed_view(rec: ImportRecord) -> None:
                    f", client time zone {ZONE_LABEL.get(tz, tz or 'Eastern')}")
 
     st.divider()
+    _import_check_section(rec, rec_schema, src_df, audit)
     a, b = st.columns([1, 3])
     with a:
         _rerun_button(rec)
     with b:
         _repair_section(rec, rec_schema, audit)
+
+
+@st.cache_data(max_entries=6, show_spinner=False)
+def _import_profiles(import_id: int, folder: str):
+    src, _ = load_import_tables(import_id, folder)
+    return profile_columns(src, n_samples=settings.ai_sample_values)
+
+
+def _import_check_section(rec: ImportRecord, rec_schema: TargetSchema, src_df: pd.DataFrame,
+                          audit: pd.DataFrame) -> None:
+    ckey = f"import_check_{rec.id}"
+    c1, c2 = st.columns([1.3, 3.7], vertical_alignment="center")
+    if c1.button("Check this import for mistakes", key=f"btn_{ckey}", width="stretch"):
+        profiles = _import_profiles(rec.id, str(store.files_root / str(rec.id)))
+        with st.spinner("Checking for mistakes" + (" (rules + Claude)…" if assistant else "…")):
+            findings, ai_res, err = check_for_mistakes(
+                rec_schema, rec.mapping, src_df, audit, profiles, assistant, use_claude=bool(assistant),
+                mask_phones=settings.ai_mask_phones,
+                timezone_label=ZONE_LABEL.get(rec.read_options.get("timezone"), ""),
+                scope=f"all {len(audit):,} rows of a finished import")
+        ss[ckey] = {"findings": findings, "ai": ai_res, "error": err}
+    c2.caption("Rule checks over every row" + (" plus a Claude review of a sample of rows (phone digits partly "
+                                               "hidden)." if assistant else ". Set ANTHROPIC_API_KEY to add a "
+                                               "Claude review."))
+    chk = ss.get(ckey)
+    if chk is None:
+        return
+    if chk["error"]:
+        st.warning(f"Claude's review didn't run ({chk['error']}). Rule checks are below.")
+    if chk["ai"] and chk["ai"].summary:
+        st.markdown(f"**Claude:** {chk['ai'].summary}")
+    _findings_table(chk["findings"], rec_schema)
+    if chk["ai"] and chk["ai"].mapping.fields:
+        diff = mapping_diff(rec_schema, rec.mapping, chk["ai"].mapping)
+        if not diff.empty:
+            st.markdown("**Claude's suggested mapping changes**")
+            st.dataframe(diff, hide_index=True, width="stretch")
+            can_rerun = not rec.files_purged and store.source_path(rec).exists()
+            if st.button("Re-run the import with these changes", type="primary", disabled=not can_rerun,
+                         key=f"rerun_{ckey}"):
+                changed = Mapping(fields={k: v for k, v in chk["ai"].mapping.fields.items()
+                                          if rec_schema.field(k).header in set(diff["Field"])})
+                new_map = merge(rec.mapping, changed)
+                open_import(rerun_import(rec, ai_used=True, mapping=new_map))
 
 
 def _side_by_side(rec: ImportRecord, rec_schema: TargetSchema, src_df: pd.DataFrame, audit: pd.DataFrame,
