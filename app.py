@@ -347,9 +347,8 @@ def page_new_import() -> None:
         st.error(e)
     each = next((f for f in schema.mappable_fields if mapping.get(f.name).transform == "each_row"), None)
     if each is not None:
-        st.caption(f"ℹ️ **{each.header}** uses *One row per value*: a customer with different numbers in "
-                   f"{', '.join(mapping.get(each.name).sources)} gets one row per number, with their other "
-                   "details copied onto each. Switch **How** to *First non-empty* to keep one row per customer.")
+        st.caption(f"ℹ️ A customer with different numbers in {', '.join(mapping.get(each.name).sources)} gets "
+                   f"one row per number in **{each.header}**, with the other columns copied from their original row.")
     unused = [c for c in df.columns if c not in mapping.used_sources()]
     if unused:
         skipped = set(mapping.excluded_columns)
