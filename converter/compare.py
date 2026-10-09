@@ -55,6 +55,8 @@ class ColumnPlan:
     unused: set[str]
     feeds: dict[str, list[str]]        # source column -> target headers it feeds
     origin: dict[str, str]             # target field name -> short "from …" description
+    each_field: str = ""               # field using 'One row per value' (one row per different number), if any
+    each_sources: tuple[str, ...] = ()
 
 
 def column_plan(schema: TargetSchema, mapping: Mapping, source_columns: list[str]) -> ColumnPlan:
@@ -74,7 +76,9 @@ def column_plan(schema: TargetSchema, mapping: Mapping, source_columns: list[str
                     ordered.append(s)
     unused = {c for c in source_columns if not feeds[c]}
     ordered += [c for c in source_columns if c in unused]
-    return ColumnPlan(ordered, unused, feeds, origin)
+    each = next((f for f in schema.mappable_fields if mapping.get(f.name).transform == "each_row"), None)
+    return ColumnPlan(ordered, unused, feeds, origin, each.name if each else "",
+                      tuple(mapping.get(each.name).sources) if each else ())
 
 
 def changed_mask(audit: pd.DataFrame, schema: TargetSchema) -> pd.Series:
@@ -149,6 +153,7 @@ table.cmp th.unused,table.cmp td.unused{color:#9aa1a9;background:#fafafb}
 .cmp-b.ok{background:#e7f6ec;color:#116329}.cmp-b.bad{background:#fde8e8;color:#b42318}
 .cmp-b.dup{background:#eef0f3;color:#57606a}.cmp-b.empty{background:#f6f7f9;color:#9aa1a9}
 tr.r-rejected td.o{background:#fff6f6}
+table.cmp td.o.each{font-weight:600;text-decoration:underline;text-decoration-color:#2563eb;text-underline-offset:3px}
 tr.r-rejected td.n:not(.c-rej){color:#9aa1a9;background-image:repeating-linear-gradient(135deg,transparent 0 6px,
   rgba(180,35,24,.05) 6px 12px)}
 tr.r-duplicate td{color:#8b949e}
@@ -167,12 +172,15 @@ td .blank{color:#9aa1a9;font-style:italic;font-weight:400}
 """
 
 
-def legend_html() -> str:
+def legend_html(each_row: bool = False) -> str:
     items = [("c-fmt", "#e8f1ff", "reformatted"), ("c-drv", "#f2ecff", "built from part of / several columns"),
              ("c-def", "#f3f4f6", "default / fixed value"), ("c-fix", "#e3f6e9", "fixed by approved Claude suggestion"),
              ("c-blk", "#fff4d6", "invalid → left blank"), ("c-rej", "#fde1e1", "invalid / missing → row rejected")]
     spans = "".join(f'<span><i style="background:{color}"></i>{html.escape(label)}</span>'
                     for _, color, label in items)
+    if each_row:
+        spans += ("<span><u><b>underlined</b></u> = the number that row was made from · <b>N +</b> = another row "
+                  "from file row N (one row per different number)</span>")
     return f'<div class="cmp-legend">{spans}<span>· hover any cell for details</span></div>'
 
 
@@ -185,7 +193,7 @@ def build_compare_html(source: pd.DataFrame, audit: pd.DataFrame, rows: list[int
                        show_was: bool = True) -> str:
     cols = plan.source_columns
     fields = schema.fields
-    parts = [CSS, legend_html(), '<div class="cmpw"><table class="cmp"><thead>']
+    parts = [CSS, legend_html(bool(plan.each_field)), '<div class="cmpw"><table class="cmp"><thead>']
     parts.append(
         f'<tr class="g"><th class="meta" colspan="2"></th>'
         f'<th class="gsrc" colspan="{len(cols)}">{_e(file_label)}</th><th class="gap"></th>'
@@ -213,13 +221,24 @@ def build_compare_html(source: pd.DataFrame, audit: pd.DataFrame, rows: list[int
         status = arow["_status"]
         label, cls = STATUS_BADGE.get(status, (status, "empty"))
         issues = json.loads(arow["_issues"]) if arow.get("_issues") else {}
-        cells = [f'<tr class="r-{status}"><td class="meta">{_e(arow["_row"])}</td>'
+        row_label = _e(arow["_row"])
+        if arow.get("_extra"):
+            row_label = (f'<span title="Another number from the same file row — one row per different number">'
+                         f'{row_label} +</span>')
+        cells = [f'<tr class="r-{status}"><td class="meta">{row_label}</td>'
                  f'<td><span class="cmp-b {cls}">{label}</span>'
                  + (f'<span class="why">{_e(arow["_reason"])}</span>' if arow["_reason"] else "") + "</td>"]
+        used_value = str(arow.get(f"raw.{plan.each_field}", "")) if plan.each_field else ""
+        marked = False
         for c in cols:
             v = srow.get(c, "")
-            klass = ' class="o unused"' if c in plan.unused else ' class="o"'
-            cells.append(f'<td{klass} title="{_e(c)}: {_e(v)}">{_e(v)}</td>')
+            klass = "o unused" if c in plan.unused else "o"
+            title = f"{c}: {v}"
+            if used_value and not marked and c in plan.each_sources and str(v).strip() == used_value:
+                klass += " each"  # the number this row was made from
+                title += " — this row's number"
+                marked = True
+            cells.append(f'<td class="{klass}" title="{_e(title)}">{_e(v)}</td>')
         cells.append('<td class="gap"></td>')
         for f in fields:
             out = arow.get(f"out.{f.name}", "")
