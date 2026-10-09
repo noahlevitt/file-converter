@@ -14,7 +14,7 @@ from datetime import date, datetime, timedelta
 
 import pandas as pd
 
-from .engine import CELL_BLANKED, CELL_FIXED, CELL_FORMAT, CELL_REJECT
+from .engine import CELL_BLANKED, CELL_FIXED, CELL_FORMAT, CELL_REJECT, CELL_REPAIRED
 from . import normalizers as N
 from .heuristics import TYPED, header_score, is_consent_column, is_phone_header
 from .mapping import ColumnProfile, Mapping
@@ -254,7 +254,8 @@ def pick_sample_rows(audit: pd.DataFrame, limit: int = 30) -> list[int]:
     """Rows worth showing a reviewer: up to a third problems, a third reformatted, the rest ordinary rows."""
     live = audit[audit["_status"] != "empty"]
     st_cols = [c for c in audit.columns if c.startswith("st.")]
-    problem = live[(live["_status"] == "rejected") | live[st_cols].isin([CELL_BLANKED]).any(axis=1)].index
+    problem = live[(live["_status"] == "rejected")
+                   | live[st_cols].isin([CELL_BLANKED, CELL_REPAIRED]).any(axis=1)].index
     changed = live[live[st_cols].isin([CELL_FORMAT, CELL_FIXED]).any(axis=1)].index
     picked: list[int] = []
     for group, quota in ((problem, limit // 3), (changed, limit // 3), (live.index, limit)):
