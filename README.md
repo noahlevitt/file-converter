@@ -78,8 +78,9 @@ Every value is reduced to the 10-digit US number:
 
 #### Several phone columns (e.g. Toast: phone, phone2, phone3, phone4)
 
-The phone field uses **One row per value**: a customer with different numbers gets one row per number, with all
-their other details (visit dates, birthday…) copied onto each row.
+Every phone column feeds the phone field, and **each different number always gets its own row**, with all the
+other columns (visit dates, birthday…) copied from the original row it came from. There is no setting to turn this
+off; older templates that used *First non-empty* for the phone field are upgraded automatically.
 
 - The same number in two columns (`201-555-0111` and `(201) 555-0111`) counts once.
 - An invalid extra number (e.g. `123` in phone3) is skipped; the row still imports with the customer's other
@@ -87,8 +88,6 @@ their other details (visit dates, birthday…) copied onto each row.
 - A customer with no valid number at all is one bad row, as before.
 - The summary says how many extra rows were made ("5 rows ready to import from 4 file rows (2 extra rows…)"),
   and the side-by-side view marks extra rows `N +` and underlines the number each row was made from.
-- To keep one row per customer instead, set **How** for the phone field to *First non-empty* (uses the first
-  number found, mobile/cell columns first). A saved template remembers the choice.
 - Columns that describe a phone (`phone4MarketingPreference`, `Phone Type`, `SMS Opt In`, `Phone Verified`) are
   never used as phone numbers. Marketing-preference columns are treated like consent columns: not imported.
 
