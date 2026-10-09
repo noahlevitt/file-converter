@@ -8,7 +8,7 @@ resolved consistently instead of value by value.
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from functools import lru_cache
 from typing import Any
@@ -428,7 +428,32 @@ def prepare_date(field: FieldSpec, values: list[str], params: dict) -> dict:
     elif dmy_votes >= 2 and dmy_votes > 3 * mdy_votes:
         ctx["order"] = "DMY"  # US default unless the column clearly is day-first
     ctx["evidence"] = {"month_first": mdy_votes, "day_first": dmy_votes}
+    if field.type == "date" and field.no_year_value is not None:
+        ctx["placeholder_year"] = _placeholder_year(sample, ctx)
     return ctx
+
+
+def _placeholder_year(sample: list[str], ctx: dict) -> int | None:
+    """A year that stands for "unknown" in a birthday/anniversary column.
+
+    Real birthdays spread over decades. When one year covers most of the column (all 1970, all 2000, or the year
+    someone typed "9/12" into Excel, which silently adds the current year), it's a placeholder, not a year.
+    """
+    years: dict[int, int] = {}
+    for v in sample:
+        try:
+            dt, _ = DP.parse(v, order=ctx["order"], allow_no_year=True, serial_hint=bool(ctx.get("serial")))
+        except (DP.DateError, ValueError, OverflowError, TypeError):
+            continue
+        if dt.year != _NO_YEAR and dt.year > 1900:
+            years[dt.year] = years.get(dt.year, 0) + 1
+    total = sum(years.values())
+    if not years:
+        return None
+    year, n = max(years.items(), key=lambda kv: kv[1])
+    if (total >= 10 and n >= 0.5 * total) or (total >= 5 and n >= 0.8 * total):
+        return year
+    return None
 
 
 def _dateutil_parse(value: str, dayfirst: bool) -> datetime | None:
@@ -481,9 +506,11 @@ def normalize_date(value: str, field: FieldSpec, params: dict, ctx: dict) -> tup
     dt, err = parse_date(value, ctx, allow_no_year=allow_no_year)
     if err or dt is None:
         return "", err or "unrecognized date"
-    # Month+day only, the target's own no-year value (1600), or a placeholder year systems use for
-    # "unknown" (1900 and earlier, e.g. 01/15/1900) → output with the no-year value.
-    no_year = dt.year == _NO_YEAR or (no_year_value is not None and dt.year <= 1900)
+    # Month+day only, the target's own no-year value (1600), or a year that means "unknown": 1900 and earlier
+    # (01/15/1900), the column's placeholder year (see _placeholder_year), or a year no real customer birthday has —
+    # the last two years or the future (Excel stores "9/12" typed into a cell with the year it was typed).
+    no_year = dt.year == _NO_YEAR or (no_year_value is not None and (
+        dt.year <= 1900 or dt.year == ctx.get("placeholder_year") or dt.date() > date.today() - timedelta(days=730)))
     if no_year:
         return _strftime_year(dt, out_fmt, str(no_year_value) if no_year_value is not None else "2000"), None
     if not (MIN_YEAR <= dt.year <= MAX_YEAR):
