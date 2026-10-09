@@ -15,11 +15,13 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from .engine import (CELL_BLANKED, CELL_DEFAULT, CELL_DERIVED, CELL_FIXED, CELL_FORMAT, CELL_REJECT, CELL_SAME)
+from .engine import (CELL_BLANKED, CELL_DEFAULT, CELL_DERIVED, CELL_FIXED, CELL_FORMAT, CELL_REJECT, CELL_REPAIRED,
+                     CELL_SAME)
 from .mapping import Mapping
 from .schema import TargetSchema
 
-CHANGED_CELLS = {CELL_FORMAT, CELL_DERIVED, CELL_DEFAULT, CELL_FIXED, CELL_BLANKED, CELL_REJECT}
+CHANGED_CELLS = {CELL_FORMAT, CELL_DERIVED, CELL_DEFAULT, CELL_FIXED, CELL_REPAIRED, CELL_BLANKED, CELL_REJECT}
+ATTENTION_CELLS = [CELL_BLANKED, CELL_REPAIRED]  # imported, but worth a look ("Problems only")
 
 FILTERS = {
     "all": "All rows",
@@ -37,6 +39,7 @@ CELL_LABELS = {
     CELL_DERIVED: "built from part of / several columns",
     CELL_DEFAULT: "default / fixed value",
     CELL_FIXED: "fixed (approved Claude suggestion)",
+    CELL_REPAIRED: "repaired from a likely typo — check it",
     CELL_BLANKED: "invalid — left blank",
     CELL_REJECT: "invalid or missing — row rejected",
 }
@@ -95,8 +98,8 @@ def filter_rows(audit: pd.DataFrame, source: pd.DataFrame, schema: TargetSchema,
     if mode == "changed":
         mask &= changed_mask(audit, schema) | status.isin(["rejected", "duplicate"])
     elif mode == "problems":
-        blanked = audit[[c for c in audit.columns if c.startswith("st.")]].eq(CELL_BLANKED).any(axis=1)
-        mask &= status.isin(["rejected", "duplicate"]) | blanked
+        attention = audit[[c for c in audit.columns if c.startswith("st.")]].isin(ATTENTION_CELLS).any(axis=1)
+        mask &= status.isin(["rejected", "duplicate"]) | attention
     elif mode in ("rejected", "duplicate", "imported", "empty"):
         mask &= status == mode
     if search.strip():
@@ -112,7 +115,7 @@ def filter_rows(audit: pd.DataFrame, source: pd.DataFrame, schema: TargetSchema,
 
 def status_counts(audit: pd.DataFrame, schema: TargetSchema) -> dict[str, int]:
     vc = audit["_status"].value_counts()
-    blanked = audit[[c for c in audit.columns if c.startswith("st.")]].eq(CELL_BLANKED).any(axis=1)
+    blanked = audit[[c for c in audit.columns if c.startswith("st.")]].isin(ATTENTION_CELLS).any(axis=1)
     return {
         "all": len(audit),
         "changed": int((changed_mask(audit, schema) | audit["_status"].isin(["rejected", "duplicate"])).sum()),
@@ -163,6 +166,7 @@ td.c-drv{background:#f2ecff}
 td.c-def{background:#f3f4f6;font-style:italic}
 td.c-fix{background:#e3f6e9}
 td.c-blk{background:#fff4d6}
+td.c-rpr{background:#ffe2c6;font-weight:600}
 td.c-rej{background:#fde1e1;color:#b42318;font-weight:600}
 td .blank{color:#9aa1a9;font-style:italic;font-weight:400}
 .cmp-legend{display:flex;flex-wrap:wrap;gap:10px;font-size:12px;color:#57606a;margin:4px 0 8px}
@@ -175,7 +179,7 @@ td .blank{color:#9aa1a9;font-style:italic;font-weight:400}
 def legend_html(each_row: bool = False) -> str:
     items = [("c-fmt", "#e8f1ff", "reformatted"), ("c-drv", "#f2ecff", "built from part of / several columns"),
              ("c-def", "#f3f4f6", "default / fixed value"), ("c-fix", "#e3f6e9", "fixed by approved Claude suggestion"),
-             ("c-blk", "#fff4d6", "invalid → left blank"), ("c-rej", "#fde1e1", "invalid / missing → row rejected")]
+             ("c-rpr", "#ffe2c6", "repaired from a likely typo — check it"), ("c-blk", "#fff4d6", "invalid → left blank"), ("c-rej", "#fde1e1", "invalid / missing → row rejected")]
     spans = "".join(f'<span><i style="background:{color}"></i>{html.escape(label)}</span>'
                     for _, color, label in items)
     if each_row:
@@ -259,7 +263,7 @@ def build_compare_html(source: pd.DataFrame, audit: pd.DataFrame, rows: list[int
                     body = f'{body}<span class="was">{_e(raw)}</span>'
             else:
                 body = _e(out)
-                if show_was and st in (CELL_FORMAT, CELL_FIXED) and raw and raw != out:
+                if show_was and st in (CELL_FORMAT, CELL_FIXED, CELL_REPAIRED) and raw and raw != out:
                     body += f'<span class="was">{_e(raw)}</span>'
             cells.append(f'<td{klass} title="{_e(tip)}">{body}</td>')
         cells.append("</tr>")
@@ -283,7 +287,7 @@ def field_change_summary(audit: pd.DataFrame, schema: TargetSchema, mapping: Map
         if st is None:
             continue
         vc = st.value_counts()
-        fmt_mask = st.isin([CELL_FORMAT, CELL_FIXED])
+        fmt_mask = st.isin([CELL_REPAIRED, CELL_FORMAT, CELL_FIXED])
         examples = []
         if fmt_mask.any():
             sub = live.loc[fmt_mask, [f"raw.{f.name}", f"out.{f.name}"]].drop_duplicates().head(3)
@@ -296,6 +300,7 @@ def field_change_summary(audit: pd.DataFrame, schema: TargetSchema, mapping: Map
             "Built/split": int(vc.get(CELL_DERIVED, 0)),
             "Default": int(vc.get(CELL_DEFAULT, 0)),
             "Claude fix": int(vc.get(CELL_FIXED, 0)),
+            "Repaired typo": int(vc.get(CELL_REPAIRED, 0)),
             "Left blank (invalid)": int(vc.get(CELL_BLANKED, 0)),
             "Rejected rows": int(vc.get(CELL_REJECT, 0)),
             "Empty": int((st == "").sum()),
@@ -309,6 +314,7 @@ def field_change_summary(audit: pd.DataFrame, schema: TargetSchema, mapping: Map
 # ---------------------------------------------------------------------------
 
 XLSX_FILL = {CELL_FORMAT: "#E8F1FF", CELL_DERIVED: "#F2ECFF", CELL_DEFAULT: "#F3F4F6", CELL_FIXED: "#E3F6E9",
+             CELL_REPAIRED: "#FFE2C6",
              CELL_BLANKED: "#FFF4D6", CELL_REJECT: "#FDE1E1"}
 
 
