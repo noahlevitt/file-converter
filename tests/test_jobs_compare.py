@@ -100,7 +100,7 @@ def test_comparison(tmp_path, samples, schema):
     assert filter_rows(audit, src, schema, "all", "#14") == [9]
 
     h = build_compare_html(src, audit, list(range(len(audit))), schema, plan)
-    assert "Bad row" in h and "too few digits" in h and "c-fmt" in h and "→ First Name, Last Name" in h
+    assert "Bad row" in h and "missing area code" in h and "c-fmt" in h and "→ First Name, Last Name" in h
     assert "<script" not in h
     # values are escaped
     src.iloc[0, 0] = "<b>x</b>"
