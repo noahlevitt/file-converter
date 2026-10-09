@@ -84,7 +84,7 @@ def cmd_convert(args) -> None:
     import_id = store.create_import(
         username="cli", filename=path.name, data=path.read_bytes(), schema_label=schema.label,
         schema_json=schema.model_dump_json(), mapping=mapping,
-        read_options={"sheet": rr.sheet, "header_row": rr.header_row},
+        read_options={"sheet": rr.sheet, "header_row": rr.header_row, "timezone": args.timezone or settings.timezone},
         template_name=args.template or args.save_template, ai_used=args.ai)
     rec = run_import(store, import_id)
     if rec.status != "completed":
@@ -120,6 +120,7 @@ def main(argv: list[str] | None = None) -> None:
         p.add_argument("--template", help="use this saved template instead of auto-mapping")
         p.add_argument("--ai", action="store_true", help="let Claude refine the mapping (needs ANTHROPIC_API_KEY)")
         p.add_argument("--schema", help="path to a target schema YAML (default: SCHEMA_PATH)")
+        p.add_argument("--timezone", help="client time zone, e.g. America/Denver (default: APP_TIMEZONE)")
         if name == "convert":
             p.add_argument("--out", help="output folder (default: current folder)")
             p.add_argument("--save-template", metavar="NAME", help="save the mapping used as a template")
