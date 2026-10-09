@@ -201,6 +201,7 @@ PHONE_OK = [
     "+15165550100", "+1 516 555 0100", "+1 (516) 555-0100", "+1-516-555-0100", "+1.516.555.0100",
     "1-516-555-0100", "1 (516) 555-0100", "1.516.555.0100", "15165550100", "1 516 555 0100", "(+1) 516-555-0100",
     "+5165550100",                      # "+" with the 1 left out
+    "+1 +15165550100", "+1 +5165550100", "+1 +51 65 550100",  # +1 put in front of a number that had one already
     "001 516 555 0100", "0015165550100", "011 1 516 555 0100", "+011 1 516-555-0100",
     "516-555-0100 ext. 12", "516-555-0100 ext 12", "516-555-0100 x12", "516-555-0100 x 12", "516-555-0100 #12",
     "(516) 555-0100 ext 1234", "516-555-0100;ext=12", "516-555-0100 extension 9",
@@ -225,6 +226,11 @@ def test_vanity_and_toll_free(real_schema):
     assert norm(real_schema, "phone_number", "(800) 356-9377") == ("8003569377", None)
 
 
+def test_plus_one_in_front_of_plus_number(real_schema):
+    # A Long Island number stored as "+5163171059", shown Peru-style as "+51 63 171059", then given "+1 " again.
+    assert norm(real_schema, "phone_number", "+1 +51 63 171059") == ("5163171059", None)
+
+
 def test_us_territories_allowed(real_schema):
     assert norm(real_schema, "phone_number", "(787) 555-0100") == ("7875550100", None)  # Puerto Rico
 
@@ -243,6 +249,12 @@ def test_us_territories_allowed(real_schema):
     ("+1 416 555 0123", "not a US number"),   # Canada
     ("416-555-0123", "not a US number"),      # Canada without +1
     ("+52 55 1234 5678", "not a US number"),
+    ("5149689696", "not a US number — Canada (area code 514, Quebec)"),
+    ("+51 1 4567890", "not a US number — Peru (+51, Lima"),           # real Lima number, not a US one missing "1"
+    ("+1 +44 20 7946 0958", "the file put +1 in front of its own country code"),
+    ("+1 +51694619661", "has two country codes (+1 and +51)"),
+    ("+1 (433) 309-8420", "area code 433 isn't in use"),
+    ("(516) 155-0100", "isn't a working exchange in area code 516"),
     ("5.163E+09", "scientific notation"),
     ("call me", "no phone number"),
 ])
