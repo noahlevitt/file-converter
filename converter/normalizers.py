@@ -26,7 +26,7 @@ from .schema import FieldSpec
 
 _WS_RE = re.compile(r"\s+")
 _CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-_NULL_TOKENS = {"", "null", "none", "nan", "n/a", "na", "#n/a", "-", "--", "undefined", "nil"}
+_NULL_TOKENS = {"", "null", "none", "nan", "n/a", "na", "#n/a", "-", "--", "undefined", "nil", "never", "nat"}
 
 
 def clean_text(value: Any) -> str:
@@ -161,6 +161,9 @@ TIME_SUFFIXES = ["", " %H:%M:%S", " %H:%M", " %I:%M %p", " %I:%M:%S %p", "T%H:%M
 ORDER_FORMATS = {"MDY": DATE_FORMATS_MDY, "DMY": DATE_FORMATS_DMY, "YMD": DATE_FORMATS_YMD}
 
 _PARTIAL_MD_RE = re.compile(r"^(\d{1,2})[/\-.](\d{1,2})$")
+_PARTIAL_TEXT_FORMATS = ["%b %d", "%B %d", "%d %b", "%d %B", "%d-%b", "%b-%d", "%b. %d", "%B, %d"]
+_ZERO_DATE_RE = re.compile(r"^0{1,4}[-/.]0{1,2}[-/.]0{1,4}(\s+0{1,2}:0{2}(:0{2})?)?$")
+_NO_YEAR = 4  # internal marker year for "month and day only" (a leap year, so Feb 29 is valid)
 _NUMERIC_ONLY_RE = re.compile(r"^\d+(\.\d+)?$")
 _ORDINAL_RE = re.compile(r"(\d+)(st|nd|rd|th)\b", re.IGNORECASE)
 _EXCEL_EPOCH = datetime(1899, 12, 30)
@@ -262,9 +265,15 @@ def parse_date(value: str, ctx: dict, allow_no_year: bool = False) -> tuple[date
             a, b = int(m.group(1)), int(m.group(2))
             month, day = (b, a) if ctx.get("order") == "DMY" else (a, b)
             try:
-                return datetime(2000, month, day), None
+                return datetime(_NO_YEAR, month, day), None
             except ValueError:
                 return None, "not a real calendar date"
+        for f in _PARTIAL_TEXT_FORMATS:
+            try:
+                d = datetime.strptime(f"{v} 2000", f"{f} %Y")  # explicit (leap) year: no ambiguity, Feb 29 ok
+                return datetime(_NO_YEAR, d.month, d.day), None
+            except ValueError:
+                continue
 
     fmt = ctx.get("format")
     if fmt:
@@ -287,13 +296,27 @@ def parse_date(value: str, ctx: dict, allow_no_year: bool = False) -> tuple[date
     return dt, None
 
 
+def _strftime_year(dt: datetime, fmt: str, year_text: str) -> str:
+    """strftime with a literal year (portable for years like 1600 and for month/day-only values)."""
+    safe = dt.replace(year=2000)  # leap year, so Feb 29 survives
+    marked = fmt.replace("%Y", "\x00Y").replace("%y", "\x00y")
+    return safe.strftime(marked).replace("\x00Y", year_text).replace("\x00y", year_text[-2:])
+
+
 def normalize_date(value: str, field: FieldSpec, params: dict, ctx: dict) -> tuple[str, str | None]:
     out_fmt = field.format or ("%Y-%m-%d %H:%M:%S" if field.type == "datetime" else "%Y-%m-%d")
-    allow_no_year = "%Y" not in out_fmt and "%y" not in out_fmt
+    if _ZERO_DATE_RE.match(value.strip()):
+        return "", None  # "0000-00-00" style placeholders mean no date
+    has_year = "%Y" in out_fmt or "%y" in out_fmt
+    no_year_value = field.no_year_value if field.type == "date" else None
+    allow_no_year = not has_year or no_year_value is not None
     dt, err = parse_date(value, ctx, allow_no_year=allow_no_year)
     if err or dt is None:
         return "", err or "unrecognized date"
-    if not allow_no_year and not (MIN_YEAR <= dt.year <= MAX_YEAR):
+    no_year = dt.year == _NO_YEAR or (no_year_value is not None and dt.year == no_year_value)
+    if no_year:
+        return _strftime_year(dt, out_fmt, str(no_year_value) if no_year_value is not None else "2000"), None
+    if not (MIN_YEAR <= dt.year <= MAX_YEAR):
         return "", f"year {dt.year} is out of range"
     return dt.strftime(out_fmt), None
 
@@ -494,5 +517,5 @@ def looks_like_date(v: str) -> bool:
         return False
     if not re.search(r"\d", v):
         return False
-    dt, err = parse_date(v, {"order": "MDY"})
-    return err is None and dt is not None and MIN_YEAR <= dt.year <= MAX_YEAR
+    dt, err = parse_date(v, {"order": "MDY"}, allow_no_year=True)
+    return err is None and dt is not None and (dt.year == _NO_YEAR or MIN_YEAR <= dt.year <= MAX_YEAR)
