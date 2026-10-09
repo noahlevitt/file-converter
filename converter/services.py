@@ -89,8 +89,8 @@ def initial_mapping(schema: TargetSchema, df: pd.DataFrame, profiles: list[Colum
     return MappingSuggestion(rules, "rules", near_tpl, near_sim, notes)
 
 
-def validate_repairs(schema: TargetSchema, mapping: Mapping, field_name: str, pairs: list[tuple[str, str]]
-                     ) -> tuple[dict[str, str], list[tuple[str, str, str]]]:
+def validate_repairs(schema: TargetSchema, mapping: Mapping, field_name: str, pairs: list[tuple[str, str]],
+                     timezone: str | None = None) -> tuple[dict[str, str], list[tuple[str, str, str]]]:
     """Return ({raw: final_output}, [(raw, suggestion, why_rejected)])."""
     f = schema.field(field_name)
     params = mapping.get(field_name).params
@@ -100,7 +100,7 @@ def validate_repairs(schema: TargetSchema, mapping: Mapping, field_name: str, pa
         if not accept_repair(f, raw, suggestion):
             rejected.append((raw, suggestion, "changes the data instead of reformatting it"))
             continue
-        final, err = _validate_final(f, suggestion, params)
+        final, err = _validate_final(f, suggestion, params, timezone)
         if err:
             rejected.append((raw, suggestion, err))
         else:
@@ -108,7 +108,7 @@ def validate_repairs(schema: TargetSchema, mapping: Mapping, field_name: str, pa
     return accepted, rejected
 
 
-def _validate_final(f, value: str, params: dict) -> tuple[str, str | None]:
+def _validate_final(f, value: str, params: dict, timezone: str | None = None) -> tuple[str, str | None]:
     if f.type in ("date", "datetime"):
         out_fmt = f.format or ("%Y-%m-%d %H:%M:%S" if f.type == "datetime" else "%Y-%m-%d")
         try:
@@ -117,6 +117,8 @@ def _validate_final(f, value: str, params: dict) -> tuple[str, str | None]:
         except ValueError:
             pass
         ctx = N.prepare(f, [value], params)
+        if timezone:
+            ctx["tz"] = timezone
         return N.normalize(value, f, params, ctx)
     return N.normalize(value, f, params, {})
 
