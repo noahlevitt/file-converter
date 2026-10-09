@@ -37,6 +37,7 @@ class RowIssue:
     value: str
     reason: str
     rejected: bool  # True = caused the row to be rejected; False = value was blanked
+    skipped: bool = False  # an extra value (e.g. a 3rd phone column) that was invalid and didn't get its own row
 
 
 @dataclass
@@ -53,18 +54,28 @@ class ConversionResult:
     blanked_counts: Counter = field(default_factory=Counter)
     fill_rates: dict[str, float] = field(default_factory=dict)
     failed_values: dict[str, list[str]] = field(default_factory=dict)  # field -> unique raw values that failed
-    # One row per source row (same order as the source DataFrame): _row, _status, _reason, _issues (JSON),
-    # and per field: out.<name> (converted value), raw.<name> (value before normalizing), st.<name> (cell status).
+    # One row per converted row, in file order: _row (file row number), _src (position in the source DataFrame),
+    # _extra (True for the 2nd, 3rd… row made from one file row by 'One row per value'), _status, _reason,
+    # _issues (JSON), and per field: out.<name> (converted value), raw.<name> (value before normalizing),
+    # st.<name> (cell status). Without 'One row per value' there is exactly one audit row per source row.
     audit: pd.DataFrame = field(default_factory=pd.DataFrame)
+    extra_rows: int = 0  # rows added because a file row had several different values (e.g. phone numbers)
+    skipped_values: int = 0  # invalid extra values that didn't get a row of their own
+    skipped_counts: Counter = field(default_factory=Counter)
 
     @property
     def has_bad_rows(self) -> bool:
         return self.rejected > 0
 
     def flag_message(self) -> str:
-        parts = [f"{self.imported:,} of {self.total_rows:,} rows converted and ready to import."]
+        if self.extra_rows:
+            parts = [f"{self.imported:,} rows ready to import from {self.total_rows:,} file rows "
+                     f"({self.extra_rows:,} extra row{'s' if self.extra_rows != 1 else ''} for customers with more "
+                     "than one phone number)."]
+        else:
+            parts = [f"{self.imported:,} of {self.total_rows:,} rows converted and ready to import."]
         if self.rejected:
-            parts.append(f"{self.rejected:,} bad row{'s' if self.rejected != 1 else ''} were NOT imported.")
+            parts.append(f"{self.rejected:,} bad row{'s were' if self.rejected != 1 else ' was'} NOT imported.")
         if self.duplicates:
             parts.append(f"{self.duplicates:,} duplicate row{'s' if self.duplicates != 1 else ''} removed.")
         if self.blank_rows:
@@ -72,6 +83,9 @@ class ConversionResult:
         if self.blanked_values:
             parts.append(f"{self.blanked_values:,} invalid optional value{'s' if self.blanked_values != 1 else ''} "
                          "left blank.")
+        if self.skipped_values:
+            parts.append(f"{self.skipped_values:,} invalid extra number{'s' if self.skipped_values != 1 else ''} "
+                         "in other phone columns skipped.")
         return " ".join(parts)
 
     def summary_dict(self) -> dict[str, Any]:
@@ -82,8 +96,11 @@ class ConversionResult:
             "duplicates": self.duplicates,
             "blank_rows": self.blank_rows,
             "blanked_values": self.blanked_values,
+            "extra_rows": self.extra_rows,
+            "skipped_values": self.skipped_values,
             "reasons": dict(self.reason_counts.most_common()),
             "blanked": dict(self.blanked_counts.most_common()),
+            "skipped": dict(self.skipped_counts.most_common()),
             "message": self.flag_message(),
         }
 
@@ -108,17 +125,30 @@ def convert(
     """
     mapping = mapping.normalized(schema, list(df.columns))
     overrides = overrides or {}
-    records = df.fillna("").astype(str).to_dict("records")
-    n = len(records)
-    row_numbers = row_numbers or [i + 2 for i in range(n)]
+    src_records = df.fillna("").astype(str).to_dict("records")
+    row_numbers = row_numbers or [i + 2 for i in range(len(src_records))]
 
     all_cols = list(df.columns)
-    blank = [not any(N.clean_text(r.get(c, "")) for c in all_cols) for r in records]
+    src_blank = [not any(N.clean_text(r.get(c, "")) for c in all_cols) for r in src_records]
+
+    # 'One row per value': a file row with several different values (Phone, Phone 2, Phone 3…) becomes one
+    # row per value; every other field is copied onto each. `src` maps each working row to its file row.
+    each_field = next((f for f in schema.mappable_fields if mapping.get(f.name).transform == "each_row"), None)
+    src = list(range(len(src_records)))
+    each_raw: list[str] = []
+    early_issues: dict[int, list[RowIssue]] = {}
+    if each_field is not None:
+        src, each_raw, early_issues = _expand_rows(src_records, src_blank, each_field, mapping, overrides, timezone)
+    records = [src_records[k] for k in src]
+    blank = [src_blank[k] for k in src]
+    row_numbers = [row_numbers[k] for k in src]
+    n = len(records)
+    extra = [j > 0 and src[j] == src[j - 1] for j in range(n)]
 
     out_cols: dict[str, list[str]] = {}
     raw_cols: dict[str, list[str]] = {}
     status_cols: dict[str, list[str]] = {}
-    issues: list[list[RowIssue]] = [[] for _ in range(n)]
+    issues: list[list[RowIssue]] = [list(early_issues.get(i, [])) for i in range(n)]
     failed_values: dict[str, set[str]] = {}
     chunk = 2000
     # Relative cost per field, so progress and time-left estimates move evenly.
@@ -139,16 +169,19 @@ def convert(
         params = fm.params
         if progress:
             progress(done_w / total_w, f"Converting {f.header}")
-        raw = [
-            "" if blank[i] else apply_transform(fm.transform, records[i], fm.sources, params)
-            for i in range(n)
-        ]
+        if f is each_field:
+            raw = ["" if blank[i] else each_raw[i] for i in range(n)]
+        else:
+            raw = [
+                "" if blank[i] else apply_transform(fm.transform, records[i], fm.sources, params)
+                for i in range(n)
+            ]
         fixes = overrides.get(f.name, {})
         cleaned = [N.clean_text(v) for v in raw]
         ctx = N.prepare(f, [v for i, v in enumerate(cleaned) if not blank[i]], params)
         if timezone:
             ctx["tz"] = timezone
-        passthrough = fm.transform in ("copy", "coalesce")
+        passthrough = fm.transform in ("copy", "coalesce", "each_row")
 
         cache: dict[str, tuple[str, str | None]] = {}
         values: list[str] = []
@@ -201,6 +234,7 @@ def convert(
     # Classify rows.
     reason_counts: Counter = Counter()
     blanked_counts: Counter = Counter()
+    skipped_counts: Counter = Counter()
     accepted: list[int] = []
     rejected_rows: list[tuple[int, str]] = []
     blanked_total = 0
@@ -209,7 +243,9 @@ def convert(
             continue
         row_rejects = [x for x in issues[i] if x.rejected]
         for x in issues[i]:
-            if not x.rejected:
+            if x.skipped:
+                skipped_counts[f"{schema.field(x.field).header}: {x.reason}"] += 1
+            elif not x.rejected:
                 blanked_counts[f"{schema.field(x.field).header}: {x.reason}"] += 1
                 blanked_total += 1
         if row_rejects:
@@ -233,7 +269,9 @@ def convert(
                 continue
             if key in seen:
                 first = seen[key]
-                if set(keys) == {f.name for f in schema.mappable_fields}:
+                if row_numbers[first] == row_numbers[i]:
+                    why = f"the same value appears twice in file row {row_numbers[i]}"
+                elif set(keys) == {f.name for f in schema.mappable_fields}:
                     why = f"exact duplicate of file row {row_numbers[first]} (every column matches)"
                 else:
                     why = (f"duplicate of file row {row_numbers[first]} "
@@ -259,6 +297,8 @@ def convert(
         ],
         columns=["File Row", "Status", "Reason", *df.columns],
     )
+    if each_field is not None and not rejects.empty:  # show which value of the file row this was
+        rejects.insert(3, each_field.header, [each_raw[i] for i, _, _ in reject_entries])
 
     row_status = ["empty" if blank[i] else "imported" for i in range(n)]
     row_reason = [""] * n
@@ -268,6 +308,8 @@ def convert(
         row_status[i], row_reason[i] = "duplicate", r
     audit_data: dict[str, list] = {
         "_row": row_numbers,
+        "_src": src,
+        "_extra": extra,
         "_status": row_status,
         "_reason": row_reason,
         "_issues": [json.dumps({x.field: x.reason for x in issues[i]}) if issues[i] else "" for i in range(n)],
@@ -278,7 +320,7 @@ def convert(
         audit_data[f"st.{f.name}"] = status_cols[f.name]
     audit = pd.DataFrame(audit_data)
 
-    total = n - sum(blank)
+    total = len(src_records) - sum(src_blank)
     fill_rates = {
         f.header: (sum(1 for i in accepted if out_cols[f.name][i]) / len(accepted)) if accepted else 0.0
         for f in schema.fields
@@ -290,14 +332,77 @@ def convert(
         imported=len(accepted),
         rejected=len(rejected_rows),
         duplicates=len(duplicate_rows),
-        blank_rows=sum(blank),
+        blank_rows=sum(src_blank),
         blanked_values=blanked_total,
         reason_counts=reason_counts,
         blanked_counts=blanked_counts,
         fill_rates=fill_rates,
         failed_values={k: sorted(v) for k, v in failed_values.items()},
         audit=audit,
+        extra_rows=sum(extra),
+        skipped_values=sum(skipped_counts.values()),
+        skipped_counts=skipped_counts,
     )
+
+
+def _expand_rows(records: list[dict[str, str]], blank: list[bool], f, mapping: Mapping,
+                 overrides: dict[str, dict[str, str]], timezone: str | None
+                 ) -> tuple[list[int], list[str], dict[int, list[RowIssue]]]:
+    """Work out the rows for 'One row per value' on field f.
+
+    Returns (source index per working row, the raw value each working row uses, early issues per working row).
+    A file row gets one row per different valid value (different after formatting, so 516-555-0100 and
+    (516) 555-0100 count once). Invalid extra values are skipped and noted on the row. A file row with no valid
+    value keeps one row with its first value (or blank), which is then rejected the normal way.
+    """
+    fm = mapping.get(f.name)
+    fixes = overrides.get(f.name, {})
+    per_row = [[] if blank[k] else [v for v in (N.clean_text(r.get(c, "")) for c in fm.sources) if v]
+               for k, r in enumerate(records)]
+    ctx = N.prepare(f, [v for vals in per_row for v in vals], fm.params)
+    if timezone:
+        ctx["tz"] = timezone
+    cache: dict[str, tuple[str, str | None]] = {}
+
+    def check(v: str) -> tuple[str, str | None]:
+        if v not in cache:
+            cache[v] = (fixes[v], None) if v in fixes else N.normalize(v, f, fm.params, ctx)
+        return cache[v]
+
+    src: list[int] = []
+    raw: list[str] = []
+    early: dict[int, list[RowIssue]] = {}
+    for k, vals in enumerate(per_row):
+        good: dict[str, str] = {}  # formatted output → first raw value that produced it
+        bad: list[tuple[str, str]] = []
+        for v in vals:
+            out, err = check(v)
+            if err:
+                bad.append((v, err))
+            elif out.lower() not in good:
+                good[out.lower()] = v
+        if not good:
+            src.append(k)
+            raw.append(vals[0] if vals else "")
+            continue
+        first = len(src)
+        for v in good.values():
+            src.append(k)
+            raw.append(v)
+        if bad:
+            early[first] = [RowIssue(f.name, v, f"extra value skipped — {err}", rejected=False, skipped=True)
+                            for v, err in bad]
+    return src, raw, early
+
+
+def source_rows(source: pd.DataFrame, audit: pd.DataFrame) -> pd.DataFrame:
+    """The source rows lined up with the audit rows (one per converted row).
+
+    Needed when 'One row per value' made several rows from one file row. Safe to call more than once.
+    """
+    if "_src" not in audit.columns or len(source) == len(audit):
+        return source
+    return source.iloc[audit["_src"].astype(int).to_numpy()].reset_index(drop=True)
 
 
 def _fmt_issue(schema: TargetSchema, x: RowIssue) -> str:
