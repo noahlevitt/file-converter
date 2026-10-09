@@ -82,6 +82,7 @@ def run_import(store: Store, import_id: int) -> ImportRecord:
 
         rows = [rr.excel_row_number(i) for i in range(len(rr.df))]
         result = convert(rr.df, schema, rec.mapping, row_numbers=rows, overrides=rec.overrides,
+                         timezone=opts.get("timezone"),
                          progress=lambda f, stage: track(0.08 + 0.84 * f, stage))
 
         track(0.93, "Writing files", force=True)
