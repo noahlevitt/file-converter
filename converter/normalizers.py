@@ -258,7 +258,136 @@ def _parse_phone(value: str, region: str, countries: tuple[str, ...], fmt: str) 
 def normalize_phone(value: str, field: FieldSpec, params: dict, ctx: dict) -> tuple[str, str | None]:
     region = (params.get("region") or (field.countries[0] if field.countries else "US")).upper()
     countries = tuple(c.upper() for c in field.countries)
-    return _parse_phone(value, region, countries, field.format or "E164")
+    fmt = field.format or "E164"
+    out, err = _parse_phone(value, region, countries, fmt)
+    if err is None:
+        if _DOUBLE_CC_RE.match(unicodedata.normalize("NFKC", value)):
+            ctx.setdefault("repairs", {})[value] = "ignored an extra +1 in front of a number that already had a +"
+        return out, err
+    if region != "US":
+        return out, err
+    # Only US numbers are expected, so a number that fails is most likely a typo: try to repair it.
+    local = ctx.get("phone_local", ())
+    fixed, note = _repair_phone(value, countries, fmt, local, ctx.get("phone_dominant"),
+                                ctx.get("phone_known", frozenset()))
+    if fixed:
+        ctx.setdefault("repairs", {})[value] = note
+        return fixed, None
+    return "", err + (f" — {note}" if note else "")
+
+
+def prepare_phone(field: FieldSpec, values: list[str]) -> dict:
+    """The area codes this file's valid numbers use — evidence for repairing area-code typos.
+
+    phone_local: area codes used by at least 5% of the valid numbers (and at least twice).
+    phone_dominant: the one area code used by 80%+ of them, if there is one (fills in 7-digit numbers).
+    """
+    counts: dict[str, int] = {}
+    known: set[str] = set()
+    total = 0
+    for v in list(dict.fromkeys(v for v in values if v))[:20_000]:
+        d = re.sub(r"\D", "", _EXT_RE.sub("", v))
+        if len(d) == 11 and d[0] == "1":
+            d = d[1:]
+        if len(d) != 10 or not _us_number(d, tuple(c.upper() for c in field.countries)):
+            continue
+        counts[d[:3]] = counts.get(d[:3], 0) + 1
+        known.add(d)
+        total += 1
+    local = tuple(sorted((c for c, n in counts.items() if n >= 2 and n >= 0.05 * total), key=lambda c: -counts[c]))
+    dominant = next((c for c, n in counts.items() if n >= 5 and n >= 0.8 * total), None)
+    return {"phone_local": local, "phone_dominant": dominant, "phone_known": frozenset(known)}
+
+
+@lru_cache(maxsize=100_000)
+def _us_number(d10: str, countries: tuple[str, ...]) -> bool:
+    if not re.fullmatch(r"\d{10}", d10):
+        return False
+    num = phonenumbers.PhoneNumber(country_code=1, national_number=int(d10))
+    if not phonenumbers.is_valid_number(num):
+        return False
+    return not countries or phonenumbers.region_code_for_number(num) in countries
+
+
+def _fmt_us(d10: str) -> str:
+    return f"({d10[:3]}) {d10[3:6]}-{d10[6:]}"
+
+
+def _one_digit_off(a: str, b: str) -> bool:
+    diff = [i for i in range(len(a)) if a[i] != b[i]]
+    return len(diff) == 1 or (len(diff) == 2 and diff[1] == diff[0] + 1 and a[diff[0]] == b[diff[1]]
+                              and a[diff[1]] == b[diff[0]])  # one wrong digit, or two neighbours swapped
+
+
+def _repair_phone(value: str, countries: tuple[str, ...], fmt: str, local: tuple[str, ...],
+                  dominant: str | None, known: frozenset = frozenset()) -> tuple[str, str]:
+    """Best-effort repair of a number that isn't a valid US number. Returns (formatted, note) or ("", why not).
+
+    Repairs are only made when exactly one US number fits; each one is reported so a person can check it.
+    1. A country code (other than +1) in front of a valid US number: +44 516 555 0100 → 516-555-0100. Not done
+       when the value is a real number of that country and the US area code isn't one this file uses.
+    2. One digit too many: a digit typed twice, an extra digit at the end or at the start.
+    3. An area code that's one digit off (or two digits swapped) from an area code used in this file:
+       514 in a file full of 516 numbers → 516. Also covers area codes that don't exist (433).
+    4. 7 digits (no area code) when one area code makes up most of the file.
+    When several numbers fit, the one that already appears elsewhere in the file wins; otherwise nothing is guessed.
+    """
+    body = _EXT_RE.sub("", _prep_phone(value))
+    digits = re.sub(r"\D", "", body)
+    seqs = [digits] + ([digits[1:]] if digits[:1] == "1" and len(digits) >= 11 else [])
+    found: dict[str, str] = {}
+
+    def add(d10: str, note: str) -> None:
+        if _us_number(d10, countries) and d10 not in found:
+            found[d10] = note
+
+    # 1. Foreign country code in front of a US number.
+    if "+" in body:
+        double = _DOUBLE_CC_RE.match(body)
+        try:
+            real_foreign = phonenumbers.is_valid_number(phonenumbers.parse(double.group(1) if double else body, None))
+        except phonenumbers.NumberParseException:
+            real_foreign = False
+        for seq in seqs:
+            for k in (1, 2, 3):
+                if len(seq) - k == 10 and seq[:k] != "1" and (not real_foreign or seq[k:k + 3] in local):
+                    add(seq[k:], f"removed country code +{seq[:k]} in front of a US number")
+    # 2. One digit too many.
+    if not found:
+        for seq in seqs:
+            if len(seq) != 11:
+                continue
+            for i in range(11):
+                doubled = (i > 0 and seq[i] == seq[i - 1]) or (i < 10 and seq[i] == seq[i + 1])
+                if doubled or i in (0, 10):
+                    why = ("a digit typed twice" if doubled else "an extra digit at the end" if i == 10
+                           else "an extra digit at the start")
+                    add(seq[:i] + seq[i + 1:], f"one digit too many ({why})")
+    # 3. Area code typo, judged against the area codes this file actually uses.
+    if not found and local:
+        for seq in seqs:
+            if len(seq) != 10:
+                continue
+            for code in local:
+                if code != seq[:3] and _one_digit_off(seq[:3], code):
+                    add(code + seq[3:], f"area code {seq[:3]} looks like a typo of {code}, which this file uses")
+    # 4. Missing area code.
+    if not found and dominant and len(digits) == 7:
+        add(dominant + digits, f"no area code; used {dominant}, the area code most numbers in this file have")
+
+    if len(found) > 1:
+        seen = [d for d in found if d in known]
+        if len(seen) == 1:
+            found = {seen[0]: found[seen[0]] + "; the same number appears elsewhere in this file"}
+    if len(found) == 1:
+        d10, note = next(iter(found.items()))
+        return _format_phone(phonenumbers.PhoneNumber(country_code=1, national_number=int(d10)), fmt), note
+    if len(found) > 1:
+        options = " or ".join(_fmt_us(d) for d in list(found)[:3])
+        return "", f"could be {options}, so it wasn't guessed"
+    if local and len(digits) in (10, 11):
+        return "", f"not a likely typo of this file's area codes ({', '.join(local[:4])})"
+    return "", ""
 
 
 # ---------------------------------------------------------------------------
@@ -326,6 +455,8 @@ def parse_date(value: str, ctx: dict, allow_no_year: bool = False) -> tuple[date
         return dt, None
     except DP.DateError as exc:
         msg = str(exc)
+    except (ValueError, OverflowError, TypeError):  # never let one odd value stop an import
+        return None, "not a date"
     if msg.startswith("unrecognized word") or msg == "unrecognized date":
         dt = _dateutil_parse(value, dayfirst=ctx.get("order") == "DMY")
         if dt is not None:
@@ -511,6 +642,8 @@ NORMALIZERS = {
 def prepare(field: FieldSpec, values: list[str], params: dict) -> dict:
     if field.type in ("date", "datetime"):
         return prepare_date(field, values, params)
+    if field.type == "phone":
+        return prepare_phone(field, values)
     return {}
 
 
@@ -556,6 +689,6 @@ def looks_like_date(v: str) -> bool:
         return False
     try:
         dt, _ = DP.parse(v, allow_no_year=True)
-    except DP.DateError:
+    except (DP.DateError, ValueError, OverflowError, TypeError):
         return False
     return dt.year == _NO_YEAR or MIN_YEAR <= dt.year <= MAX_YEAR
