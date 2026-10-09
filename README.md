@@ -33,7 +33,7 @@ value or row number, and page through large files. The same view downloads as a 
 | Step | What happens |
 |---|---|
 | **Read** | Every cell is read as text (no lost ZIP zeros, no phones turned into `5.16E+09`). Header row, encoding (UTF-8 / Windows-1252 / etc.), delimiter and Excel sheets are detected; the user can override. |
-| **Map** | 1) A saved **template** with the same column headers is applied instantly, including its notes and time zone. 2) Otherwise **rules** match headers, synonyms and value types (phones, dates…), and combine Mobile/Home phone columns. A column only counts as a phone column by its values alone when nearly all of its values are phone numbers, so a stray number typed into e.g. *Occupation* doesn't pull that column into the phone field. 3) Optionally, your **notes on columns** are applied by Claude. |
+| **Map** | 1) A saved **template** with the same column headers is applied instantly, including its notes and time zone. 2) Otherwise **rules** match headers, synonyms and value types (phones, dates…), and find every phone column (Phone, Phone 2…, Mobile, Home) — but not columns *about* a phone such as `phone4MarketingPreference`, Phone Type or SMS Opt In. A column only counts as a phone column by its values alone when nearly all of its values are phone numbers, so a stray number typed into e.g. *Occupation* doesn't pull that column into the phone field. 3) Optionally, your **notes on columns** are applied by Claude. |
 | **Review** | A grid shows each target field, its source column(s), how it's built, a sample of converted output, and any problem. Edit it directly, add notes per column, and run **Check for mistakes** before importing. |
 | **Convert** | Runs in a background worker pool (default 2 at a time; more wait in a queue) so users can keep working. Deterministic Python converts every row — Claude never touches the full file. Phones are validated with Google's libphonenumber, dates are interpreted per column (month-first vs day-first decided once for the whole column, Excel serial dates handled), ZIP/state/email normalized. |
 | **Report** | **Bad rows are not imported** and the result is flagged: *"37 bad rows were NOT imported"* with a reason per row in the rejected-rows file. Optional fields with invalid values are left blank (configurable per field). |
@@ -75,6 +75,22 @@ Every value is reduced to the 10-digit US number:
   that already lost digits (`5.163E+09`).
 - US territories (Puerto Rico, USVI, Guam, American Samoa, Northern Mariana Islands) count as US. To accept the
   50 states only, set `countries: [US]` in the schema.
+
+#### Several phone columns (e.g. Toast: phone, phone2, phone3, phone4)
+
+The phone field uses **One row per value**: a customer with different numbers gets one row per number, with all
+their other details (visit dates, birthday…) copied onto each row.
+
+- The same number in two columns (`201-555-0111` and `(201) 555-0111`) counts once.
+- An invalid extra number (e.g. `123` in phone3) is skipped; the row still imports with the customer's other
+  number(s), and the summary lists what was skipped.
+- A customer with no valid number at all is one bad row, as before.
+- The summary says how many extra rows were made ("5 rows ready to import from 4 file rows (2 extra rows…)"),
+  and the side-by-side view marks extra rows `N +` and underlines the number each row was made from.
+- To keep one row per customer instead, set **How** for the phone field to *First non-empty* (uses the first
+  number found, mobile/cell columns first). A saved template remembers the choice.
+- Columns that describe a phone (`phone4MarketingPreference`, `Phone Type`, `SMS Opt In`, `Phone Verified`) are
+  never used as phone numbers. Marketing-preference columns are treated like consent columns: not imported.
 
 ### Dates and times
 
