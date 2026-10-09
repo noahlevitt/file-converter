@@ -81,6 +81,10 @@ def _offset(sign: str, hh: str, mm: str | None) -> tzinfo:
     return timezone(-delta if sign == "-" else delta)
 
 
+_LABEL_WORDS = {"birthday", "bday", "dob", "born", "birth", "date", "of", "anniversary", "anniv", "wedding", "b",
+                "day", "unknown", "year", "n", "a", "na"}
+
+
 def _prep(value: str) -> tuple[str, tzinfo | None]:
     """Normalize the text and pull out any time zone (returned separately)."""
     v = unicodedata.normalize("NFKC", value)
@@ -282,6 +286,9 @@ def _parse_prepped(s: str, order: str, allow_no_year: bool, today: date, serial_
     words = [t for t in tokens if not t.isdigit()]
     nums = [t for t in tokens if t.isdigit()]
     months = [MONTHS[w] for w in words if w in MONTHS]
+    if allow_no_year:
+        # Labels and year placeholders: "Birthday: 9/12", "DOB 9/12", "09/12/XXXX", "YYYY-09-12".
+        words = [w for w in words if w not in _LABEL_WORDS and not re.fullmatch(r"x+|y+", w)]
     unknown = [w for w in words if w not in MONTHS]
     if unknown:
         raise DateError(f"unrecognized word '{unknown[0]}'")
@@ -332,6 +339,8 @@ def _parse_prepped(s: str, order: str, allow_no_year: bool, today: date, serial_
                 return _make(NO_YEAR, mm, dd), False
             return _make(year, mm, dd, hh, mi), has_time
         mm, dd = _md(int(a), int(b), order)
+        if allow_no_year and len(c) == 4 and int(c) == 0:  # 09/12/0000
+            return _make(NO_YEAR, mm, dd), False
         return _make(_year(c, mm, dd, today), mm, dd, hh, mi), has_time
     if len(nums) == 2:
         a, b = nums
