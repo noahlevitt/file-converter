@@ -34,6 +34,10 @@ def _bool(value: str | None, default: bool) -> bool:
 class Settings:
     anthropic_api_key: str = field(default_factory=lambda: os.getenv("ANTHROPIC_API_KEY", ""))
     ai_enabled: bool = field(default_factory=lambda: _bool(os.getenv("AI_ENABLED"), True))
+    # Claude is only called when a user clicks "Apply notes", "Check for mistakes" or "Suggest fixes".
+    # Set AI_AUTO_MAP=true to also have Claude refine the column mapping automatically on every upload.
+    ai_auto_map: bool = field(default_factory=lambda: _bool(os.getenv("AI_AUTO_MAP"), False))
+    ai_mask_phones: bool = field(default_factory=lambda: _bool(os.getenv("AI_MASK_PHONES"), True))
     mapping_model: str = field(default_factory=lambda: os.getenv("MAPPING_MODEL", "claude-sonnet-5-5"))
     repair_model: str = field(default_factory=lambda: os.getenv("REPAIR_MODEL", "claude-haiku-5-5"))
     ai_sample_values: int = field(default_factory=lambda: int(os.getenv("AI_SAMPLE_VALUES", "15")))
