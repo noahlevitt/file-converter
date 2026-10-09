@@ -18,6 +18,18 @@ Origin = Literal["template", "rule", "ai", "user", ""]
 ALLOWED_PARAMS = {"date_order", "input_format", "region", "part", "separator", "index", "value_map", "value"}
 
 
+def phone_rule(field_type: str, transform: str) -> str:
+    """Several phone columns ALWAYS give one row per different number; 'One row per phone number' is only for phones.
+
+    Also upgrades older templates that used 'First non-empty' on the phone field.
+    """
+    if field_type == "phone" and transform == "coalesce":
+        return "each_row"
+    if field_type != "phone" and transform == "each_row":
+        return "coalesce"
+    return transform
+
+
 class FieldMapping(BaseModel):
     sources: list[str] = Field(default_factory=list)
     transform: str = "none"
@@ -84,6 +96,7 @@ class Mapping(BaseModel):
                 fm.transform = "none"
             if fm.transform in ("none", "constant"):
                 fm.sources = []
+            fm.transform = phone_rule(f.type, fm.transform)
             if fm.transform in ("coalesce", "concat", "each_row") and len(fm.sources) == 1:
                 fm.transform = "copy"
             if fm.transform not in ("none", "constant") and not fm.sources:
@@ -106,7 +119,7 @@ class Mapping(BaseModel):
                 issues[f.name] = "required field has no source column"
         multi = [f.name for f in schema.mappable_fields if self.get(f.name).transform == "each_row"]
         for name in multi[1:]:
-            issues[name] = (f"only one field can use 'One row per value' ({schema.field(multi[0]).header} "
+            issues[name] = (f"only one field can use 'One row per phone number' ({schema.field(multi[0]).header} "
                             "already does)")
         return issues
 
