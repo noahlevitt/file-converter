@@ -44,6 +44,8 @@ class FieldMapping(BaseModel):
             extra = f" (split on '{self.params.get('separator', ',')}', piece {int(self.params.get('index') or 0) + 1})"
         elif self.transform == "coalesce":
             return "first non-empty of " + ", ".join(self.sources)
+        elif self.transform == "each_row":
+            return "one row per value in " + ", ".join(self.sources)
         label = "" if self.transform == "copy" else f"{info.label if info else self.transform}: "
         return f"{label}{src}{extra}"
 
@@ -82,7 +84,7 @@ class Mapping(BaseModel):
                 fm.transform = "none"
             if fm.transform in ("none", "constant"):
                 fm.sources = []
-            if fm.transform in ("coalesce", "concat") and len(fm.sources) == 1:
+            if fm.transform in ("coalesce", "concat", "each_row") and len(fm.sources) == 1:
                 fm.transform = "copy"
             if fm.transform not in ("none", "constant") and not fm.sources:
                 fm = FieldMapping()  # its source column isn't in this file
@@ -102,6 +104,10 @@ class Mapping(BaseModel):
                 issues[f.name] = p
             elif f.required and fm.transform == "none" and not f.default:
                 issues[f.name] = "required field has no source column"
+        multi = [f.name for f in schema.mappable_fields if self.get(f.name).transform == "each_row"]
+        for name in multi[1:]:
+            issues[name] = (f"only one field can use 'One row per value' ({schema.field(multi[0]).header} "
+                            "already does)")
         return issues
 
 
