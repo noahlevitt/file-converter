@@ -22,7 +22,9 @@ from converter.auth import logout, require_login
 from converter.compare import (FILTERS, build_compare_html, column_plan, comparison_xlsx, field_change_summary,
                                filter_rows, status_counts)
 from converter.config import get_settings
-from converter.editor import FROM_LABEL, LABELS, OPTION_HELP, apply_row_edit, option_text, row_problem
+from converter.checks import column_warnings
+from converter.editor import (FROM_LABEL, LABELS, OPTION_HELP, apply_column_edit, apply_row_edit, option_text,
+                              row_problem)
 from converter.engine import convert, preview_values
 from converter.jobs import ImportRunner
 from converter.mapping import Mapping, profile_columns
@@ -299,13 +301,15 @@ def page_new_import() -> None:
         st.info("Columns matched by rules and Claude. Check the rows marked low/medium before importing.")
     else:
         st.info("Columns matched automatically. Check the rows marked low/medium, edit anything in the grid, or "
-                "add notes on columns below.")
+                "change where each column goes under Columns in your file below.")
     for n in meta["notes"]:
         if not n.startswith("Matched saved template"):
             st.caption("ℹ️ " + n)
 
     mapping: Mapping = ss.mapping
     preview = preview_values(df, schema, mapping, timezone=ss.get("timezone"))
+    field_warn = {fname: f"'{col}' may not be a {schema.field(fname).type} column — see Columns in your file"
+                  for col, (fname, _) in column_warnings(schema, mapping, ss.profiles).items()}
     grid = pd.DataFrame([
         {
             COL_FIELD: f.header + (" *" if f.required else "") + (" 🔒" if f.fixed_blank else ""),
@@ -314,7 +318,7 @@ def page_new_import() -> None:
             COL_SRC: mapping.get(f.name).sources,
             COL_OPT: option_text(mapping.get(f.name), f),
             COL_PREVIEW: preview.get(f.name, ""),
-            COL_CHECK: ("⚠ " + p) if (p := row_problem(schema, mapping, f.name)) else "",
+            COL_CHECK: ("⚠ " + p) if (p := row_problem(schema, mapping, f.name) or field_warn.get(f.name, "")) else "",
             COL_BY: "Fixed" if f.fixed_blank else origin_label(mapping.get(f.name)),
             COL_WHY: "Always blank — required by the import format; can't be changed" if f.fixed_blank
             else mapping.get(f.name).reason,
@@ -342,7 +346,9 @@ def page_new_import() -> None:
         st.error(e)
     unused = [c for c in df.columns if c not in mapping.used_sources()]
     if unused:
-        st.caption("Columns not imported: " + ", ".join(f"`{c}`" for c in unused))
+        skipped = set(mapping.excluded_columns)
+        st.caption("Columns not imported: " + ", ".join(f"`{c}`" + (" (skipped)" if c in skipped else "")
+                                                         for c in unused))
 
     _notes_and_checks(df)
 
@@ -364,19 +370,35 @@ def page_new_import() -> None:
         open_import(import_id)
 
 
-def on_notes_edit(key: str, columns: list[str]) -> None:
+COL_GOES, COL_SKIP, COL_NOTE = "Goes to", "Skip", "Your note"
+
+
+def on_columns_edit(key: str, columns: list[str]) -> None:
+    """Edits in the "Columns in your file" table: where a column goes, skipping it, and notes."""
     state = ss.get(key, {})
-    notes = dict(ss.mapping.column_notes)
+    mapping: Mapping = ss.mapping
+    by_header = {f.header: f.name for f in schema.mappable_fields}
+    notes = dict(mapping.column_notes)
+    messages: list[str] = []
     for idx, changes in state.get("edited_rows", {}).items():
-        if "Your note" in changes:
-            col = columns[int(idx)]
-            text = (changes["Your note"] or "").strip()
+        col = columns[int(idx)]
+        if COL_NOTE in changes:
+            text = (changes[COL_NOTE] or "").strip()
             if text:
                 notes[col] = text
             else:
                 notes.pop(col, None)
-    ss.mapping = ss.mapping.model_copy(update={"column_notes": notes})
+        targets = None
+        if COL_GOES in changes:
+            targets = [by_header[h] for h in (changes[COL_GOES] or []) if h in by_header]
+        skip = changes.get(COL_SKIP)
+        if targets is not None or skip is not None:
+            mapping, msgs = apply_column_edit(schema, mapping, col, targets=targets, skip=skip)
+            messages.extend(msgs)
+    ss.mapping = mapping.model_copy(update={"column_notes": notes})
+    ss.column_messages = messages
     ss.notes_version = ss.get("notes_version", 0) + 1
+    ss.editor_version += 1
 
 
 def on_general_note(key: str) -> None:
@@ -424,29 +446,48 @@ def _notes_and_checks(df: pd.DataFrame) -> None:
     columns = list(df.columns)
     mapping: Mapping = ss.mapping
     with st.container(border=True):
-        st.markdown("**Notes on columns**")
-        st.caption("Write what a column is, where it goes or how to read it — e.g. *“this is the last visit "
-                   "date”*, *“actually goes to anniversary”*, *“dates are day-first”*, *“don't import”*. "
+        st.markdown("**Columns in your file**")
+        st.caption("Change where a column goes with **Goes to** (clear it to leave the column out), or tick "
+                   "**Skip** to keep a column out of the import completely — rules, saved templates and Claude "
+                   "won't map it again. Picking a field here replaces whatever fed that field before. "
+                   "You can also write a note on what a column is, where it goes or how to read it — e.g. "
+                   "*“this is the last visit date”*, *“dates are day-first”*. "
                    + ("Claude applies the notes when you click *Apply notes*. " if assistant else
                       "Claude isn't configured, so notes are saved with the template as documentation. ")
-                   + "Notes are saved with the template and the import.")
-        feeds: dict[str, list[str]] = {c: [] for c in columns}
-        for f in schema.mappable_fields:
-            for c in mapping.get(f.name).sources:
-                if c in feeds:
-                    feeds[c].append(f.header)
+                   + "Everything here is saved with the template and the import.")
+        warnings = column_warnings(schema, mapping, ss.profiles)
         samples = {p.name: p.samples for p in ss.profiles}
+        excluded = set(mapping.excluded_columns)
         notes_df = pd.DataFrame([{
             "Column": c,
             "Sample values": " | ".join(samples.get(c, [])[:3]),
-            "Goes to": ", ".join(feeds[c]) or "— not imported",
-            "Your note": mapping.column_notes.get(c, ""),
+            COL_GOES: [schema.field(n).header for n in mapping.targets_of(c) if n in schema.field_names],
+            COL_SKIP: c in excluded,
+            COL_CHECK: ("⚠ " + warnings[c][1]) if c in warnings else ("Skipped" if c in excluded else ""),
+            COL_NOTE: mapping.column_notes.get(c, ""),
         } for c in columns])
         nkey = f"notes_editor_{ss.editor_version}_{ss.get('notes_version', 0)}"
-        st.data_editor(notes_df, key=nkey, on_change=on_notes_edit, args=(nkey, columns), hide_index=True,
-                       num_rows="fixed", width="stretch", disabled=["Column", "Sample values", "Goes to"],
-                       column_config={"Your note": st.column_config.TextColumn(width="large"),
-                                      "Sample values": st.column_config.TextColumn(width="medium")})
+        st.data_editor(notes_df, key=nkey, on_change=on_columns_edit, args=(nkey, columns), hide_index=True,
+                       num_rows="fixed", width="stretch", disabled=["Column", "Sample values", COL_CHECK],
+                       column_config={
+                           "Column": st.column_config.TextColumn(pinned=True),
+                           "Sample values": st.column_config.TextColumn(width="medium"),
+                           COL_GOES: st.column_config.MultiselectColumn(
+                               options=[f.header for f in schema.mappable_fields], width="medium",
+                               help="Field(s) this column goes to. Empty = not imported. Picking a field makes this "
+                                    "column its only source."),
+                           COL_SKIP: st.column_config.CheckboxColumn(
+                               help="Leave this column out of the import and stop it from being mapped again."),
+                           COL_CHECK: st.column_config.TextColumn(width="medium"),
+                           COL_NOTE: st.column_config.TextColumn(width="large"),
+                       })
+        for msg in ss.pop("column_messages", None) or []:
+            st.caption("✔️ " + msg)
+        if warnings:
+            st.warning("Check " + ", ".join(f"**{c}**" for c in warnings) + " — " +
+                       ("its" if len(warnings) == 1 else "their") + " values don't fit the field "
+                       + ("it goes" if len(warnings) == 1 else "they go") + " to. Clear **Goes to** or tick "
+                       "**Skip** if that's a mistake.")
         gkey = f"general_note_{ss.file_sig[1][:10]}"
         st.text_area("General note (optional)", value=mapping.general_note, key=gkey, on_change=on_general_note,
                      args=(gkey,), height=68,
