@@ -37,7 +37,7 @@ def option_text(fm: FieldMapping, f: FieldSpec) -> str:
         return "; ".join(f"{m.get('from', '')}={m.get('to', '')}" for m in p.get("value_map", []))
     if t == "constant":
         return str(p.get("value", ""))
-    if t in ("copy", "coalesce"):
+    if t in ("copy", "coalesce", "each_row"):
         if f.type in ("date", "datetime"):
             return str(p.get("input_format") or p.get("date_order") or "auto")
         if f.type == "phone" and p.get("region"):
@@ -72,7 +72,7 @@ def parse_option(transform: str, f: FieldSpec, text: str | None) -> tuple[dict[s
         return {"value_map": pairs}, None
     if transform == "constant":
         return {"value": text}, None
-    if transform in ("copy", "coalesce"):
+    if transform in ("copy", "coalesce", "each_row"):
         if f.type in ("date", "datetime") and text:
             if "%" in text:
                 return {"input_format": text}, None
@@ -105,11 +105,12 @@ def apply_row_edit(schema: TargetSchema, mapping: Mapping, field_name: str, chan
             if new_t in ("none", "constant"):
                 fm.sources = []
     # Sensible automatic transform when only sources were chosen.
+    several = "each_row" if f.type == "phone" else "coalesce"  # several phone columns → one row per number
     if fm.transform == "none" and fm.sources:
-        fm.transform = "copy" if len(fm.sources) == 1 else "coalesce"
+        fm.transform = "copy" if len(fm.sources) == 1 else several
     elif fm.transform == "copy" and len(fm.sources) > 1:
-        fm.transform = "coalesce"
-    elif fm.transform in ("coalesce", "concat") and len(fm.sources) == 1:
+        fm.transform = several
+    elif fm.transform in ("coalesce", "concat", "each_row") and len(fm.sources) == 1:
         fm.transform = "copy"
     elif fm.transform not in ("none", "constant") and not fm.sources and col_sources in changes:
         fm.transform = "none"
@@ -138,7 +139,7 @@ def _without_column(fm: FieldMapping, column: str) -> FieldMapping:
     if not sources:
         return FieldMapping(origin="user", reason="set by reviewer")
     transform = fm.transform
-    if transform in ("coalesce", "concat") and len(sources) == 1:
+    if transform in ("coalesce", "concat", "each_row") and len(sources) == 1:
         transform = "copy"
     params = fm.params if transform == fm.transform else {}
     if check_transform(transform, sources, params):
@@ -151,7 +152,8 @@ def apply_column_edit(schema: TargetSchema, mapping: Mapping, column: str, targe
     """Edit the mapping from the source column's side (the "Columns in your file" table).
 
     targets: target field names this column should go to (None = unchanged, [] = not imported). A field that
-    gains this column takes it as its only source; whatever fed that field before is dropped from it.
+    gains this column takes it as its only source; whatever fed that field before is dropped from it. Phone fields
+    are the exception: the column is added to the others and each different number becomes its own row.
     skip: True removes the column from every field and keeps it out (also of templates and Claude's suggestions).
     Returns (new mapping, messages describing what changed).
     """
@@ -186,7 +188,15 @@ def apply_column_edit(schema: TargetSchema, mapping: Mapping, column: str, targe
                 continue
             f = schema.field(name)
             before = fields.get(name, FieldMapping())
-            if before.transform != "none" and before.sources:
+            has_sources = before.transform not in ("none", "constant") and bool(before.sources)
+            if f.type == "phone" and has_sources:
+                # Phone columns add up: each different number becomes its own row.
+                fields[name] = FieldMapping(sources=[*before.sources, column], transform="each_row", origin="user",
+                                            reason="set by reviewer")
+                messages.append(f"{f.header} now also uses '{column}' — one row per different number "
+                                f"({', '.join(fields[name].sources)}).")
+                continue
+            if has_sources:
                 messages.append(f"{f.header} now comes from '{column}' (was {', '.join(before.sources)}).")
             else:
                 messages.append(f"{f.header} now comes from '{column}'.")
