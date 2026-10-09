@@ -8,7 +8,8 @@ from datetime import datetime
 import pandas as pd
 
 from . import normalizers as N
-from .ai import AIError, ClaudeAssistant, accept_repair
+from .ai import AIError, AIReviewResult, ClaudeAssistant, accept_repair
+from .checks import Finding, build_review_payload, run_checks
 from .config import Settings
 from .heuristics import auto_map
 from .mapping import ColumnProfile, FieldMapping, Mapping
@@ -38,10 +39,11 @@ def make_assistant(settings: Settings) -> ClaudeAssistant | None:
 
 
 def merge(base: Mapping, changes: Mapping) -> Mapping:
+    """Apply field changes on top of base; base keeps its notes."""
     fields = {k: v.model_copy(deep=True) for k, v in base.fields.items()}
     for k, v in changes.fields.items():
         fields[k] = v.model_copy(deep=True)
-    return Mapping(fields=fields)
+    return Mapping(fields=fields, column_notes=dict(base.column_notes), general_note=base.general_note)
 
 
 def initial_mapping(schema: TargetSchema, df: pd.DataFrame, profiles: list[ColumnProfile], store: Store | None,
@@ -71,6 +73,8 @@ def initial_mapping(schema: TargetSchema, df: pd.DataFrame, profiles: list[Colum
                 if fm.transform != "none":
                     fm.origin = "template"
                     rules.fields[name] = fm
+            rules.column_notes = {**tm.column_notes, **rules.column_notes}
+            rules.general_note = rules.general_note or tm.general_note
             notes.append(f"Columns are {near_sim:.0%} similar to saved template '{near_tpl.name}'; "
                          "its rules were applied where the columns still exist.")
 
@@ -125,3 +129,23 @@ def _validate_final(f, value: str, params: dict, timezone: str | None = None) ->
 
 def empty_field_mapping() -> FieldMapping:
     return FieldMapping(origin="user")
+
+
+def check_for_mistakes(schema: TargetSchema, mapping: Mapping, source: pd.DataFrame, audit: pd.DataFrame,
+                       profiles: list[ColumnProfile], assistant: ClaudeAssistant | None, use_claude: bool,
+                       mask_phones: bool = True, timezone_label: str = "", scope: str = ""
+                       ) -> tuple[list[Finding], AIReviewResult | None, str | None]:
+    """Rule checks always; Claude's review on top when requested and configured. Returns (findings, ai, error)."""
+    findings = run_checks(schema, mapping, source, audit, profiles, timezone_label=timezone_label)
+    if not (use_claude and assistant is not None):
+        return findings, None, None
+    payload = build_review_payload(schema, mapping, source, audit, findings, mask_phones=mask_phones,
+                                   stats_scope=scope)
+    try:
+        res = assistant.review(schema, profiles, mapping, payload)
+    except AIError as exc:
+        return findings, None, str(exc)
+    for x in res.findings:
+        findings.append(Finding(x.get("severity", "info"), x.get("field", ""), x.get("column", ""),
+                                x.get("issue", ""), x.get("suggestion", ""), source="claude"))
+    return findings, res, None
