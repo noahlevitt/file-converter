@@ -80,9 +80,16 @@ def write_summary(result: ConversionResult, schema: TargetSchema, source_filenam
         f"Empty rows skipped:                  {result.blank_rows:,}",
         f"Invalid optional values blanked:     {result.blanked_values:,}",
     ]
+    if result.extra_rows or result.skipped_values:
+        lines.insert(lines.index(f"Rows converted:                      {result.imported:,}") + 1,
+                     f"  of which extra rows for 2nd/3rd… phone numbers: {result.extra_rows:,}")
+        lines.append(f"Invalid extra phone numbers skipped: {result.skipped_values:,}")
     if result.reason_counts:
         lines += ["", "Why rows were rejected:"]
         lines += [f"  {count:>6,}  {reason}" for reason, count in result.reason_counts.most_common()]
+    if result.skipped_counts:
+        lines += ["", "Extra numbers skipped (the row was still imported with its other number):"]
+        lines += [f"  {count:>6,}  {reason}" for reason, count in result.skipped_counts.most_common()]
     if result.blanked_counts:
         lines += ["", "Optional values left blank:"]
         lines += [f"  {count:>6,}  {reason}" for reason, count in result.blanked_counts.most_common()]
