@@ -25,6 +25,14 @@ CONSENT_WORDS = {"opt", "optin", "optout", "opted", "consent", "consented", "sub
 GENERIC_HEADERS = {"date", "time", "datetime", "timestamp", "created", "createdat", "updated", "updatedat", "name",
                    "number", "value", "status", "type", "notes", "last", "other", "info", "data"}
 
+# Header words that say "this is a phone column". "number"/"no"/"#" count only without a non-phone word next to it.
+PHONE_WORDS = {"phone", "phones", "phonenumber", "mobile", "cell", "cellphone", "cellular", "tel", "telephone", "ph",
+               "sms", "text", "texting", "whatsapp", "wireless", "landline", "contact"}
+NUMBER_WORDS = {"number", "num", "no", "nbr", "numbers"}
+NOT_PHONE_WORDS = {"order", "account", "acct", "id", "member", "card", "invoice", "ticket", "zip", "postal", "store",
+                   "location", "receipt", "check", "transaction", "customer", "loyalty", "reference", "ref", "employee",
+                   "table", "party", "guest", "visit", "visits", "points", "count", "fax"}
+
 _FULL_ADDR_RE = re.compile(r",.*\b\d{5}(?:-\d{4})?\s*$|,\s*[A-Za-z .]+,?\s+[A-Z]{2}\b")
 
 
@@ -46,6 +54,23 @@ def _candidates(f: FieldSpec) -> list[str]:
 def is_consent_column(column: str) -> bool:
     words = set(_words(column))
     return bool(words & CONSENT_WORDS) or any(k in norm_header(column) for k in ("optin", "optout", "donot"))
+
+
+def is_phone_header(column: str) -> bool:
+    """True when the column name itself says it holds phone numbers ("Mobile", "Cell #", "Contact Number")."""
+    words = set(_words(column))
+    if words & PHONE_WORDS:
+        return not (words & {"fax"})
+    return bool(words & NUMBER_WORDS) and not (words & NOT_PHONE_WORDS) and len(words) <= 2
+
+
+def enough_evidence(p: ColumnProfile, share: float, minimum: float = 0.9) -> bool:
+    """Values alone say "phone" only when nearly all of them are phones and there are enough of them to tell.
+
+    A column like "Occupation" with two values, one of which someone typed a phone number into, is not a phone
+    column: 50% phone-like over 2 values is noise, not evidence.
+    """
+    return share >= minimum and p.unique >= min(3, p.non_empty)
 
 
 def header_score(column: str, f: FieldSpec) -> float:
@@ -141,10 +166,18 @@ def auto_map(schema: TargetSchema, profiles: list[ColumnProfile]) -> Mapping:
         if f.type != "phone":
             continue
         fm = fields[f.name]
-        phone_cols = [p.name for p in profiles if (p.shares.get("phone", 0) >= 0.5 or header_score(p.name, f) >= 82)
+        def _phone_column(p: ColumnProfile) -> bool:
+            share = p.shares.get("phone", 0)
+            if header_score(p.name, f) >= 82:
+                return True
+            if is_phone_header(p.name):
+                return share >= 0.3
+            return enough_evidence(p, share)  # column name says nothing about phones: values must be clear
+
+        phone_cols = [p.name for p in profiles if _phone_column(p)
                       and p.name not in used - set(fm.sources) and not is_consent_column(p.name)]
         if fm.transform == "none":
-            strong = [p for p in profiles if p.name not in used and p.shares.get("phone", 0) >= 0.9
+            strong = [p for p in profiles if p.name not in used and enough_evidence(p, p.shares.get("phone", 0))
                       and not is_consent_column(p.name)]
             if strong:
                 phone_cols = [p.name for p in strong]
