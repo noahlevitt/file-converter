@@ -34,7 +34,7 @@ class FakeClient:
 def test_auto_map_pos(samples, schema):
     rr = read_sample(samples, "pos_guest_export.csv")
     m = auto_map(schema, profile_columns(rr.df))
-    assert m.get("phone").transform == "coalesce" and m.get("phone").sources == ["Mobile #", "Home Phone"]
+    assert m.get("phone").transform == "each_row" and m.get("phone").sources == ["Mobile #", "Home Phone"]
     assert m.get("first_name").transform == "name_part" and m.get("first_name").params == {"part": "first"}
     assert m.get("city").transform == "address_part"
     assert m.get("signup_date").sources == ["Join Date"]
@@ -122,7 +122,7 @@ def test_apply_row_edit(schema):
     m = Mapping(fields={"phone": FieldMapping()})
     m2, err = apply_row_edit(schema, m, "phone", {"Source column(s)": ["Mobile", "Home"]}, "How",
                              "Source column(s)", "Option")
-    assert err is None and m2.get("phone").transform == "coalesce" and m2.get("phone").origin == "user"
+    assert err is None and m2.get("phone").transform == "each_row" and m2.get("phone").origin == "user"
     m3, _ = apply_row_edit(schema, m2, "phone", {"How": "Leave blank / default"}, "How", "Source column(s)", "Option")
     assert m3.get("phone").transform == "none" and m3.get("phone").sources == []
 
