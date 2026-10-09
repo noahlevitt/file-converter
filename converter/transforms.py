@@ -36,10 +36,11 @@ TRANSFORMS: dict[str, TransformInfo] = {
         TransformInfo("copy", "Copy column", "Use the source column's value as-is (then type-normalized).", 1, 1,
                       ("date_order", "input_format", "region")),
         TransformInfo("coalesce", "First non-empty", "Use the first non-empty value across several columns, in order "
-                      "(e.g. Mobile, then Phone).", 2, None, ("date_order", "input_format", "region")),
-        TransformInfo("each_row", "One row per value", "Creates a separate output row for each different value "
-                      "across these columns (e.g. Phone, Phone 2, Phone 3); every other field is copied onto each row. "
-                      "Only one field can use this.", 2, None, ("date_order", "input_format", "region")),
+                      "(e.g. Last Visit, then Created). Not for phone numbers: several phone columns always give one "
+                      "row per number.", 2, None, ("date_order", "input_format", "region")),
+        TransformInfo("each_row", "One row per phone number", "Phone field only, and always used when it has "
+                      "several columns (e.g. Phone, Phone 2, Phone 3): each different number gets its own output row, "
+                      "with every other field copied from the original row.", 2, None, ("region",)),
         TransformInfo("concat", "Combine columns", "Join several columns with a separator (default a space).", 2, None,
                       ("separator",)),
         TransformInfo("name_part", "Part of a full name", "Extract first/middle/last/etc. from a full-name column "
