@@ -43,7 +43,8 @@ def merge(base: Mapping, changes: Mapping) -> Mapping:
     fields = {k: v.model_copy(deep=True) for k, v in base.fields.items()}
     for k, v in changes.fields.items():
         fields[k] = v.model_copy(deep=True)
-    return Mapping(fields=fields, column_notes=dict(base.column_notes), general_note=base.general_note)
+    return Mapping(fields=fields, column_notes=dict(base.column_notes), general_note=base.general_note,
+                   excluded_columns=list(base.excluded_columns))
 
 
 def initial_mapping(schema: TargetSchema, df: pd.DataFrame, profiles: list[ColumnProfile], store: Store | None,
@@ -75,6 +76,9 @@ def initial_mapping(schema: TargetSchema, df: pd.DataFrame, profiles: list[Colum
                     rules.fields[name] = fm
             rules.column_notes = {**tm.column_notes, **rules.column_notes}
             rules.general_note = rules.general_note or tm.general_note
+            if tm.excluded_columns:
+                rules.excluded_columns = list(tm.excluded_columns)
+                rules = rules.normalized(schema, columns)
             notes.append(f"Columns are {near_sim:.0%} similar to saved template '{near_tpl.name}'; "
                          "its rules were applied where the columns still exist.")
 
