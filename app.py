@@ -38,6 +38,10 @@ TZ = settings.timezone
 
 st.set_page_config(page_title=APP_TITLE, page_icon="🔄", layout="wide")
 
+US_ZONES = {"Eastern": "America/New_York", "Central": "America/Chicago", "Mountain": "America/Denver",
+            "Arizona": "America/Phoenix", "Pacific": "America/Los_Angeles", "Alaska": "America/Anchorage",
+            "Hawaii": "Pacific/Honolulu"}
+ZONE_LABEL = {v: k for k, v in US_ZONES.items()}
 COL_FIELD, COL_TYPE, COL_HOW, COL_SRC, COL_OPT = "Field", "Type", "How", "Source column(s)", "Option"
 COL_PREVIEW, COL_CHECK, COL_BY, COL_WHY = "Sample output", "Check", "Mapped by", "Why"
 
@@ -97,7 +101,7 @@ ss.setdefault("uploader_version", 0)
 # ---------------------------------------------------------------------------
 
 FILE_KEYS = ["file_sig", "file_name", "file_bytes", "read", "profiles", "mapping", "map_meta", "pending",
-             "edit_errors", "ai_used", "template_name", "read_error"]
+             "edit_errors", "ai_used", "template_name", "read_error", "timezone"]
 
 
 def reset_file_state() -> None:
@@ -121,6 +125,9 @@ def load_and_map(sheet: str | None = None, header_row: int | None | str = "auto"
     ss.map_meta = {"source": sug.source, "notes": sug.notes,
                    "template": sug.template.name if sug.template else None, "similarity": sug.similarity}
     ss.template_name = sug.template.name if (sug.template and sug.similarity == 1.0) else Path(ss.file_name).stem
+    tpl_tz = sug.template.read_options.get("timezone") if sug.template else None
+    ss.timezone = tpl_tz if tpl_tz in ZONE_LABEL else (settings.timezone if settings.timezone in ZONE_LABEL
+                                                       else "America/New_York")
     ss.ai_used = sug.source == "rules+ai"
     ss.pending = None
     ss.edit_errors = []
@@ -170,13 +177,13 @@ def start_import() -> int:
     typed = (ss.get(template_key()) or "").strip()
     if ss.get("remember_mapping", True) and typed:
         tpl_name = typed
-        store.save_template(tpl_name, list(rr.df.columns), ss.mapping,
-                            {"sheet": rr.sheet, "header_row": rr.header_row}, schema.name, user["username"])
+    read_options = {"sheet": rr.sheet, "header_row": rr.header_row, "timezone": ss.get("timezone")}
+    if ss.get("remember_mapping", True) and typed:
+        store.save_template(tpl_name, list(rr.df.columns), ss.mapping, read_options, schema.name, user["username"])
         store.mark_template_used(tpl_name)
     import_id = store.create_import(
         username=user["username"], filename=ss.file_name, data=ss.file_bytes, schema_label=schema.label,
-        schema_json=schema.model_dump_json(), mapping=ss.mapping,
-        read_options={"sheet": rr.sheet, "header_row": rr.header_row}, template_name=tpl_name,
+        schema_json=schema.model_dump_json(), mapping=ss.mapping, read_options=read_options, template_name=tpl_name,
         ai_used=bool(ss.get("ai_used")))
     runner.submit(import_id)
     return import_id
@@ -255,6 +262,14 @@ def page_new_import() -> None:
     st.markdown(" · ".join(info))
     for w in rr.warnings:
         st.warning(w)
+    tz_col, _ = st.columns([2, 3])
+    tz_label = tz_col.selectbox(
+        "Client time zone", list(US_ZONES), index=list(US_ZONES).index(ZONE_LABEL.get(ss.get("timezone"), "Eastern")),
+        key=f"tz_{ss.file_sig[1][:10]}",
+        help="Times in the file that include a zone (Z, UTC, EST, +00:00…) and Unix timestamps are converted to "
+             "this zone. Times without a zone are kept exactly as written.")
+    if US_ZONES[tz_label] != ss.get("timezone"):
+        ss.timezone = US_ZONES[tz_label]
 
     with st.expander("File options and raw preview", expanded=bool(rr.warnings)):
         c1, c2, c3 = st.columns([2, 2, 1], vertical_alignment="bottom")
@@ -285,7 +300,7 @@ def page_new_import() -> None:
             st.caption("ℹ️ " + n)
 
     mapping: Mapping = ss.mapping
-    preview = preview_values(df, schema, mapping)
+    preview = preview_values(df, schema, mapping, timezone=ss.get("timezone"))
     grid = pd.DataFrame([
         {
             COL_FIELD: f.header + (" *" if f.required else "") + (" 🔒" if f.fixed_blank else ""),
@@ -657,8 +672,10 @@ def _completed_view(rec: ImportRecord) -> None:
         n_fix = sum(len(v) for v in rec.overrides.values())
         if n_fix:
             st.caption(f"{n_fix} value fix{'es' if n_fix != 1 else ''} approved from Claude suggestions were applied.")
+        tz = rec.read_options.get("timezone")
         st.caption(f"Read options: sheet {rec.read_options.get('sheet') or '—'}, header row "
-                   f"{'none' if rec.read_options.get('header_row') is None else rec.read_options['header_row'] + 1}")
+                   f"{'none' if rec.read_options.get('header_row') is None else rec.read_options['header_row'] + 1}"
+                   f", client time zone {ZONE_LABEL.get(tz, tz or 'Eastern')}")
 
     st.divider()
     a, b = st.columns([1, 3])
@@ -710,7 +727,8 @@ def _repair_section(rec: ImportRecord, rec_schema: TargetSchema, audit: pd.DataF
                         f = rec_schema.field(fname)
                         good = [v for v in audit.loc[audit["_status"] == "imported", f"out.{fname}"].tolist() if v][:5]
                         pairs, _ = assistant.repair_values(f, values, good)
-                        accepted, rejected = validate_repairs(rec_schema, rec.mapping, fname, pairs)
+                        accepted, rejected = validate_repairs(rec_schema, rec.mapping, fname, pairs,
+                                                              timezone=rec.read_options.get("timezone"))
                         fixed = set(accepted) | {r[0] for r in rejected}
                         proposals[fname] = {"accepted": accepted, "rejected": rejected,
                                             "unfixable": [v for v in values if v not in fixed]}
