@@ -84,7 +84,7 @@ def test_ai_failure_falls_back_to_rules(samples, schema):
 def test_ai_refusal_and_cutoff_raise(schema):
     a = ClaudeAssistant("k", client=FakeClient({"mappings": [], "notes": ""}, stop="max_tokens"))
     with pytest.raises(AIError):
-        a.apply_instruction(schema, [], Mapping(), "x")
+        a.propose_mapping(schema, [])
 
 
 def test_parse_mapping_entries_rejects_bad_transform(schema):
