@@ -2,6 +2,7 @@
 
 import pandas as pd
 
+from converter.editor import apply_row_edit
 from converter.engine import convert
 from converter.heuristics import auto_map, is_consent_column, is_phone_header
 from converter.mapping import FieldMapping, Mapping, profile_columns
@@ -63,16 +64,24 @@ def test_same_number_in_two_columns_is_one_row(real_schema):
     assert res.imported == 1 and res.extra_rows == 0 and res.duplicates == 0
 
 
-def test_first_non_empty_still_available(real_schema):
+def test_phones_always_one_row_per_number_even_from_old_templates(real_schema):
     df = toast_like()
+    # A template saved before this rule used 'First non-empty' on the phone field: it is upgraded.
     m = Mapping(fields={"phone_number": FieldMapping(sources=["phone", "phone2", "phone3"], transform="coalesce")})
+    assert m.normalized(real_schema, list(df.columns)).get("phone_number").transform == "each_row"
     res = convert(df, real_schema, m)
-    # One row per file row, first number found; Cy (none) and Di (7 digits) are bad rows.
-    assert (res.imported, res.rejected, res.extra_rows) == (3, 2, 0)
-    assert res.output["phone_number"].tolist() == ["2015550111", "2015550112", "2015550150"]
+    assert (res.imported, res.rejected, res.extra_rows) == (5, 2, 2)
 
 
-def test_only_one_field_can_make_extra_rows(real_schema):
-    m = Mapping(fields={"phone_number": FieldMapping(sources=["a", "b"], transform="each_row"),
-                        "birthday": FieldMapping(sources=["c", "d"], transform="each_row")})
-    assert "only one field" in m.problems(real_schema)["birthday"]
+def test_first_non_empty_cannot_be_picked_for_phones(real_schema):
+    m = Mapping(fields={"phone_number": FieldMapping(sources=["phone", "phone2"], transform="each_row")})
+    m2, err = apply_row_edit(real_schema, m, "phone_number", {"How": "First non-empty"}, "How", "Source column(s)",
+                             "Option")
+    assert m2.get("phone_number").transform == "each_row" and "one row per number" in err
+    m3, err = apply_row_edit(real_schema, m, "birthday", {"How": "One row per phone number",
+                                                          "Source column(s)": ["a", "b"]},
+                             "How", "Source column(s)", "Option")
+    assert m3.get("birthday").transform == "coalesce" and "only for the phone field" in err
+    # one row per phone number on another field is turned into first non-empty
+    other = Mapping(fields={"birthday": FieldMapping(sources=["a", "b"], transform="each_row")})
+    assert other.normalized(real_schema, ["a", "b"]).get("birthday").transform == "coalesce"
