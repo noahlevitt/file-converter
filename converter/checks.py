@@ -15,7 +15,8 @@ from datetime import date, datetime, timedelta
 import pandas as pd
 
 from .engine import CELL_BLANKED, CELL_FIXED, CELL_FORMAT, CELL_REJECT
-from .heuristics import is_consent_column
+from . import normalizers as N
+from .heuristics import TYPED, header_score, is_consent_column, is_phone_header
 from .mapping import ColumnProfile, Mapping
 from .schema import TargetSchema
 
@@ -53,6 +54,47 @@ def _out_dates(values: pd.Series, fmt: str) -> list[datetime]:
             out.append(datetime.strptime(v, fmt))
         except ValueError:
             continue
+    return out
+
+
+_LOOKS_LIKE = {"phone": N.looks_like_phone, "email": N.looks_like_email, "date": N.looks_like_date,
+               "zip": N.looks_like_zip, "state": N.looks_like_state}
+_KIND_WORDS = {"phone": "phone numbers", "email": "email addresses", "date": "dates", "zip": "ZIP codes",
+               "state": "states"}
+
+
+def column_warnings(schema: TargetSchema, mapping: Mapping,
+                    profiles: list[ColumnProfile] | None) -> dict[str, tuple[str, str]]:
+    """Columns whose content doesn't fit the field they feed — {column: (field name, message)}.
+
+    Catches a column like "Occupation" going to the phone field because someone typed a phone number into it:
+    the column name doesn't say "phone" and most of its values aren't phone numbers.
+    """
+    by_name = {p.name: p for p in profiles or []}
+    out: dict[str, tuple[str, str]] = {}
+    for f in schema.mappable_fields:
+        kind = TYPED.get(f.type)
+        fm = mapping.get(f.name)
+        if not kind or fm.transform not in ("copy", "coalesce"):
+            continue
+        for col in fm.sources:
+            p = by_name.get(col)
+            if p is None or p.non_empty == 0 or col in out:
+                continue
+            share = p.shares.get(kind, 0.0)
+            named_for_it = header_score(col, f) >= 70 or (kind == "phone" and is_phone_header(col))
+            limit = 0.6 if kind in ("phone", "email") else 0.3
+            if named_for_it or share >= limit:
+                continue
+            looks = _LOOKS_LIKE[kind]
+            n_unique = min(p.unique, 300)
+            n_like = round(share * n_unique)
+            example = next((v for v in p.samples if not looks(v)), "")
+            msg = (f"'{col}' goes to {f.header}, but its name doesn't say so and only {n_like} of its {n_unique} "
+                   f"distinct values {'looks' if n_like == 1 else 'look'} like {_KIND_WORDS[kind]}"
+                   + (f" (e.g. '{example}')" if example else "") + ". "
+                   + ("Someone probably typed a value into the wrong column." if n_like else ""))
+            out[col] = (f.name, msg.strip())
     return out
 
 
@@ -139,6 +181,12 @@ def run_checks(schema: TargetSchema, mapping: Mapping, source: pd.DataFrame, aud
                     findings.append(Finding("info", f.name, src,
                                             f"{zoned:,} time(s) included a time zone and were converted to "
                                             f"{timezone_label or 'the client time zone'}."))
+
+    # Columns whose content doesn't match the field they feed.
+    for col, (fname, msg) in column_warnings(schema, mapping, profiles).items():
+        findings.append(Finding("warning", fname, col, msg,
+                                "If it isn't that kind of column, clear its 'Goes to' or tick 'Skip' under "
+                                "Columns in your file."))
 
     # Same column feeding two different fields as a plain copy.
     copies = Counter(s for f in schema.mappable_fields for s in mapping.get(f.name).sources
