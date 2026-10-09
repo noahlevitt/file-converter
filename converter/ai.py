@@ -128,8 +128,8 @@ RULES:
   Mapping a wrong column is worse than leaving a field blank — the reviewer can fill gaps.
 - Each source column normally feeds one target field. Exceptions: a full-name column may feed first and last
   name via name_part; a single-line address column may feed street/unit/city/state/zip via address_part.
-- Several phone columns (Phone, Phone 2, Mobile, Home…): use each_row with mobile/cell columns first, so every
-  different number becomes its own row. Columns ABOUT a phone (e.g. phoneMarketingPreference, Phone Type,
+- Several phone columns (Phone, Phone 2, Mobile, Home…): put all of them on the phone field with each_row, so
+  every different number becomes its own row (never coalesce for phones). Columns ABOUT a phone (e.g. phoneMarketingPreference, Phone Type,
   SMS Opt In) are not phone numbers — never map them to the phone field.
 - Never invent data. Use constant only when the user explicitly asks for a fixed value. Never use constant
   or a guessed column for consent, opt-in or subscription fields.
