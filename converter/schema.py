@@ -58,11 +58,24 @@ class FieldSpec(BaseModel):
     countries: list[str] = Field(default_factory=lambda: ["US"], description="phone only: allowed ISO country codes")
     true_value: str = "true"
     false_value: str = "false"
+    fixed_blank: bool = Field(
+        False,
+        description="Always output blank on every row. The field can't be mapped, defaulted, set by Claude or "
+        "edited by users (e.g. a consent column where any value would change subscription status).",
+    )
+    no_year_value: int | None = Field(
+        None,
+        description="date only: year to output when the source has a month and day but no year (e.g. 1600).",
+    )
 
     @model_validator(mode="after")
     def _defaults(self) -> "FieldSpec":
         if not self.header:
             self.header = self.name
+        if self.fixed_blank and (self.required or self.default not in (None, "")):
+            raise ValueError(f"fixed_blank field '{self.name}' can't be required or have a default")
+        if self.no_year_value is not None and self.type != "date":
+            raise ValueError(f"no_year_value only applies to date fields ('{self.name}' is {self.type})")
         if self.on_invalid is None:
             self.on_invalid = "reject" if self.required else "blank"
         if self.type == "enum" and not self.allowed_values:
@@ -70,6 +83,8 @@ class FieldSpec(BaseModel):
         return self
 
     def describe(self) -> str:
+        if self.fixed_blank:
+            return f"{self.name} — always blank (fixed)"
         bits = [f"{self.name} ({self.type}{', required' if self.required else ''})"]
         if self.format:
             bits.append(f"format {self.format}")
@@ -115,6 +130,8 @@ class TargetSchema(BaseModel):
         dupes = {n for n in names if names.count(n) > 1}
         if dupes:
             raise ValueError(f"duplicate field names: {sorted(dupes)}")
+        if self.dedupe.keys == ["*"]:
+            self.dedupe.keys = [f.name for f in self.fields if not f.fixed_blank]
         unknown = [k for k in self.dedupe.keys if k not in names]
         if unknown:
             raise ValueError(f"dedupe keys not in fields: {unknown}")
@@ -129,6 +146,11 @@ class TargetSchema(BaseModel):
     @property
     def field_names(self) -> list[str]:
         return [f.name for f in self.fields]
+
+    @property
+    def mappable_fields(self) -> list[FieldSpec]:
+        """Fields that take a value from the source file (excludes fixed-blank fields)."""
+        return [f for f in self.fields if not f.fixed_blank]
 
     @property
     def label(self) -> str:
