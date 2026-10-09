@@ -22,10 +22,10 @@ def test_phone_valid_variants(raw):
 
 
 @pytest.mark.parametrize("raw,reason", [
-    ("555-1234", "too few digits"),
+    ("555-1234", "missing area code"),
     ("5.163E+09", "scientific notation"),
-    ("555-555-5555", "invalid phone"),
-    ("+44 20 7946 0958", "not an allowed country"),
+    ("555-555-5555", "not a real US number"),
+    ("+44 20 7946 0958", "not a US number"),
     ("call me", "no phone number"),
 ])
 def test_phone_invalid(raw, reason):
@@ -50,7 +50,7 @@ def test_date_month_first_default():
 
 
 def test_date_day_first_inferred_from_column():
-    values = ["15/03/2026", "01/04/2026"]
+    values = ["15/03/2026", "28/02/2026", "01/04/2026"]
     assert norm(DATE, "01/04/2026", values) == ("04/01/2026", None)
 
 
