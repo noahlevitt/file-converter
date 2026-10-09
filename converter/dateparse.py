@@ -162,7 +162,7 @@ def _make(y: int, m: int, d: int, hh: int = 0, mi: int = 0) -> datetime:
         raise DateError("month is not 1–12")
     try:
         return datetime(y, m, d, hh, mi)
-    except ValueError as exc:
+    except (ValueError, OverflowError) as exc:  # OverflowError: e.g. day 51694619661 from "1 51694619661"
         raise DateError("not a real calendar date") from exc
 
 
