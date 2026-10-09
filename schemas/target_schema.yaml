@@ -39,8 +39,8 @@ fields:
     type: phone
     required: true
     format: digits10
-    # 10-digit North American numbers (US and territories, Canada).
-    countries: [US, CA, PR, VI, GU, AS, MP]
+    # US numbers only (incl. US territories). No country code in the source → +1 is assumed.
+    countries: [US, PR, VI, GU, AS, MP]
     description: Consumer's mobile number
     synonyms: [phone, phone number, mobile, mobile phone, mobile number, cell, cell phone, cell number,
                telephone, tel, contact number, sms number, primary phone, customer phone, guest phone,
