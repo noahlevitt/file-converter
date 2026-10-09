@@ -5,6 +5,7 @@ import pandas as pd
 
 from converter.compare import (FILTERS, build_compare_html, column_plan, comparison_xlsx, field_change_summary,
                                filter_rows, status_counts)
+from converter.engine import source_rows
 from converter.heuristics import auto_map
 from converter.jobs import ImportRunner, run_import
 from converter.mapping import profile_columns
@@ -26,7 +27,7 @@ def test_run_import_writes_everything(tmp_path, samples, schema):
     iid = make_import(st, samples, schema)
     rec = run_import(st, iid)
     assert rec.status == "completed" and rec.progress == 1.0 and rec.stage == "Done"
-    assert (rec.total_rows, rec.imported, rec.rejected, rec.duplicates, rec.blank_rows) == (9, 6, 2, 1, 1)
+    assert (rec.total_rows, rec.imported, rec.rejected, rec.duplicates, rec.blank_rows) == (9, 7, 2, 1, 1)
     assert rec.started_at and rec.finished_at and rec.elapsed().total_seconds() >= 0
     for kind in ("output", "rejects", "summary", "audit", "source_table"):
         assert st.file_path(rec, kind) is not None, kind
@@ -79,7 +80,7 @@ def test_purge_keeps_record(tmp_path, samples, schema):
         con.execute("UPDATE imports SET finished_at='2000-01-01T00:00:00+00:00' WHERE id=?", (iid,))
     assert st.purge_files(30) == 1
     rec = st.get_import(iid)
-    assert rec.files_purged and rec.imported == 6 and st.file_path(rec, "output") is None
+    assert rec.files_purged and rec.imported == 7 and st.file_path(rec, "output") is None
     assert not (st.files_root / str(iid)).exists()
 
 
@@ -87,28 +88,33 @@ def test_comparison(tmp_path, samples, schema):
     st = Store(tmp_path / "c.db")
     rec = run_import(st, make_import(st, samples, schema))
     folder = st.files_root / str(rec.id)
-    src, audit = pd.read_parquet(folder / "source.parquet"), pd.read_parquet(folder / "audit.parquet")
-    assert len(src) == len(audit) == 10
+    raw_src, audit = pd.read_parquet(folder / "source.parquet"), pd.read_parquet(folder / "audit.parquet")
+    # Smith's mobile and home numbers became two rows: 10 file rows → 11 converted rows.
+    assert len(raw_src) == 10 and len(audit) == 11 and audit["_extra"].sum() == 1
+    src = source_rows(raw_src, audit)
+    assert len(src) == 11 and source_rows(src, audit) is src
+    assert src.iloc[1].equals(src.iloc[2]) and audit.iloc[2]["_row"] == audit.iloc[1]["_row"]
     plan = column_plan(schema, rec.mapping, list(src.columns))
     assert plan.feeds["Guest Name"] == ["First Name", "Last Name"] and plan.source_columns[0] == "Mobile #"
 
     counts = status_counts(audit, schema)
     assert counts["rejected"] == 2 and counts["duplicate"] == 1 and counts["empty"] == 1
     assert set(counts) == set(FILTERS)
-    assert filter_rows(audit, src, schema, "rejected") == [6, 9]
-    assert filter_rows(audit, src, schema, "all", "patel") == [7]
-    assert filter_rows(audit, src, schema, "all", "#14") == [9]
+    assert filter_rows(audit, src, schema, "rejected") == [7, 10]
+    assert filter_rows(audit, src, schema, "all", "patel") == [8]
+    assert filter_rows(audit, src, schema, "all", "#14") == [10]
 
     h = build_compare_html(src, audit, list(range(len(audit))), schema, plan)
     assert "Bad row" in h and "missing area code" in h and "c-fmt" in h and "→ First Name, Last Name" in h
-    assert "<script" not in h
+    assert "<script" not in h and "6 +" in h  # the extra row is marked
+    assert h.count('class="o each"') == 9 and "this row&#x27;s number" in h  # which number each row came from
     # values are escaped
     src.iloc[0, 0] = "<b>x</b>"
     assert "&lt;b&gt;x&lt;/b&gt;" in build_compare_html(src, audit, [0], schema, plan)
 
     summary = field_change_summary(audit, schema, rec.mapping)
     phone = summary[summary["Field"] == "Phone"].iloc[0]
-    assert phone["Reformatted"] == 7 and phone["Rejected rows"] == 2
+    assert phone["Reformatted"] == 8 and phone["Rejected rows"] == 2
 
     x = comparison_xlsx(src, audit, schema, plan, "test")
     back = pd.read_excel(io.BytesIO(x), header=None, dtype=str)
