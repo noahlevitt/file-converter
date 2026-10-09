@@ -13,6 +13,13 @@ import make_sample_files  # noqa: E402
 
 @pytest.fixture(scope="session")
 def schema():
+    """Example contact schema with names/addresses — exercises the generic features."""
+    return load_schema(ROOT / "tests" / "fixtures" / "example_contact_schema.yaml")
+
+
+@pytest.fixture(scope="session")
+def real_schema():
+    """The real target import format."""
     return load_schema(ROOT / "schemas" / "target_schema.yaml")
 
 
