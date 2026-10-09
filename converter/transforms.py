@@ -37,6 +37,9 @@ TRANSFORMS: dict[str, TransformInfo] = {
                       ("date_order", "input_format", "region")),
         TransformInfo("coalesce", "First non-empty", "Use the first non-empty value across several columns, in order "
                       "(e.g. Mobile, then Phone).", 2, None, ("date_order", "input_format", "region")),
+        TransformInfo("each_row", "One row per value", "Creates a separate output row for each different value "
+                      "across these columns (e.g. Phone, Phone 2, Phone 3); every other field is copied onto each row. "
+                      "Only one field can use this.", 2, None, ("date_order", "input_format", "region")),
         TransformInfo("concat", "Combine columns", "Join several columns with a separator (default a space).", 2, None,
                       ("separator",)),
         TransformInfo("name_part", "Part of a full name", "Extract first/middle/last/etc. from a full-name column "
@@ -103,7 +106,7 @@ def apply_transform(transform: str, row: dict[str, str], sources: list[str], par
         return ""
     if transform == "copy":
         return " ".join(v for v in vals if v)
-    if transform == "coalesce":
+    if transform in ("coalesce", "each_row"):  # each_row: the engine expands rows; alone it acts like coalesce
         return next((v for v in vals if v), "")
     if transform == "concat":
         sep = params.get("separator")
