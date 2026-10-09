@@ -14,7 +14,7 @@ Imports:     every import with live progress, elapsed time and time left → ope
 
 | Page | What it's for |
 |---|---|
-| **New import** | Upload a file, check the detected header/sheet and client time zone, review the column mapping (edit the grid, or write *notes on columns* and apply them with Claude), optionally **Check for mistakes**, then **Start import**. |
+| **New import** | Upload a file, check the detected header/sheet and client time zone, review the column mapping (edit the field grid, or under *Columns in your file* pick where each column goes, skip a column, or write notes and apply them with Claude), optionally **Check for mistakes**, then **Start import**. |
 | **Imports** | Every import by everyone (filter: mine, status, search). Running imports show a progress bar, the current step ("Converting Phone — row 41,000 of 150,000"), elapsed time and estimated time left, with Cancel. Select any import to open it. |
 | **Import detail** | Status and timing, the bad-row flag and counts, downloads (converted file, rejected rows, summary, original file, side-by-side Excel), and tabs: **Side by side**, **What changed**, **Converted file**, **Bad & duplicate rows**, **Mapping used** (incl. notes). **Check this import for mistakes**; Re-run and Claude fixes start a new linked import. |
 | **Templates** | Saved column mappings per file layout; rename, delete, export. |
@@ -33,7 +33,7 @@ value or row number, and page through large files. The same view downloads as a 
 | Step | What happens |
 |---|---|
 | **Read** | Every cell is read as text (no lost ZIP zeros, no phones turned into `5.16E+09`). Header row, encoding (UTF-8 / Windows-1252 / etc.), delimiter and Excel sheets are detected; the user can override. |
-| **Map** | 1) A saved **template** with the same column headers is applied instantly, including its notes and time zone. 2) Otherwise **rules** match headers, synonyms and value types (phones, dates…), and combine Mobile/Home phone columns. 3) Optionally, your **notes on columns** are applied by Claude. |
+| **Map** | 1) A saved **template** with the same column headers is applied instantly, including its notes and time zone. 2) Otherwise **rules** match headers, synonyms and value types (phones, dates…), and combine Mobile/Home phone columns. A column only counts as a phone column by its values alone when nearly all of its values are phone numbers, so a stray number typed into e.g. *Occupation* doesn't pull that column into the phone field. 3) Optionally, your **notes on columns** are applied by Claude. |
 | **Review** | A grid shows each target field, its source column(s), how it's built, a sample of converted output, and any problem. Edit it directly, add notes per column, and run **Check for mistakes** before importing. |
 | **Convert** | Runs in a background worker pool (default 2 at a time; more wait in a queue) so users can keep working. Deterministic Python converts every row — Claude never touches the full file. Phones are validated with Google's libphonenumber, dates are interpreted per column (month-first vs day-first decided once for the whole column, Excel serial dates handled), ZIP/state/email normalized. |
 | **Report** | **Bad rows are not imported** and the result is flagged: *"37 bad rows were NOT imported"* with a reason per row in the rejected-rows file. Optional fields with invalid values are left blank (configurable per field). |
@@ -127,6 +127,19 @@ dedupe:
 
 Add source-file header names you see often to `synonyms` so they map automatically.
 
+## Fixing where a column goes
+
+Under **New import → Columns in your file** every column of the uploaded file has:
+
+- **Goes to** — the field(s) it feeds. Pick a different field to move it; picking a field makes this column that
+  field's only source (whatever fed it before is dropped from it). Clear it to leave the column out.
+- **Skip** — leave the column out and keep it out: rules, saved templates and Claude won't map it again (Claude
+  isn't even shown it). Saved with the template, so the next file with the same layout skips it too.
+- **Check** — a warning when the column's name and values don't fit the field it goes to.
+- **Your note** — free-text notes, applied by Claude with *Apply notes*.
+
+The field grid above it still works the other way round (pick the source column(s) for each field).
+
 ## Running it
 
 ### On a server (recommended for the team)
@@ -173,7 +186,7 @@ when someone clicks** one of these buttons:
 
 | Button | Where | What Claude does |
 |---|---|---|
-| **Apply notes with Claude** | New import → *Notes on columns* | Reads your notes ("this is the last visit date", "actually goes to anniversary", "dates are day-first", "don't import") and proposes mapping changes, with a result for every note (applied / already correct / not applied and why). You accept or discard. |
+| **Apply notes with Claude** | New import → *Columns in your file* | Reads your notes ("this is the last visit date", "actually goes to anniversary", "dates are day-first", "don't import") and proposes mapping changes, with a result for every note (applied / already correct / not applied and why). You accept or discard. |
 | **Check for mistakes** | New import (first 1,000 rows) and on every finished import | Rule checks always run. With a key, Claude also reviews a sample of original vs converted rows and per-field stats, then reports likely mistakes (wrong or missed columns, swapped fields, day/month or century problems) with suggestions. It can propose mapping changes: accept them before importing, or *Re-run the import with these changes* afterwards. |
 | **Suggest fixes** | Finished import → *Try to fix … unconvertible values* | Suggests reformatting for values that failed (e.g. `Sept 3rd twenty26`). Each suggestion is re-validated, and anything that adds or changes digits is refused. |
 
@@ -199,6 +212,9 @@ Notes are useful without Claude too: they're saved with the template and the imp
 
 - A field fed by a column whose values mostly can't be converted (likely the wrong column), or a mapped field
   where nothing came through.
+- A column whose name and values don't fit the field it feeds — e.g. *Occupation* going to the phone field because
+  someone typed a phone number into it. This one also shows straight away in the mapping grids, without clicking
+  *Check for mistakes*.
 - Activity times in the future, or mostly before 2000.
 - Birthdays/anniversaries in the future, or mostly within the last two years (looks like sign-up dates).
 - Every row having the same date (an export default).
