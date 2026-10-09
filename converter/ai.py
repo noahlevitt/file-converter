@@ -271,6 +271,12 @@ REPAIR_SCHEMA = {
 # Client
 # ---------------------------------------------------------------------------
 
+def _without_skipped(profiles: list[ColumnProfile], current: Mapping | None) -> list[ColumnProfile]:
+    """Columns the reviewer marked "skip" are not shown to Claude, so it can't map them again."""
+    skipped = set(current.excluded_columns) if current else set()
+    return [p for p in profiles if p.name not in skipped]
+
+
 class ClaudeAssistant:
     def __init__(self, api_key: str, mapping_model: str = "claude-sonnet-5-5",
                  repair_model: str = "claude-haiku-5-5", sample_values: int = 15, client: Any = None):
@@ -320,6 +326,7 @@ class ClaudeAssistant:
     # -- mapping ------------------------------------------------------------
     def propose_mapping(self, schema: TargetSchema, profiles: list[ColumnProfile],
                         current: Mapping | None = None) -> AIMappingResult:
+        profiles = _without_skipped(profiles, current)
         columns = [p.name for p in profiles]
         user = (
             "SOURCE FILE COLUMNS (with sample values):\n"
@@ -339,6 +346,7 @@ class ClaudeAssistant:
     def apply_notes(self, schema: TargetSchema, profiles: list[ColumnProfile], current: Mapping,
                     column_notes: dict[str, str], general_note: str = "") -> AINotesResult:
         """Turn the reviewer's notes ("this column is X", "goes to Y", "dates are day-first") into mapping changes."""
+        profiles = _without_skipped(profiles, current)
         columns = [p.name for p in profiles]
         notes = [{"column": c, "note": n.strip()} for c, n in column_notes.items() if n.strip() and c in columns]
         if general_note.strip():
@@ -369,6 +377,7 @@ class ClaudeAssistant:
     def review(self, schema: TargetSchema, profiles: list[ColumnProfile], current: Mapping,
                payload: dict[str, Any]) -> AIReviewResult:
         """Look for mistakes in a mapping/conversion, using a sample of original vs converted rows."""
+        profiles = _without_skipped(profiles, current)
         columns = [p.name for p in profiles]
         user = (
             "SOURCE FILE COLUMNS (with sample values):\n"
