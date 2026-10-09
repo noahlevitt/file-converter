@@ -781,6 +781,8 @@ def _completed_view(rec: ImportRecord) -> None:
         reasons += [{"Problem": r, "Rows": c, "Effect": "value left blank"} for r, c in s.get("blanked", {}).items()]
         reasons += [{"Problem": r, "Rows": c, "Effect": "extra number skipped (row imported with its other number)"}
                     for r, c in s.get("skipped", {}).items()]
+        reasons += [{"Problem": r, "Rows": c, "Effect": "repaired from a likely typo and imported — please check"}
+                    for r, c in s.get("repaired", {}).items()]
         if reasons:
             st.markdown("**Problems found**")
             st.dataframe(pd.DataFrame(reasons), hide_index=True, width="stretch")
