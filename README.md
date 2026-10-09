@@ -14,9 +14,9 @@ Imports:     every import with live progress, elapsed time and time left → ope
 
 | Page | What it's for |
 |---|---|
-| **New import** | Upload a file, check the detected header/sheet, review the column mapping (edit it, or tell Claude what to change), then **Start import**. |
+| **New import** | Upload a file, check the detected header/sheet and client time zone, review the column mapping (edit the grid, or write *notes on columns* and apply them with Claude), optionally **Check for mistakes**, then **Start import**. |
 | **Imports** | Every import by everyone (filter: mine, status, search). Running imports show a progress bar, the current step ("Converting Phone — row 41,000 of 150,000"), elapsed time and estimated time left, with Cancel. Select any import to open it. |
-| **Import detail** | Status and timing, the bad-row flag and counts, downloads (converted file, rejected rows, summary, original file, side-by-side Excel), and tabs: **Side by side**, **What changed**, **Converted file**, **Bad & duplicate rows**, **Mapping used**. Re-run, and "fix with Claude", start a new linked import. |
+| **Import detail** | Status and timing, the bad-row flag and counts, downloads (converted file, rejected rows, summary, original file, side-by-side Excel), and tabs: **Side by side**, **What changed**, **Converted file**, **Bad & duplicate rows**, **Mapping used** (incl. notes). **Check this import for mistakes**; Re-run and Claude fixes start a new linked import. |
 | **Templates** | Saved column mappings per file layout; rename, delete, export. |
 | **Target format** | The current target schema, output file settings, dedupe rule and file retention. |
 | **Users** | (admins) add users, reset passwords, grant admin. |
@@ -33,8 +33,8 @@ value or row number, and page through large files. The same view downloads as a 
 | Step | What happens |
 |---|---|
 | **Read** | Every cell is read as text (no lost ZIP zeros, no phones turned into `5.16E+09`). Header row, encoding (UTF-8 / Windows-1252 / etc.), delimiter and Excel sheets are detected; the user can override. |
-| **Map** | 1) A saved **template** with the same column headers is applied instantly (no AI call). 2) **Rules** match headers, synonyms and value types (phones, emails, dates, ZIPs, states), split full names and full addresses, and combine Mobile/Home phone columns. 3) **Claude** reviews and fills gaps, using only the headers + up to 15 sample values per column. |
-| **Review** | A grid shows each target field, its source column(s), how it's built, a sample of converted output, and any problem. Users edit it directly or type an instruction ("Join Date is day-first", "put VIP Level into Notes") and accept/discard Claude's proposed changes. |
+| **Map** | 1) A saved **template** with the same column headers is applied instantly, including its notes and time zone. 2) Otherwise **rules** match headers, synonyms and value types (phones, dates…), and combine Mobile/Home phone columns. 3) Optionally, your **notes on columns** are applied by Claude. |
+| **Review** | A grid shows each target field, its source column(s), how it's built, a sample of converted output, and any problem. Edit it directly, add notes per column, and run **Check for mistakes** before importing. |
 | **Convert** | Runs in a background worker pool (default 2 at a time; more wait in a queue) so users can keep working. Deterministic Python converts every row — Claude never touches the full file. Phones are validated with Google's libphonenumber, dates are interpreted per column (month-first vs day-first decided once for the whole column, Excel serial dates handled), ZIP/state/email normalized. |
 | **Report** | **Bad rows are not imported** and the result is flagged: *"37 bad rows were NOT imported"* with a reason per row in the rejected-rows file. Optional fields with invalid values are left blank (configurable per field). |
 | **Fix (optional)** | Claude can suggest reformatting for rejected values (e.g. `516 555-O1OO`, `Sept 3rd twenty26`). Each suggestion is re-validated, and any suggestion that adds or changes digits/data is refused. Users approve before re-converting. |
@@ -165,18 +165,50 @@ docker compose exec app python scripts/manage_users.py password jane
 docker compose exec app python scripts/manage_users.py list
 ```
 
-## Claude API
+## Claude (optional)
 
-- Key: create one at platform.claude.com and set `ANTHROPIC_API_KEY`. Without a key the tool still works
-  (rules + manual mapping); the Claude buttons are disabled.
-- Models: `claude-sonnet-5-5` for mapping and instructions, `claude-haiku-5-5` for value repair
-  (override with `MAPPING_MODEL` / `REPAIR_MODEL`).
-- Uses JSON structured outputs, so Claude can only return target fields, transforms and column names that
-  exist; anything invalid is discarded. The schema prompt is cached between calls.
-- Data sent: column headers + up to `AI_SAMPLE_VALUES` sample values per column (mapping), or the specific
-  values that failed (repair, max 200). Never the full file.
-- Cost (estimate): a mapping call is a few thousand tokens — roughly 2–5 cents at Sonnet 5.5 list prices ($2 / $10 per million input / output tokens).
-  Files whose layout matches a saved template make no Claude call at all.
+**No API key is needed.** Reading files, matching columns, converting, validating, flagging bad rows, the imports
+tracker, the side-by-side view and the rule-based mistake check all work without Claude. Claude is called **only
+when someone clicks** one of these buttons:
+
+| Button | Where | What Claude does |
+|---|---|---|
+| **Apply notes with Claude** | New import → *Notes on columns* | Reads your notes ("this is the last visit date", "actually goes to anniversary", "dates are day-first", "don't import") and proposes mapping changes, with a result for every note (applied / already correct / not applied and why). You accept or discard. |
+| **Check for mistakes** | New import (first 1,000 rows) and on every finished import | Rule checks always run. With a key, Claude also reviews a sample of original vs converted rows and per-field stats, then reports likely mistakes (wrong or missed columns, swapped fields, day/month or century problems) with suggestions. It can propose mapping changes: accept them before importing, or *Re-run the import with these changes* afterwards. |
+| **Suggest fixes** | Finished import → *Try to fix … unconvertible values* | Suggests reformatting for values that failed (e.g. `Sept 3rd twenty26`). Each suggestion is re-validated, and anything that adds or changes digits is refused. |
+
+Notes are useful without Claude too: they're saved with the template and the import as documentation for the team.
+
+- **Key:** create one at platform.claude.com and set `ANTHROPIC_API_KEY`. Without it, the Claude buttons are disabled.
+- **What's sent:**
+  - Notes: column names, up to 15 sample values per column, and your notes.
+  - Mistake check: additionally up to 30 sample rows (original and converted) and summary counts.
+  - Fixes: only the failed values.
+  - Phone digits in check samples are partly masked (`516#####00`; turn off with `AI_MASK_PHONES=false`).
+  - The full file is never sent.
+- **Safety:** structured outputs restrict Claude to real field, transform and column names. `consent` can't be
+  touched. Every suggestion is shown for approval before anything changes.
+- **Models:** `claude-sonnet-5-5` for notes and checks, `claude-haiku-5-5` for fixes (`MAPPING_MODEL` /
+  `REPAIR_MODEL`).
+- **Cost (estimate):** a notes or check call is a few thousand tokens — roughly 2–5 cents at Sonnet 5.5 list
+  prices ($2 / $10 per million input / output tokens).
+- **Automatic mapping:** to also have Claude refine the column matching on every upload, set
+  `AI_AUTO_MAP=true` (off by default).
+
+### What the rule check looks for (no Claude needed)
+
+- A field fed by a column whose values mostly can't be converted (likely the wrong column), or a mapped field
+  where nothing came through.
+- Activity times in the future, or mostly before 2000.
+- Birthdays/anniversaries in the future, or mostly within the last two years (looks like sign-up dates).
+- Every row having the same date (an export default).
+- Columns mixing month-first and day-first dates.
+- Times that carried a zone and were converted.
+- One column used for several fields.
+- A high bad-row rate and its top reason, including 7-digit phones (area code in another column?).
+- Many exact duplicates.
+- Unused columns that contain dates or phone numbers.
+- Consent-type columns, noted as intentionally not imported.
 
 ## Data stored
 
@@ -193,7 +225,9 @@ docker compose exec app python scripts/manage_users.py list
 |---|---|---|
 | `ANTHROPIC_API_KEY` | — | Claude API key; leave empty to run without AI |
 | `MAPPING_MODEL` / `REPAIR_MODEL` | `claude-sonnet-5-5` / `claude-haiku-5-5` | Claude models |
-| `AI_SAMPLE_VALUES` | 15 | sample values per column sent to Claude for mapping |
+| `AI_SAMPLE_VALUES` | 15 | sample values per column sent to Claude |
+| `AI_AUTO_MAP` | false | also let Claude refine column matching automatically on upload |
+| `AI_MASK_PHONES` | true | partly mask phone digits in rows sent for Claude's mistake check |
 | `IMPORT_WORKERS` | 2 | imports that run at the same time |
 | `FILE_RETENTION_DAYS` | 30 | days to keep each import's files (0 = forever) |
 | `APP_TIMEZONE` | America/New_York | time zone for displayed times |
@@ -226,10 +260,12 @@ converter/
   schema.py             target schema model + YAML loader
   reader.py             file ingest, encoding/delimiter/header detection
   normalizers.py        phone/date/email/zip/state/number/boolean/enum/string normalization
+  dateparse.py          date/time reader (every numeric, written, machine and spreadsheet format)
+  checks.py             rule-based mistake checks + sample prepared for Claude's review
   transforms.py         how a field's value is built: copy, first-non-empty, combine, name part, address part, split, translate, fixed
   mapping.py            mapping spec, column profiling, header fingerprints
   heuristics.py         rule-based auto-mapping
-  ai.py                 Claude: mapping, instructions, value repair (+ guards)
+  ai.py                 Claude (optional): apply notes, mistake review, value fixes (+ guards)
   engine.py             conversion, validation, bad rows, dedupe, progress, per-cell audit trail
   jobs.py               background import runner (queue, progress, cancel, retention)
   compare.py            side-by-side view, what-changed summary, comparison Excel
