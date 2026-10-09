@@ -267,7 +267,43 @@ def auto_map(schema: TargetSchema, profiles: list[ColumnProfile]) -> Mapping:
                                                   reason=f"parsed from full address in '{addr_col}'")
             used.add(addr_col)
 
+    # 6. Birthday / anniversary split over a month column and a day column (and maybe a year column).
+    for target, keys in (("birthday", {"birth", "birthday", "bday", "dob", "born"}),
+                         ("anniversary", {"anniversary", "anniv", "wedding"})):
+        if target not in fields:
+            continue
+        parts = _date_part_columns(profiles, keys)
+        if parts:
+            fields[target] = FieldMapping(sources=parts, transform="concat", params={"separator": " "}, origin="rule",
+                                          confidence="medium",
+                                          reason=f"{target} is split over {', '.join(repr(c) for c in parts)}")
+            for name, fm in fields.items():
+                if name != target and set(fm.sources) & set(parts):
+                    fields[name] = FieldMapping()
+            used.update(parts)
+
     return Mapping(fields=fields)
+
+
+def _date_part_columns(profiles: list[ColumnProfile], keys: set[str]) -> list[str]:
+    """['Birth Month', 'Birth Day'(, 'Birth Year')] when a date is split over separate columns, else []."""
+    def find(part_words: set[str], numbers_up_to: int | None) -> str | None:
+        for p in profiles:
+            words = set(_words(p.name))
+            if not (words & keys) or not (words & part_words):
+                continue
+            if numbers_up_to is not None and p.samples and not all(
+                    s.strip().isdigit() and 1 <= int(s) <= numbers_up_to for s in p.samples):
+                continue
+            return p.name
+        return None
+
+    month = find({"month", "mon", "mo", "mm"}, None)
+    day = find({"day", "dd"} , 31)
+    if not (month and day) or month == day:
+        return []
+    year = find({"year", "yr", "yyyy"}, None)
+    return [month, day] + ([year] if year and year not in (month, day) else [])
 
 
 def _mostly_full_addresses(p: ColumnProfile) -> bool:
