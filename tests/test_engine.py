@@ -17,18 +17,21 @@ def test_pos_export_end_to_end(samples, schema):
     assert res.total_rows == 9 and res.blank_rows == 1
     assert res.rejected == 2  # 7-digit phone, missing phone
     assert res.duplicates == 1  # same phone + same signup date
-    assert res.imported == 6
+    assert res.imported == 7 and res.extra_rows == 1  # Smith has a mobile and a home number → two rows
     out = res.output
     # Same phone, different signup date is NOT a duplicate: both rows import.
     jose = out[out["Phone"] == "+15165550100"]
     assert sorted(jose["Signup Date"]) == ["10/01/2026", "10/05/2026"]
-    smith = out[out["Last Name"] == "Smith"].iloc[0]
+    smiths = out[out["Last Name"] == "Smith"]
+    assert smiths["Phone"].tolist() == ["+15165550142", "+15165550199"]
+    smith = smiths.iloc[0]
     assert smith["First Name"] == "John" and smith["Email"] == ""  # invalid optional email blanked
+    assert (smiths.drop(columns="Phone").iloc[0] == smiths.drop(columns="Phone").iloc[1]).all()  # rest copied
     patel = out[out["Last Name"] == "Patel"].iloc[0]
     assert patel["Address 2"] == "Suite 200" and patel["Zip"] == "11753" and patel["State"] == "NY"
     assert set(res.rejects["Status"]) == {"Rejected", "Duplicate"}
     assert "File Row" in res.rejects.columns
-    assert "bad row" in res.flag_message()
+    assert "bad row" in res.flag_message() and "1 extra row" in res.flag_message()
 
 
 def test_loyalty_xlsx(samples, schema):
