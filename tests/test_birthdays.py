@@ -72,3 +72,16 @@ def test_wrong_column_warning_still_fires_for_recent_dates(real_schema):
     res = convert(df, real_schema, m)
     findings = run_checks(real_schema, m, df, res.audit, profile_columns(df))
     assert any("within the last two years" in f.issue for f in findings)
+
+
+def test_year_written_without_control_characters():
+    # macOS strftime stops at a NUL byte; the year must never be inserted with one (it produced "10/18/").
+    from datetime import datetime
+
+    class StrictMac(datetime):
+        def strftime(self, fmt):
+            assert "\x00" not in fmt, "strftime would truncate at the NUL on macOS"
+            return super().strftime(fmt)
+
+    assert N._strftime_year(StrictMac(1600 + 400, 10, 18), "%m/%d/%Y", "1600") == "10/18/1600"
+    assert N._strftime_year(StrictMac(2000, 2, 29), "%Y-%m-%d (%y) 100%%", "1600") == "1600-02-29 (00) 100%"
