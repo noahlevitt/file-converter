@@ -81,6 +81,26 @@ Every value is reduced to the 10-digit US number:
 - US territories (Puerto Rico, USVI, Guam, American Samoa, Northern Mariana Islands) count as US. To accept the
   50 states only, set `countries: [US]` in the schema; to also accept Canada, add `CA` to that list.
 
+#### Repairing typos (US numbers only)
+
+Only US numbers are expected, so a number that isn't a valid US number is treated as a likely typo. It is repaired
+only when exactly **one** US number fits, using the file's own numbers as evidence:
+
+| Typo | Example | Repaired to |
+|---|---|---|
+| Country code in front of a US number | `+44 516 555 0100` | 516-555-0100 (not done for a real foreign number whose area code isn't used in the file, e.g. a London number) |
+| `+1` added to a number that already had a `+` | `+1 +51 63 171059` | 516-317-1059 |
+| One digit too many (typed twice, extra at the end or start) | `51655501444` | 516-555-0144 |
+| Area code one digit off, or two digits swapped, from an area code the file uses (at least 5% of its numbers) | `514-968-9696` in a 516 file | 516-968-9696 |
+| No area code, when one area code makes up 80%+ of the file | `555-0177` | 516-555-0177 |
+
+- When two or more numbers fit, the one that already appears elsewhere in the file wins; otherwise nothing is guessed
+  and the reason lists the options ("could be (516) 946-1961 or (516) 946-1966").
+- Every repaired number is imported **and marked**: orange in the side-by-side view (with the original shown under
+  it), listed under *Problems only*, counted in the summary and in *What changed → Repaired typo*. Check them: a
+  wrong guess is someone else's phone.
+- Real US numbers are never changed, even if their area code isn't common in the file.
+
 #### Several phone columns (e.g. Toast: phone, phone2, phone3, phone4)
 
 Every phone column feeds the phone field, and **each different number always gets its own row**, with all the
