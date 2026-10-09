@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from .mapping import FieldMapping, Mapping
+from .mapping import FieldMapping, Mapping, phone_rule
 from .schema import FieldSpec, TargetSchema
 from .transforms import ADDRESS_PARTS, DATE_ORDERS, NAME_PARTS, TRANSFORMS, check_transform
 
@@ -99,6 +99,10 @@ def apply_row_edit(schema: TargetSchema, mapping: Mapping, field_name: str, chan
         fm.sources = [s for s in (changes[col_sources] or []) if s]
     if col_how in changes:
         new_t = FROM_LABEL.get(changes[col_how], "none")
+        if phone_rule(f.type, new_t) != new_t:
+            error = ("several phone columns always give one row per number" if f.type == "phone"
+                     else "'One row per phone number' is only for the phone field")
+            new_t = phone_rule(f.type, new_t)
         if new_t != fm.transform:
             fm.transform = new_t
             fm.params = {}
@@ -117,9 +121,10 @@ def apply_row_edit(schema: TargetSchema, mapping: Mapping, field_name: str, chan
         fm.params = {}
 
     if col_option in changes:
-        params, error = parse_option(fm.transform, f, changes[col_option])
-        if error is None:
+        params, opt_error = parse_option(fm.transform, f, changes[col_option])
+        if opt_error is None:
             fm.params = params
+        error = error or opt_error
     elif fm.transform in ("name_part", "address_part") and "part" not in fm.params:
         fm.params = parse_option(fm.transform, f, "")[0]
 
