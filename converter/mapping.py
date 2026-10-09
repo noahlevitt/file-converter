@@ -53,9 +53,15 @@ class Mapping(BaseModel):
     # Reviewer notes, saved with templates and imports: what a source column is, where it goes, how to read it.
     column_notes: dict[str, str] = Field(default_factory=dict)
     general_note: str = ""
+    # Source columns the reviewer marked "skip": never imported, and rules/templates/Claude can't map them.
+    excluded_columns: list[str] = Field(default_factory=list)
 
     def get(self, name: str) -> FieldMapping:
         return self.fields.get(name) or FieldMapping()
+
+    def targets_of(self, column: str) -> list[str]:
+        """Target fields that read from this source column."""
+        return [n for n, fm in self.fields.items() if fm.transform != "none" and column in fm.sources]
 
     def used_sources(self) -> set[str]:
         return {s for fm in self.fields.values() if fm.transform != "none" for s in fm.sources}
@@ -63,13 +69,15 @@ class Mapping(BaseModel):
     def normalized(self, schema: TargetSchema, columns: list[str]) -> "Mapping":
         """Ensure every schema field is present, drop unknown fields and sources missing from the file."""
         lookup = {c.lower(): c for c in columns}
+        excluded = list(dict.fromkeys(lookup[c.lower()] for c in self.excluded_columns if c.lower() in lookup))
+        skip = {c.lower() for c in excluded}
         out: dict[str, FieldMapping] = {}
         for f in schema.fields:
             if f.fixed_blank:
                 out[f.name] = FieldMapping(reason="always blank — fixed by the import format")
                 continue
             fm = self.fields.get(f.name, FieldMapping()).model_copy(deep=True)
-            fm.sources = [lookup[s.lower()] for s in fm.sources if s.lower() in lookup]
+            fm.sources = [lookup[s.lower()] for s in fm.sources if s.lower() in lookup and s.lower() not in skip]
             if fm.transform not in TRANSFORMS:
                 fm.transform = "none"
             if fm.transform in ("none", "constant"):
@@ -83,7 +91,7 @@ class Mapping(BaseModel):
             fm.params = fm.clean_params()
             out[f.name] = fm
         notes = {lookup[c.lower()]: n for c, n in self.column_notes.items() if c.lower() in lookup and n.strip()}
-        return Mapping(fields=out, column_notes=notes, general_note=self.general_note)
+        return Mapping(fields=out, column_notes=notes, general_note=self.general_note, excluded_columns=excluded)
 
     def problems(self, schema: TargetSchema) -> dict[str, str]:
         issues = {}
