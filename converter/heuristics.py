@@ -27,7 +27,15 @@ GENERIC_HEADERS = {"date", "time", "datetime", "timestamp", "created", "createda
 
 # Header words that say "this is a phone column". "number"/"no"/"#" count only without a non-phone word next to it.
 PHONE_WORDS = {"phone", "phones", "phonenumber", "mobile", "cell", "cellphone", "cellular", "tel", "telephone", "ph",
-               "sms", "text", "texting", "whatsapp", "wireless", "landline", "contact"}
+               "sms", "text", "texting", "whatsapp", "wireless", "landline", "contact", "msisdn"}
+# Words that turn a phone header into a header ABOUT the phone (a setting or label), not the number itself:
+# "phone4MarketingPreference", "Phone Type", "SMS Opt In", "Phone Verified", "Phone Ext".
+PHONE_ATTRIBUTE_WORDS = {"preference", "preferences", "pref", "prefs", "marketing", "type", "kind", "label", "status",
+                         "verified", "verification", "valid", "validated", "confirmed", "consent", "opt", "optin",
+                         "optout", "opted", "ext", "extension", "country", "countrycode", "code", "carrier", "flag",
+                         "enabled", "disabled", "allowed", "allow", "permission", "subscribed", "unsubscribed",
+                         "source", "date", "time", "updated", "created", "count", "is", "has", "can", "ok", "fax",
+                         "notes", "note", "comment", "comments"}
 NUMBER_WORDS = {"number", "num", "no", "nbr", "numbers"}
 NOT_PHONE_WORDS = {"order", "account", "acct", "id", "member", "card", "invoice", "ticket", "zip", "postal", "store",
                    "location", "receipt", "check", "transaction", "customer", "loyalty", "reference", "ref", "employee",
@@ -38,6 +46,9 @@ _FULL_ADDR_RE = re.compile(r",.*\b\d{5}(?:-\d{4})?\s*$|,\s*[A-Za-z .]+,?\s+[A-Z]
 
 def _words(text: str) -> list[str]:
     text = re.sub(r"([a-z])([A-Z])", r"\1 \2", text)  # camelCase → camel Case
+    text = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", text)  # SMSOptIn → SMS OptIn
+    text = re.sub(r"([A-Za-z])(\d)", r"\1 \2", text)  # phone4 → phone 4
+    text = re.sub(r"(\d)([A-Za-z])", r"\1 \2", text)  # 4Marketing → 4 Marketing
     return [w for w in re.split(r"[^a-z0-9]+", text.lower()) if w]
 
 
@@ -53,14 +64,20 @@ def _candidates(f: FieldSpec) -> list[str]:
 
 def is_consent_column(column: str) -> bool:
     words = set(_words(column))
-    return bool(words & CONSENT_WORDS) or any(k in norm_header(column) for k in ("optin", "optout", "donot"))
+    if words & CONSENT_WORDS or any(k in norm_header(column) for k in ("optin", "optout", "donot")):
+        return True
+    # "phone4MarketingPreference", "SMS Marketing Allowed", "Marketing OK": a yes/no marketing permission.
+    return "marketing" in words and bool(words & {"preference", "preferences", "pref", "prefs", "allowed", "allow",
+                                                  "ok", "permission", "enabled", "accepted", "agreed", "status"})
 
 
 def is_phone_header(column: str) -> bool:
     """True when the column name itself says it holds phone numbers ("Mobile", "Cell #", "Contact Number")."""
     words = set(_words(column))
+    if words & PHONE_ATTRIBUTE_WORDS or is_consent_column(column):
+        return False
     if words & PHONE_WORDS:
-        return not (words & {"fax"})
+        return True
     return bool(words & NUMBER_WORDS) and not (words & NOT_PHONE_WORDS) and len(words) <= 2
 
 
@@ -168,10 +185,11 @@ def auto_map(schema: TargetSchema, profiles: list[ColumnProfile]) -> Mapping:
         fm = fields[f.name]
         def _phone_column(p: ColumnProfile) -> bool:
             share = p.shares.get("phone", 0)
-            if header_score(p.name, f) >= 82:
-                return True
             if is_phone_header(p.name):
-                return share >= 0.3
+                # Named like a phone column: needs some phone numbers in it (or be empty in this file, e.g. Phone 4).
+                return p.non_empty == 0 or share >= 0.3
+            if any(w in PHONE_WORDS for w in _words(p.name)):
+                return False  # a column ABOUT the phone (preference, type, opt-in…), never the number
             return enough_evidence(p, share)  # column name says nothing about phones: values must be clear
 
         phone_cols = [p.name for p in profiles if _phone_column(p)
@@ -183,8 +201,8 @@ def auto_map(schema: TargetSchema, profiles: list[ColumnProfile]) -> Mapping:
                 phone_cols = [p.name for p in strong]
         if len(phone_cols) >= 2:
             ordered = sorted(phone_cols, key=lambda c: (not any(h in c.lower() for h in MOBILE_HINTS), phone_cols.index(c)))
-            fields[f.name] = FieldMapping(sources=ordered, transform="coalesce", origin="rule", confidence="medium",
-                                          reason="several phone columns; using mobile first, then the others")
+            fields[f.name] = FieldMapping(sources=ordered, transform="each_row", origin="rule", confidence="medium",
+                                          reason=f"{len(ordered)} phone columns: one row per different number")
             used.update(ordered)
         elif len(phone_cols) == 1 and fm.transform == "none":
             fields[f.name] = FieldMapping(sources=phone_cols, transform="copy", origin="rule", confidence="low",
