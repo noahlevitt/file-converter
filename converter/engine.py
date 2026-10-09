@@ -6,6 +6,7 @@ Deterministic: the same file + mapping always produces the same output. Claude i
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -26,6 +27,7 @@ CELL_FORMAT = "fmt"     # reformatted (phone, date, case, ZIP…)
 CELL_DERIVED = "drv"    # built from part of / several columns (name part, address part, combine, split, translate)
 CELL_DEFAULT = "def"    # filled from a default or fixed value
 CELL_FIXED = "fix"      # user-approved AI fix
+CELL_REPAIRED = "rpr"   # repaired from a likely typo (e.g. phone area code one digit off) — worth a look
 CELL_BLANKED = "blk"    # invalid optional value, left blank
 CELL_REJECT = "rej"     # invalid or missing required value → row rejected
 ROW_STATUSES = ("imported", "rejected", "duplicate", "empty")
@@ -38,6 +40,7 @@ class RowIssue:
     reason: str
     rejected: bool  # True = caused the row to be rejected; False = value was blanked
     skipped: bool = False  # an extra value (e.g. a 3rd phone column) that was invalid and didn't get its own row
+    repaired: bool = False  # value was repaired from a likely typo; reason says how
 
 
 @dataclass
@@ -62,6 +65,8 @@ class ConversionResult:
     extra_rows: int = 0  # rows added because a file row had several different values (e.g. phone numbers)
     skipped_values: int = 0  # invalid extra values that didn't get a row of their own
     skipped_counts: Counter = field(default_factory=Counter)
+    repaired_values: int = 0  # values repaired from likely typos (each marked in the audit)
+    repaired_counts: Counter = field(default_factory=Counter)
 
     @property
     def has_bad_rows(self) -> bool:
@@ -86,6 +91,9 @@ class ConversionResult:
         if self.skipped_values:
             parts.append(f"{self.skipped_values:,} invalid extra number{'s' if self.skipped_values != 1 else ''} "
                          "in other phone columns skipped.")
+        if self.repaired_values:
+            parts.append(f"{self.repaired_values:,} phone number{'s were' if self.repaired_values != 1 else ' was'} "
+                         "repaired from likely typos — check them under Side by side → Problems only.")
         return " ".join(parts)
 
     def summary_dict(self) -> dict[str, Any]:
@@ -101,6 +109,8 @@ class ConversionResult:
             "reasons": dict(self.reason_counts.most_common()),
             "blanked": dict(self.blanked_counts.most_common()),
             "skipped": dict(self.skipped_counts.most_common()),
+            "repaired_values": self.repaired_values,
+            "repaired": dict(self.repaired_counts.most_common()),
             "message": self.flag_message(),
         }
 
@@ -137,8 +147,10 @@ def convert(
     src = list(range(len(src_records)))
     each_raw: list[str] = []
     early_issues: dict[int, list[RowIssue]] = {}
+    each_ctx: dict = {}
     if each_field is not None:
-        src, each_raw, early_issues = _expand_rows(src_records, src_blank, each_field, mapping, overrides, timezone)
+        src, each_raw, early_issues, each_ctx = _expand_rows(src_records, src_blank, each_field, mapping, overrides,
+                                                             timezone)
     records = [src_records[k] for k in src]
     blank = [src_blank[k] for k in src]
     row_numbers = [row_numbers[k] for k in src]
@@ -178,7 +190,8 @@ def convert(
             ]
         fixes = overrides.get(f.name, {})
         cleaned = [N.clean_text(v) for v in raw]
-        ctx = N.prepare(f, [v for i, v in enumerate(cleaned) if not blank[i]], params)
+        # The 'one row per number' field reuses the context built from ALL its columns (area codes in the file).
+        ctx = each_ctx if f is each_field else N.prepare(f, [v for i, v in enumerate(cleaned) if not blank[i]], params)
         if timezone:
             ctx["tz"] = timezone
         passthrough = fm.transform in ("copy", "coalesce", "each_row")
@@ -216,6 +229,9 @@ def convert(
                 statuses.append(CELL_REJECT if rejected else CELL_BLANKED)
             elif v in fixes:
                 statuses.append(CELL_FIXED)
+            elif v in ctx.get("repairs", {}):
+                issues[i].append(RowIssue(f.name, v, f"repaired: {ctx['repairs'][v]}", rejected=False, repaired=True))
+                statuses.append(CELL_REPAIRED)
             elif fm.transform == "constant":
                 statuses.append(CELL_DEFAULT)
             elif not passthrough:
@@ -235,6 +251,7 @@ def convert(
     reason_counts: Counter = Counter()
     blanked_counts: Counter = Counter()
     skipped_counts: Counter = Counter()
+    repaired_counts: Counter = Counter()
     accepted: list[int] = []
     rejected_rows: list[tuple[int, str]] = []
     blanked_total = 0
@@ -243,14 +260,17 @@ def convert(
             continue
         row_rejects = [x for x in issues[i] if x.rejected]
         for x in issues[i]:
-            if x.skipped:
-                skipped_counts[f"{schema.field(x.field).header}: {x.reason}"] += 1
+            key = f"{schema.field(x.field).header}: {_reason_key(x.reason)}"
+            if x.repaired:
+                repaired_counts[key] += 1
+            elif x.skipped:
+                skipped_counts[key] += 1
             elif not x.rejected:
-                blanked_counts[f"{schema.field(x.field).header}: {x.reason}"] += 1
+                blanked_counts[key] += 1
                 blanked_total += 1
         if row_rejects:
             for x in row_rejects:
-                reason_counts[f"{schema.field(x.field).header}: {x.reason}"] += 1
+                reason_counts[f"{schema.field(x.field).header}: {_reason_key(x.reason)}"] += 1
             rejected_rows.append((i, "; ".join(_fmt_issue(schema, x) for x in row_rejects)))
         else:
             accepted.append(i)
@@ -342,12 +362,14 @@ def convert(
         extra_rows=sum(extra),
         skipped_values=sum(skipped_counts.values()),
         skipped_counts=skipped_counts,
+        repaired_values=sum(repaired_counts.values()),
+        repaired_counts=repaired_counts,
     )
 
 
 def _expand_rows(records: list[dict[str, str]], blank: list[bool], f, mapping: Mapping,
                  overrides: dict[str, dict[str, str]], timezone: str | None
-                 ) -> tuple[list[int], list[str], dict[int, list[RowIssue]]]:
+                 ) -> tuple[list[int], list[str], dict[int, list[RowIssue]], dict]:
     """Work out the rows for 'One row per phone number' on field f.
 
     Returns (source index per working row, the raw value each working row uses, early issues per working row).
@@ -392,7 +414,7 @@ def _expand_rows(records: list[dict[str, str]], blank: list[bool], f, mapping: M
         if bad:
             early[first] = [RowIssue(f.name, v, f"extra value skipped — {err}", rejected=False, skipped=True)
                             for v, err in bad]
-    return src, raw, early
+    return src, raw, early, ctx
 
 
 def source_rows(source: pd.DataFrame, audit: pd.DataFrame) -> pd.DataFrame:
@@ -403,6 +425,12 @@ def source_rows(source: pd.DataFrame, audit: pd.DataFrame) -> pd.DataFrame:
     if "_src" not in audit.columns or len(source) == len(audit):
         return source
     return source.iloc[audit["_src"].astype(int).to_numpy()].reset_index(drop=True)
+
+
+def _reason_key(reason: str) -> str:
+    """Reason text for the summary counts: without the per-value details (numbers, 'could be …' options)."""
+    reason = reason.split(" — could be ")[0]
+    return re.sub(r"\d{3,}", "…", reason)
 
 
 def _fmt_issue(schema: TargetSchema, x: RowIssue) -> str:
