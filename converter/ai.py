@@ -53,7 +53,7 @@ def _transform_docs() -> str:
 
 def _schema_docs(schema: TargetSchema) -> str:
     lines = []
-    for f in schema.fields:
+    for f in schema.mappable_fields:
         bits = [f"type={f.type} ({TYPE_DESCRIPTIONS[f.type]})", "REQUIRED" if f.required else "optional"]
         if f.format:
             bits.append(f"output format={f.format}")
@@ -64,9 +64,16 @@ def _schema_docs(schema: TargetSchema) -> str:
         line = f"- {f.name} [header \"{f.header}\"]: " + "; ".join(bits)
         if f.description:
             line += f". {f.description}"
+        if f.no_year_value is not None:
+            line += f". Month and day without a year are output with year {f.no_year_value} automatically"
         if f.synonyms:
             line += f". Also called: {', '.join(f.synonyms)}"
         lines.append(line)
+    fixed = [f.name for f in schema.fields if f.fixed_blank]
+    if fixed:
+        lines.append(f"\nAlways blank and not mappable (the engine forces them empty; do not return entries for them): "
+                     f"{', '.join(fixed)}. Source columns about consent, opt-in, subscription or opt-out status must "
+                     "NOT be mapped to any field.")
     if schema.dedupe.keys:
         lines.append(f"\nRows are de-duplicated when all of these fields match: {', '.join(schema.dedupe.keys)}.")
     return "\n".join(lines)
@@ -150,7 +157,7 @@ def _output_schema(schema: TargetSchema, columns: list[str]) -> dict[str, Any]:
     item = {
         "type": "object",
         "properties": {
-            "target_field": {"type": "string", "enum": schema.field_names},
+            "target_field": {"type": "string", "enum": [f.name for f in schema.mappable_fields]},
             "transform": {"type": "string", "enum": list(TRANSFORMS)},
             "sources": {"type": "array", "items": {"type": "string", "enum": columns}},
             "params": {"type": "object", "properties": params_props, "additionalProperties": False},
@@ -247,7 +254,7 @@ class ClaudeAssistant:
         if current and current.fields:
             user += ("\n\nA rule-based first pass produced this mapping (it may contain mistakes):\n"
                      + json.dumps(_mapping_payload(current), ensure_ascii=False))
-        user += ("\n\nReturn exactly one entry for every target field. Put anything the reviewer should know "
+        user += ("\n\nReturn exactly one entry for every mappable target field. Put anything the reviewer should know "
                  "(ambiguities, columns you left unused on purpose) in notes; keep notes under 80 words.")
         data, usage = self._call(model=self.mapping_model, system=build_system_prompt(schema), user=user,
                                  schema=_output_schema(schema, columns), effort="medium", max_tokens=16000)
@@ -321,6 +328,9 @@ def parse_mapping_entries(entries: list[dict], schema: TargetSchema, columns: li
         transform = str(e.get("transform", "")).lower()
         if target is None:
             dropped.append(f"unknown target field '{e.get('target_field')}'")
+            continue
+        if schema.field(target).fixed_blank:
+            dropped.append(f"{target}: always blank, can't be mapped")
             continue
         if transform not in TRANSFORMS:
             dropped.append(f"{target}: unknown transform '{transform}'")
