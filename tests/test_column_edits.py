@@ -86,15 +86,26 @@ def _base(real_schema, df):
 
 
 def test_send_column_to_another_field_replaces_previous_source(real_schema):
-    df = _file()
-    m = _base(real_schema, df)
-    m2, msgs = apply_column_edit(real_schema, m, "Occupation", targets=["phone_number"])
-    assert m2.get("phone_number").sources == ["Occupation"] and m2.get("phone_number").origin == "user"
-    assert "Phone" not in m2.used_sources()
-    assert any("was Phone" in x for x in msgs)
+    m = Mapping(fields={"phone_number": FieldMapping(sources=["Phone"], transform="copy"),
+                        "transactions_last": FieldMapping(sources=["Last Visit"], transform="copy")})
+    m2, msgs = apply_column_edit(real_schema, m, "Visit Date", targets=["transactions_last"])
+    assert m2.get("transactions_last").sources == ["Visit Date"] and m2.get("transactions_last").origin == "user"
+    assert "Last Visit" not in m2.used_sources()
+    assert any("was Last Visit" in x for x in msgs)
     # and back
-    m3, _ = apply_column_edit(real_schema, m2, "Phone", targets=["phone_number"])
-    assert m3.get("phone_number").sources == ["Phone"]
+    m3, _ = apply_column_edit(real_schema, m2, "Last Visit", targets=["transactions_last"])
+    assert m3.get("transactions_last").sources == ["Last Visit"]
+
+
+def test_adding_a_column_to_the_phone_field_adds_a_number(real_schema):
+    df = _file(**{"Phone 2": ["2015550199", "", "", "", ""]})
+    m = Mapping(fields={"phone_number": FieldMapping(sources=["Phone"], transform="copy")})
+    m2, msgs = apply_column_edit(real_schema, m, "Phone 2", targets=["phone_number"])
+    assert m2.get("phone_number").sources == ["Phone", "Phone 2"] and m2.get("phone_number").transform == "each_row"
+    assert "one row per different number" in msgs[0]
+    assert convert(df, real_schema, m2).imported == 6  # Ana has two numbers → two rows
+    m3, _ = apply_column_edit(real_schema, m2, "Phone 2", targets=[])
+    assert m3.get("phone_number").sources == ["Phone"] and m3.get("phone_number").transform == "copy"
 
 
 def test_clear_goes_to_removes_column_from_coalesce(real_schema):
