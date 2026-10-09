@@ -1,12 +1,32 @@
 # Import File Converter
 
 Internal web app that converts any customer/contact file (CSV, TSV, TXT, XLSX, XLS, ODS) into the exact
-import format of the target system. Built for one file at a time and 5–20 internal users.
+import format of the target system. Built for 5–20 internal users; each upload is one file.
 
 ```
-Upload → detect header/encoding/delimiter → auto-map columns → review/edit (or instruct Claude) → convert
-       → converted file + rejected-rows file + summary   (mapping saved as a template for next time)
+New import:  upload → detect header/encoding/delimiter → auto-map columns → review/edit (or instruct Claude)
+             → Start import (runs in the background; mapping saved as a template for next time)
+Imports:     every import with live progress, elapsed time and time left → open one → results, downloads,
+             side-by-side original vs converted, what changed per field, re-run, Claude value fixes
 ```
+
+## Pages
+
+| Page | What it's for |
+|---|---|
+| **New import** | Upload a file, check the detected header/sheet, review the column mapping (edit it, or tell Claude what to change), then **Start import**. |
+| **Imports** | Every import by everyone (filter: mine, status, search). Running imports show a progress bar, the current step ("Converting Phone — row 41,000 of 150,000"), elapsed time and estimated time left, with Cancel. Select any import to open it. |
+| **Import detail** | Status and timing, the bad-row flag and counts, downloads (converted file, rejected rows, summary, original file, side-by-side Excel), and tabs: **Side by side**, **What changed**, **Converted file**, **Bad & duplicate rows**, **Mapping used**. Re-run, and "fix with Claude", start a new linked import. |
+| **Templates** | Saved column mappings per file layout; rename, delete, export. |
+| **Target format** | The current target schema, output file settings, dedupe rule and file retention. |
+| **Users** | (admins) add users, reset passwords, grant admin. |
+
+**Side by side** shows the original file (left, exactly as uploaded) and the converted output (right) row by
+row. Column headers show where each original column went and where each output field came from. Cells are
+coloured by what happened: reformatted, built from part of / several columns, default value, Claude fix,
+invalid → left blank, invalid/missing → row rejected; the original value is shown under any changed value and
+on hover. Filter to rows with changes, problems, bad rows, duplicates, imported or empty rows, search for any
+value or row number, and page through large files. The same view downloads as a colour-coded Excel workbook.
 
 ## How it works
 
@@ -15,38 +35,48 @@ Upload → detect header/encoding/delimiter → auto-map columns → review/edit
 | **Read** | Every cell is read as text (no lost ZIP zeros, no phones turned into `5.16E+09`). Header row, encoding (UTF-8 / Windows-1252 / etc.), delimiter and Excel sheets are detected; the user can override. |
 | **Map** | 1) A saved **template** with the same column headers is applied instantly (no AI call). 2) **Rules** match headers, synonyms and value types (phones, emails, dates, ZIPs, states), split full names and full addresses, and combine Mobile/Home phone columns. 3) **Claude** reviews and fills gaps, using only the headers + up to 15 sample values per column. |
 | **Review** | A grid shows each target field, its source column(s), how it's built, a sample of converted output, and any problem. Users edit it directly or type an instruction ("Join Date is day-first", "put VIP Level into Notes") and accept/discard Claude's proposed changes. |
-| **Convert** | Deterministic Python converts every row — Claude never touches the full file. Phones are validated with Google's libphonenumber, dates are interpreted per column (month-first vs day-first decided once for the whole column, Excel serial dates handled), ZIP/state/email normalized. |
+| **Convert** | Runs in a background worker pool (default 2 at a time; more wait in a queue) so users can keep working. Deterministic Python converts every row — Claude never touches the full file. Phones are validated with Google's libphonenumber, dates are interpreted per column (month-first vs day-first decided once for the whole column, Excel serial dates handled), ZIP/state/email normalized. |
 | **Report** | **Bad rows are not imported** and the result is flagged: *"37 bad rows were NOT imported"* with a reason per row in the rejected-rows file. Optional fields with invalid values are left blank (configurable per field). |
 | **Fix (optional)** | Claude can suggest reformatting for rejected values (e.g. `516 555-O1OO`, `Sept 3rd twenty26`). Each suggestion is re-validated, and any suggestion that adds or changes digits/data is refused. Users approve before re-converting. |
 
-**Duplicates:** a row is removed only when *all* dedupe keys match an earlier row. With the default keys
-`[phone, signup_date]`, the same phone with a different date is **kept** (both rows import).
+## Target format (generic import format)
 
-## Setting the real target schema
+The output follows `generic-import-format.md`, encoded in [`schemas/target_schema.yaml`](schemas/target_schema.yaml):
 
-Everything — auto-mapping, Claude's prompt, validation, output file layout — is driven by
-[`schemas/target_schema.yaml`](schemas/target_schema.yaml). The current file is a **placeholder**.
-Replace its `fields` with the real import format; no code changes are needed and the running app picks up
-the change automatically.
+| # | Header | Required | Output | How the tool handles it |
+|---|---|---|---|---|
+| 1 | `phone_number` | Yes | `2125551234` | Any format in (`(212) 555-1234`, `+1 212…`, `212.555.1234`, Excel numbers) → 10 digits. Missing or invalid (too few digits, fake area code, non-North-American) → row rejected as a bad row. |
+| 2 | `consent` | No | always blank | **Locked.** Blank on every row. It can't be mapped by the rules, set by Claude, given a default, or edited in the mapping grid, and columns about opt-in / consent / subscription are never auto-mapped to anything. |
+| 3–8 | `calls_last`, `transactions_last`, `last_contacted`, `in_sms_last`, `redemptions_last`, `spin_last` | No | `03/07/2026 09:05 AM` | Any date/time format in → `MM/DD/YYYY HH:MM AM/PM`. Seconds dropped; a time zone suffix is dropped (the written clock time is kept); a date with no time gets `12:00 AM`. Placeholders like `0000-00-00` or `Never` → blank. |
+| 9–10 | `birthday`, `anniversary` | No | `09/12/1985` | Any date format in → `MM/DD/YYYY`. Month and day with no year (`09/12`, `Sep 12`, `12-Sep`, `September 12th`) → year `1600` (e.g. `09/12/1600`). |
+
+- Headers are written exactly as above: lowercase, in order, no extra columns, all kept even when empty.
+  Source columns with no matching field (names, emails, totals…) are left out and shown as "not imported".
+- An invalid optional value (e.g. `02/30` as a birthday) is left blank and the row still imports; it is
+  listed under *What changed*. Change a field to `on_invalid: reject` to reject those rows instead.
+- **Duplicates:** a row is removed only when **every** column matches an earlier row. The same phone with any
+  different date imports as its own row.
+
+### Changing the target format
+
+Everything — auto-mapping, Claude's prompt, validation, output layout — is driven by the YAML file; no code
+changes are needed and the running app picks up edits automatically. Field options:
 
 ```yaml
 fields:
-  - name: phone            # internal id
-    header: Phone          # exact column header in the output file
+  - name: phone_number     # internal id
+    header: phone_number   # exact column header in the output file
     type: phone            # string|phone|date|datetime|email|zip|state|integer|decimal|boolean|enum
     required: true         # missing/invalid → row rejected (bad row)
-    format: E164           # phone: E164|digits10|digits11|national|dashed  date: strftime e.g. "%m/%d/%Y"
-    synonyms: [mobile, cell, phone number]     # other names seen in source files
-    on_invalid: reject     # reject | blank   (default: reject if required, else blank)
-    # also: max_length, truncate, case (upper|lower|title|name), allowed_values (enum), default,
-    #       countries (phone, default [US]), true_value / false_value (boolean), description
-output:
-  format: csv              # csv | xlsx
-  delimiter: ","
-  encoding: utf-8
+    format: digits10       # phone: E164|digits10|digits11|national|dashed   date/datetime: strftime pattern
+    synonyms: [mobile, cell, phone number]   # other names seen in source files (improves auto-mapping)
+    # also: on_invalid (reject|blank), fixed_blank (always empty, locked), no_year_value (dates, e.g. 1600),
+    #       countries (phone), max_length, truncate, case, allowed_values (enum), default, description
 dedupe:
-  keys: [phone, signup_date]
+  keys: ["*"]              # "*" = every field; or list specific fields
 ```
+
+Add source-file header names you see often to `synonyms` so they map automatically.
 
 ## Running it
 
@@ -101,15 +131,33 @@ docker compose exec app python scripts/manage_users.py list
 
 ## Data stored
 
-`data/converter.db` (SQLite): user accounts (bcrypt-hashed passwords), templates (column names + mapping
-rules) and job history (counts only). **No customer rows are stored** — uploaded files are processed in
-memory. Back up `data/` to keep templates and history.
+- `data/converter.db` (SQLite): user accounts (bcrypt-hashed passwords), templates (column names + mapping
+  rules), and one record per import (who, when, status, timings, counts, mapping used).
+- `data/imports/<id>/`: the original upload, the converted file, rejected rows, summary, and the comparison
+  data behind the side-by-side view. These contain customer data and are **deleted automatically after
+  `FILE_RETENTION_DAYS` (default 30)**; the import record and counts stay. Set `0` to keep them forever.
+- Back up `data/` to keep templates and history.
+
+## Settings (`.env`)
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | — | Claude API key; leave empty to run without AI |
+| `MAPPING_MODEL` / `REPAIR_MODEL` | `claude-sonnet-5-5` / `claude-haiku-5-5` | Claude models |
+| `AI_SAMPLE_VALUES` | 15 | sample values per column sent to Claude for mapping |
+| `IMPORT_WORKERS` | 2 | imports that run at the same time |
+| `FILE_RETENTION_DAYS` | 30 | days to keep each import's files (0 = forever) |
+| `APP_TIMEZONE` | America/New_York | time zone for displayed times |
+| `DEFAULT_PAGE` | new | first page: `new` or `imports` |
+| `AUTH_MODE` | password | `password` or `none` (single user on own computer) |
+| `ADMIN_USERNAME` / `ADMIN_PASSWORD` | — | first admin, created on first start |
+| `SCHEMA_PATH`, `DATA_DIR`, `APP_TITLE` | | paths and title |
 
 ## Command line
 
 ```bash
 python -m converter.cli inspect file.xlsx                 # detected columns + proposed mapping
-python -m converter.cli convert file.csv --out out/       # exit code 2 if there were bad rows
+python -m converter.cli convert file.csv --out out/       # exit code 2 if there were bad rows; also listed under Imports
 python -m converter.cli convert file.csv --template "POS guest export"
 python -m converter.cli convert file.csv --ai --save-template "New vendor"
 ```
@@ -118,13 +166,13 @@ python -m converter.cli convert file.csv --ai --save-template "New vendor"
 
 ```bash
 pip install -r requirements.txt
-python scripts/make_sample_files.py   # messy sample files in sample_data/
+python scripts/make_sample_files.py   # messy sample files in sample_data/ (incl. restaurant_crm_export.csv)
 python -m pytest -q
 streamlit run app.py
 ```
 
 ```
-app.py                  Streamlit web UI (convert, templates, history, target format, users)
+app.py                  Streamlit web UI (new import, imports tracker + detail, templates, target format, users)
 converter/
   schema.py             target schema model + YAML loader
   reader.py             file ingest, encoding/delimiter/header detection
@@ -133,18 +181,25 @@ converter/
   mapping.py            mapping spec, column profiling, header fingerprints
   heuristics.py         rule-based auto-mapping
   ai.py                 Claude: mapping, instructions, value repair (+ guards)
-  engine.py             conversion, validation, bad rows, dedupe
+  engine.py             conversion, validation, bad rows, dedupe, progress, per-cell audit trail
+  jobs.py               background import runner (queue, progress, cancel, retention)
+  compare.py            side-by-side view, what-changed summary, comparison Excel
   output.py             converted file, rejects file, summary
-  storage.py            SQLite users/templates/jobs
+  storage.py            SQLite users/templates/imports + per-import file folders
+  ui_format.py          time/duration/status display helpers
   services.py           orchestration shared by UI and CLI
   editor.py             mapping-grid helpers
   cli.py                command line
-schemas/target_schema.yaml   ← replace with the real import format
+schemas/target_schema.yaml   the target import format (generic import format)
+tests/fixtures/              example contact schema used by the generic tests
 ```
 
 ## Known limits
 
 - Phone validation confirms a number is a real, dialable US number; it cannot tell mobile from landline.
   That needs a carrier lookup (e.g. Twilio Lookup, paid per number) and can be added as an optional step.
-- Refreshing the browser tab signs the user out and clears the current file (templates and history persist).
-- One file at a time by design.
+- Refreshing the browser tab signs the user out and clears a mapping in progress on *New import*. Imports
+  already started keep running and stay visible under *Imports*.
+- Imports run inside the web server process. If the server restarts mid-import, that import is marked
+  *Interrupted* and can be re-run with one click.
+- Throughput measured in testing: about 150,000 rows in 25 seconds for a 6-column file on one worker.
