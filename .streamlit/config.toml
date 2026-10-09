@@ -1,0 +1,15 @@
+[server]
+maxUploadSize = 200          # MB
+headless = true
+enableXsrfProtection = true
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+primaryColor = "#2563EB"
+base = "light"
+
+[client]
+toolbarMode = "minimal"
+showErrorDetails = false
