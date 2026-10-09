@@ -70,11 +70,16 @@ Every value is reduced to the 10-digit US number:
 - Several numbers in one cell: a number labelled mobile/cell wins, then an unlabelled one, then home/work, and fax last.
 - Spreadsheet artifacts: `5165550100.0`, `5.165550100E+09`, `="5165550100"`, a leading apostrophe.
 - Letters typed for digits (`516-555-O1OO`, `5l6…`) and vanity numbers (`1-800-FLOWERS`).
-- Rejected, with the reason shown: missing area code (7 digits), too few or too many digits, numbers that can't
-  exist (`555-555-5555`, `123-456-7890`), non-US numbers (Canada, UK, Mexico…), and Excel scientific notation
-  that already lost digits (`5.163E+09`).
+- `+1` put in front of a number that already had a `+` (`+1 +15165550100`, `+1 +5165550100`,
+  `+1 +51 63 171059`): the extra `+1` is ignored and the rest is read normally. `+` with 10 digits is read as a
+  US number with the 1 left out only when that US number can exist; otherwise it's read as the foreign number it is
+  (`+51 1 4567890` is Lima, Peru).
+- Rejected, with the reason shown: missing area code (7 digits), too few or too many digits, area codes that
+  aren't in use (`433`, `555`, `123`), exchanges that don't exist in an area code, non-US numbers with the country
+  and place (`not a US number — Canada (area code 514, Quebec)`), numbers with two country codes that aren't valid
+  either way, and Excel scientific notation that already lost digits (`5.163E+09`).
 - US territories (Puerto Rico, USVI, Guam, American Samoa, Northern Mariana Islands) count as US. To accept the
-  50 states only, set `countries: [US]` in the schema.
+  50 states only, set `countries: [US]` in the schema; to also accept Canada, add `CA` to that list.
 
 #### Several phone columns (e.g. Toast: phone, phone2, phone3, phone4)
 
