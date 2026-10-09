@@ -1,125 +1,117 @@
 # ---------------------------------------------------------------------------
-# TARGET SCHEMA — PLACEHOLDER
-# Replace the fields below with the real import format once it is provided.
-# Every part of the tool (auto-mapping, Claude prompts, validation, output file)
-# reads from this file; no code changes are needed when it changes.
+# TARGET SCHEMA — Generic import file format
+# Source: generic-import-format.md (provided 2026-10-09)
 #
-# Field attributes:
-#   name          internal id (snake_case) — used in templates and dedupe keys
-#   header        exact column header written to the output file
-#   type          string | phone | date | datetime | email | zip | state |
-#                 integer | decimal | boolean | enum
-#   required      true → rows missing/invalid in this field are rejected (bad rows)
-#   format        date/datetime: strftime pattern, e.g. "%m/%d/%Y"
-#                 phone: E164 (+15165550100) | digits10 (5165550100) |
-#                        digits11 (15165550100) | national ((516) 555-0100) |
-#                        dashed (516-555-0100)
-#                 zip: zip5 | zip5_4
-#   on_invalid    reject | blank  (default: reject if required, blank otherwise)
-#   max_length, truncate, case (none|upper|lower|title|name), allowed_values,
-#   default, countries (phone), true_value / false_value (boolean)
-#   synonyms      other header names that mean this field (improves auto-mapping)
+# Output rules from the spec:
+#   - Headers exactly as below: lowercase, in this order, no extra columns.
+#   - Keep every header even when the whole column is blank.
+#   - Blank cell when there is no value.
+#   - consent is ALWAYS blank (true subscribes unknown consumers, false opts people out).
+#   - phone_number: 10 digits only (area code + number), no +1, spaces, dashes or parentheses.
+#     A row without a phone number fails → rejected (bad row).
+#   - Activity columns: MM/DD/YYYY HH:MM AM/PM (12-hour, no seconds, no time zone).
+#   - birthday / anniversary: MM/DD/YYYY; month + day with no year → year 1600.
+#
+# Field attributes are documented in README.md ("Setting the target schema").
 # ---------------------------------------------------------------------------
 
-name: Contact Import (PLACEHOLDER)
-version: "0.1"
-description: Placeholder contact schema used until the real import schema is supplied.
+name: Generic import format
+version: "1.0"
+description: Consumer import file — phone number, activity timestamps, birthday and anniversary.
 
 output:
-  format: csv          # csv | xlsx
+  format: csv
   delimiter: ","
   encoding: utf-8
   include_header: true
   quote_all: false
   line_terminator: "\n"
 
-# Rows count as duplicates only when ALL keys match.
-# Same phone + different signup date = NOT a duplicate (both rows import).
+# A row is a duplicate only when EVERY column matches an earlier row
+# ("*" = all fields). Same phone with any different date → both rows import.
 dedupe:
-  keys: [phone, signup_date]
+  keys: ["*"]
   keep: first
 
 fields:
-  - name: phone
-    header: Phone
+  - name: phone_number
+    header: phone_number
     type: phone
     required: true
-    format: E164
-    countries: [US]
-    description: Mobile phone number that receives texts
-    synonyms: [mobile, mobile phone, mobile number, cell, cell phone, cell number, phone number,
-               telephone, tel, contact number, sms number, primary phone, "phone #", "cell #"]
+    format: digits10
+    # 10-digit North American numbers (US and territories, Canada).
+    countries: [US, CA, PR, VI, GU, AS, MP]
+    description: Consumer's mobile number
+    synonyms: [phone, phone number, mobile, mobile phone, mobile number, cell, cell phone, cell number,
+               telephone, tel, contact number, sms number, primary phone, customer phone, guest phone,
+               "phone #", "cell #", "mobile #", phone1, msisdn]
 
-  - name: first_name
-    header: First Name
+  - name: consent
+    header: consent
     type: string
-    case: name
-    max_length: 50
-    truncate: true
-    synonyms: [first, fname, given name, first nm, customer first name]
+    fixed_blank: true
+    description: Always blank. A blank consent never changes anyone's consent.
 
-  - name: last_name
-    header: Last Name
-    type: string
-    case: name
-    max_length: 50
-    truncate: true
-    synonyms: [last, lname, surname, family name, last nm, customer last name]
+  - name: calls_last
+    header: calls_last
+    type: datetime
+    format: "%m/%d/%Y %I:%M %p"
+    description: When the consumer last called
+    synonyms: [last call, last called, last call date, last call time, last phone call, last inbound call,
+               call date, recent call, calls last]
 
-  - name: email
-    header: Email
-    type: email
-    synonyms: [email address, e-mail, e mail, mail, customer email]
+  - name: transactions_last
+    header: transactions_last
+    type: datetime
+    format: "%m/%d/%Y %I:%M %p"
+    description: When the consumer last made a transaction / order / visit
+    synonyms: [last transaction, last transaction date, last order, last order date, last ordered,
+               last purchase, last purchase date, last visit, last visit date, last sale, recent order,
+               last check, last receipt, transactions last]
+
+  - name: last_contacted
+    header: last_contacted
+    type: datetime
+    format: "%m/%d/%Y %I:%M %p"
+    description: When the business last contacted (messaged) the consumer
+    synonyms: [last contact, last contacted date, last message sent, last sms sent, last text sent,
+               last outreach, last campaign, last campaign sent, last messaged, date last contacted]
+
+  - name: in_sms_last
+    header: in_sms_last
+    type: datetime
+    format: "%m/%d/%Y %I:%M %p"
+    description: When the consumer last sent an inbound text
+    synonyms: [last inbound sms, last sms received, last text received, last incoming text, last incoming sms,
+               last reply, last replied, last message received, last inbound message, in sms last]
+
+  - name: redemptions_last
+    header: redemptions_last
+    type: datetime
+    format: "%m/%d/%Y %I:%M %p"
+    description: When the consumer last redeemed an offer, coupon or reward
+    synonyms: [last redemption, last redemption date, last redeemed, last coupon redeemed, last reward redeemed,
+               last offer redeemed, last reward, redemption date, redemptions last]
+
+  - name: spin_last
+    header: spin_last
+    type: datetime
+    format: "%m/%d/%Y %I:%M %p"
+    description: When the consumer last played spin-to-win
+    synonyms: [last spin, last spin date, spin date, last wheel spin, spin to win, last game played, spin last]
 
   - name: birthday
-    header: Birthday
+    header: birthday
     type: date
     format: "%m/%d/%Y"
-    synonyms: [birth date, birthdate, dob, date of birth, bday]
+    no_year_value: 1600
+    description: Birthday; month and day only is fine
+    synonyms: [birth date, birthdate, dob, date of birth, bday, b-day, birth day, birthday date]
 
-  - name: signup_date
-    header: Signup Date
+  - name: anniversary
+    header: anniversary
     type: date
     format: "%m/%d/%Y"
-    description: Date the contact joined / subscribed / first visited
-    synonyms: [join date, joined, date joined, subscribed, subscribe date, opt in date, created,
-               created at, date added, signup, sign up date, registration date, first visit]
-
-  - name: address1
-    header: Address 1
-    type: string
-    max_length: 100
-    truncate: true
-    synonyms: [address, street, street address, address line 1, addr1, mailing address]
-
-  - name: address2
-    header: Address 2
-    type: string
-    max_length: 100
-    truncate: true
-    synonyms: [address line 2, addr2, apt, suite, unit, apartment]
-
-  - name: city
-    header: City
-    type: string
-    case: title
-    max_length: 50
-    synonyms: [town, municipality, locality]
-
-  - name: state
-    header: State
-    type: state
-    synonyms: [st, province, region, state code]
-
-  - name: zip
-    header: Zip
-    type: zip
-    format: zip5
-    synonyms: [zip code, zipcode, postal code, postal, postcode, zip5]
-
-  - name: notes
-    header: Notes
-    type: string
-    max_length: 500
-    truncate: true
-    synonyms: [note, comments, comment, remarks]
+    no_year_value: 1600
+    description: Anniversary; month and day only is fine
+    synonyms: [anniversary date, wedding anniversary, anniv, wedding date]
