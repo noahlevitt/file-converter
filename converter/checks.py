@@ -98,6 +98,21 @@ def column_warnings(schema: TargetSchema, mapping: Mapping,
     return out
 
 
+def _raw_dates(raw: pd.Series) -> list[datetime]:
+    """Dates with a real year, as written in the source (before placeholder years are dropped)."""
+    from .dateparse import NO_YEAR, DateError, parse
+
+    out = []
+    for v in raw[raw != ""].head(2000):
+        try:
+            dt, _ = parse(v, allow_no_year=True)
+        except (DateError, ValueError, OverflowError, TypeError):
+            continue
+        if dt.year != NO_YEAR and dt.year > 1900:
+            out.append(dt)
+    return out
+
+
 def run_checks(schema: TargetSchema, mapping: Mapping, source: pd.DataFrame, audit: pd.DataFrame,
                profiles: list[ColumnProfile] | None = None, timezone_label: str = "",
                today: date | None = None) -> list[Finding]:
@@ -147,17 +162,21 @@ def run_checks(schema: TargetSchema, mapping: Mapping, source: pd.DataFrame, aud
                     findings.append(Finding("info", f.name, src, f"{len(old):,} value(s) are before the year 2000.",
                                             "Check two-digit years and that this is the right column."))
             elif f.no_year_value is not None:  # birthday / anniversary
-                future = [d for d in real if d.date() > today]
+                # Judge the years as written in the file: recent or future years are output as month/day only.
+                written = _raw_dates(raw) if raw is not None else []
+                future = [d for d in written if d.date() > today]
                 if future:
-                    findings.append(Finding("warning", f.name, src,
-                                            f"{len(future):,} value(s) are in the future (e.g. {future[0]:%m/%d/%Y}).",
+                    findings.append(Finding("info", f.name, src,
+                                            f"{len(future):,} value(s) have a year in the future (e.g. "
+                                            f"{future[0]:%m/%d/%Y}); the year was dropped ({f.no_year_value}).",
                                             "Check the column and the day/month order."))
-                recent = [d for d in real if d.date() >= today - timedelta(days=730)]
-                if len(real) >= 5 and len(recent) >= 0.5 * len(real):
+                recent = [d for d in written if today - timedelta(days=730) <= d.date() <= today]
+                if len(written) >= 5 and len(recent) >= 0.5 * len(written):
                     findings.append(Finding(
                         "warning", f.name, src,
-                        f"{len(recent) / len(real):.0%} of these dates are within the last two years — that looks "
-                        "like sign-up or visit dates, not birthdays/anniversaries.",
+                        f"{len(recent) / len(written):.0%} of these dates are within the last two years — that looks "
+                        "like sign-up or visit dates, not birthdays/anniversaries (or a year Excel added to dates "
+                        f"typed without one; those are output with year {f.no_year_value}).",
                         "Confirm the column."))
             if len(dts) >= 10 and len(set(dts)) == 1:
                 findings.append(Finding("info", f.name, src, f"Every row has the same value ({dts[0]:%m/%d/%Y}).",
