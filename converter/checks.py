@@ -228,7 +228,8 @@ def run_checks(schema: TargetSchema, mapping: Mapping, source: pd.DataFrame, aud
                                     "Does it belong in one of: " + ", ".join(unmapped_dates) + "?"))
         elif p.shares.get("phone", 0) >= 0.6:
             findings.append(Finding("info", "", p.name, f"'{p.name}' contains phone numbers but isn't used.",
-                                    "Use 'First non-empty' on the phone field to fall back to it."))
+                                    "Add it to the phone field (Goes to → phone field) to give those numbers their "
+                                    "own rows."))
 
     findings.sort(key=lambda x: (SEVERITY_ORDER.get(x.severity, 9), x.field, x.column))
     return findings
