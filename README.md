@@ -45,10 +45,10 @@ The output follows `generic-import-format.md`, encoded in [`schemas/target_schem
 
 | # | Header | Required | Output | How the tool handles it |
 |---|---|---|---|---|
-| 1 | `phone_number` | Yes | `2125551234` | Any format in (`(212) 555-1234`, `+1 212…`, `212.555.1234`, Excel numbers) → 10 digits. Missing or invalid (too few digits, fake area code, non-North-American) → row rejected as a bad row. |
+| 1 | `phone_number` | Yes | `2125551234` | US numbers only. No country code → +1 assumed. See *Phone numbers* below. Missing or invalid → row rejected as a bad row. |
 | 2 | `consent` | No | always blank | **Locked.** Blank on every row. It can't be mapped by the rules, set by Claude, given a default, or edited in the mapping grid, and columns about opt-in / consent / subscription are never auto-mapped to anything. |
-| 3–8 | `calls_last`, `transactions_last`, `last_contacted`, `in_sms_last`, `redemptions_last`, `spin_last` | No | `03/07/2026 09:05 AM` | Any date/time format in → `MM/DD/YYYY HH:MM AM/PM`. Seconds dropped; a time zone suffix is dropped (the written clock time is kept); a date with no time gets `12:00 AM`. Placeholders like `0000-00-00` or `Never` → blank. |
-| 9–10 | `birthday`, `anniversary` | No | `09/12/1985` | Any date format in → `MM/DD/YYYY`. Month and day with no year (`09/12`, `Sep 12`, `12-Sep`, `September 12th`) → year `1600` (e.g. `09/12/1600`). |
+| 3–8 | `calls_last`, `transactions_last`, `last_contacted`, `in_sms_last`, `redemptions_last`, `spin_last` | No | `03/07/2026 09:05 AM` | Any date/time format in (see *Dates and times*) → `MM/DD/YYYY HH:MM AM/PM`. Seconds dropped; a date with no time gets `12:00 AM`. Placeholders like `0000-00-00`, `Never`, `N/A` → blank. |
+| 9–10 | `birthday`, `anniversary` | No | `09/12/1985` | Any date format in → `MM/DD/YYYY`. Month and day with no year (`09/12`, `Sep 12`, `12-Sep`, `September 12th`, `0912`) and placeholder years (`1900`, `0000`) → year `1600`. |
 
 - Headers are written exactly as above: lowercase, in order, no extra columns, all kept even when empty.
   Source columns with no matching field (names, emails, totals…) are left out and shown as "not imported".
@@ -56,6 +56,55 @@ The output follows `generic-import-format.md`, encoded in [`schemas/target_schem
   listed under *What changed*. Change a field to `on_invalid: reject` to reject those rows instead.
 - **Duplicates:** a row is removed only when **every** column matches an earlier row. The same phone with any
   different date imports as its own row.
+
+### Phone numbers
+
+Every value is reduced to the 10-digit US number:
+
+- Any punctuation or spacing: `(516) 555-0100`, `516.555.0100`, `516/555/0100`, `516 555 01 00`, unicode dashes,
+  full-width digits, non-breaking spaces.
+- Country code present or not: `+1…`, `1-…`, `(+1)…`, `15165550100`, `+5165550100` (the 1 left out),
+  international dialling `001…` / `011 1…`.
+- Extensions removed: `x12`, `ext. 12`, `extension 9`, `#12`, `;ext=12`.
+- Labels and extra text: `Cell: …`, `tel:+1…`, `… (mobile)`, `Maria - …`.
+- Several numbers in one cell: a number labelled mobile/cell wins, then an unlabelled one, then home/work, and fax last.
+- Spreadsheet artifacts: `5165550100.0`, `5.165550100E+09`, `="5165550100"`, a leading apostrophe.
+- Letters typed for digits (`516-555-O1OO`, `5l6…`) and vanity numbers (`1-800-FLOWERS`).
+- Rejected, with the reason shown: missing area code (7 digits), too few or too many digits, numbers that can't
+  exist (`555-555-5555`, `123-456-7890`), non-US numbers (Canada, UK, Mexico…), and Excel scientific notation
+  that already lost digits (`5.163E+09`).
+- US territories (Puerto Rico, USVI, Guam, American Samoa, Northern Mariana Islands) count as US. To accept the
+  50 states only, set `countries: [US]` in the schema.
+
+### Dates and times
+
+Read in any mix within one column:
+
+- **Numeric:** `10/9/2026`, `10-09-26`, `10.09.2026`, `10 09 2026`, `2026-10-09`, `2026/10/9`, and day-first
+  `9/10/2026` when the column clearly is day-first.
+- **Compact:** `20261009`, `10092026`, `100926`, `202610091545`, `20261009T154500Z`.
+- **Month names:** `October 9, 2026`, `October 9th 2026`, `Oct. 9 '26`, `9 October 2026`, `9, October, 2026`,
+  `9th of October 2026`, `09-Oct-26`, `Oct-09-2026`, `2026 Oct 9`, `OCTOBER 9`, `Sept 9`, and Spanish
+  (`9 de octubre de 2026`).
+- **Weekdays:** `Friday, October 9, 2026`, `Fri Oct 9 2026` (the weekday is ignored).
+- **Times:** `3:45 PM`, `3:45pm`, `3:45 p.m.`, `3pm`, `15:45`, `15:45:12.123`, `15h45`, `noon`, `midnight`,
+  `1545` after a date, the time before or after the date, `at` / `@`.
+- **Machine formats:** ISO 8601 (`2026-10-09T15:45:00Z`, `…+05:30`), RFC 2822 email dates, JavaScript date
+  strings, Unix `date` output, SQL Server `Oct  9 2026  3:45PM`.
+- **Spreadsheet values:** Excel serial numbers (`46304`, `46304.65625`, `46304,65625`), `="10/09/2026"`, a
+  leading apostrophe, Unix timestamps in seconds or milliseconds.
+- **Ambiguous day/month:** month-first (US) by default. A column switches to day-first only when at least two
+  values prove it (e.g. `15/03/2026`) and they outnumber month-first evidence 3 to 1. A single value that fits
+  only one way (`13/10/2026`) is always read that way. You can force the order per field with the *Option*
+  cell (`MDY` / `DMY` / `YMD`) or by telling Claude.
+- **Two-digit years:** 20yy unless that lands more than a year in the future, then 19yy (`08/09/26` → 2026,
+  `08/09/85` → 1985).
+- **Time zones:** choose the client's time zone on *New import*; templates remember it. Times that include a zone
+  are converted to it: `Z`, `UTC`, `+00:00`, `GMT-4`, `EST`, `PDT`, `(MDT)`, `Eastern`, `Pacific Time`. Unix
+  timestamps are converted too. US abbreviations are read as that region's local time, so `EST` in July means
+  Eastern clock time. Times with no zone are kept exactly as written.
+- **Incomplete or unreadable values are never guessed:** `October 2026` (no day), `2026`, `today`, `Q4 2026`,
+  and `02/30/2026` are left blank. Each one is listed under *What changed* and in the summary.
 
 ### Changing the target format
 
