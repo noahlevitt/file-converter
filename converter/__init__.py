@@ -1,3 +1,3 @@
 """File conversion engine: turns arbitrary contact/customer files into the target import format."""
 
-__version__ = "0.8.1"
+__version__ = "0.8.2"
