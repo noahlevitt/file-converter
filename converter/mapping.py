@@ -62,6 +62,9 @@ class Mapping(BaseModel):
         lookup = {c.lower(): c for c in columns}
         out: dict[str, FieldMapping] = {}
         for f in schema.fields:
+            if f.fixed_blank:
+                out[f.name] = FieldMapping(reason="always blank — fixed by the import format")
+                continue
             fm = self.fields.get(f.name, FieldMapping()).model_copy(deep=True)
             fm.sources = [lookup[s.lower()] for s in fm.sources if s.lower() in lookup]
             if fm.transform not in TRANSFORMS:
@@ -80,7 +83,7 @@ class Mapping(BaseModel):
 
     def problems(self, schema: TargetSchema) -> dict[str, str]:
         issues = {}
-        for f in schema.fields:
+        for f in schema.mappable_fields:
             fm = self.get(f.name)
             p = check_transform(fm.transform, fm.sources, fm.params)
             if p:
