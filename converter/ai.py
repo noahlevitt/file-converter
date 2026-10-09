@@ -1,9 +1,13 @@
 """Claude integration.
 
-Claude is used for three things, all reviewable by the user before anything is converted:
-  1. propose_mapping   – map unfamiliar columns onto the target schema (headers + a few sample values only)
-  2. apply_instruction – turn a plain-English instruction ("Signup is day-first") into mapping changes
-  3. repair_values     – suggest fixes for values the deterministic parsers rejected
+Claude is optional. Everything it suggests is shown for approval first:
+  1. propose_mapping   – map unfamiliar columns onto the target schema (only when AI_AUTO_MAP=true)
+  2. apply_notes       – turn reviewer notes on columns ("this is the last visit", "goes to anniversary",
+                         "dates are day-first") into mapping changes
+  3. review            – look for mistakes in a mapping or a finished import (optional button)
+  4. repair_values     – suggest fixes for values the deterministic parsers rejected (optional button)
+
+Claude is only called when a user clicks one of those buttons (plus automatic mapping if AI_AUTO_MAP=true).
 
 Claude never touches the full file and never writes code: it only picks transforms and parameters from a
 fixed registry, and every value it suggests is re-validated by the deterministic normalizers.
@@ -23,6 +27,7 @@ from .schema import TYPE_DESCRIPTIONS, FieldSpec, TargetSchema
 from .transforms import ADDRESS_PARTS, DATE_ORDERS, NAME_PARTS, TRANSFORMS, check_transform
 
 MAX_REPAIR_VALUES = 200
+GENERAL_NOTE = "(general note)"
 
 
 class AIError(Exception):
@@ -35,6 +40,24 @@ class AIMappingResult:
     notes: str
     usage: dict[str, int] = field(default_factory=dict)
     dropped: list[str] = field(default_factory=list)  # entries rejected during validation
+
+
+@dataclass
+class AINotesResult:
+    mapping: Mapping                       # only the fields that change
+    note_results: list[dict[str, str]]     # {column, status, message} per note
+    summary: str
+    usage: dict[str, int] = field(default_factory=dict)
+    dropped: list[str] = field(default_factory=list)
+
+
+@dataclass
+class AIReviewResult:
+    findings: list[dict[str, str]]         # {severity, field, column, issue, suggestion}
+    mapping: Mapping                       # proposed field changes (may be empty)
+    summary: str
+    usage: dict[str, int] = field(default_factory=dict)
+    dropped: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -136,6 +159,62 @@ def _mapping_payload(mapping: Mapping) -> dict[str, Any]:
 
 
 def _output_schema(schema: TargetSchema, columns: list[str]) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {"mappings": {"type": "array", "items": _mapping_item_schema(schema, columns)},
+                       "notes": {"type": "string"}},
+        "required": ["mappings", "notes"],
+        "additionalProperties": False,
+    }
+
+
+def _notes_schema(schema: TargetSchema, columns: list[str]) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "changes": {"type": "array", "items": _mapping_item_schema(schema, columns)},
+            "note_results": {"type": "array", "items": {
+                "type": "object",
+                "properties": {
+                    "column": {"type": "string", "enum": [*columns, GENERAL_NOTE]},
+                    "status": {"type": "string", "enum": ["applied", "already_correct", "not_applied"]},
+                    "message": {"type": "string"},
+                },
+                "required": ["column", "status", "message"],
+                "additionalProperties": False,
+            }},
+            "summary": {"type": "string"},
+        },
+        "required": ["changes", "note_results", "summary"],
+        "additionalProperties": False,
+    }
+
+
+def _review_schema(schema: TargetSchema, columns: list[str]) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "findings": {"type": "array", "items": {
+                "type": "object",
+                "properties": {
+                    "severity": {"type": "string", "enum": ["error", "warning", "info"]},
+                    "field": {"type": "string", "enum": [*(f.name for f in schema.mappable_fields), ""]},
+                    "column": {"type": "string", "enum": [*columns, ""]},
+                    "issue": {"type": "string"},
+                    "suggestion": {"type": "string"},
+                },
+                "required": ["severity", "field", "column", "issue", "suggestion"],
+                "additionalProperties": False,
+            }},
+            "changes": {"type": "array", "items": _mapping_item_schema(schema, columns)},
+            "summary": {"type": "string"},
+        },
+        "required": ["findings", "changes", "summary"],
+        "additionalProperties": False,
+    }
+
+
+def _mapping_item_schema(schema: TargetSchema, columns: list[str]) -> dict[str, Any]:
     params_props: dict[str, Any] = {
         "part": {"type": "string", "enum": sorted(set(NAME_PARTS) | set(ADDRESS_PARTS))},
         "separator": {"type": "string"},
@@ -167,12 +246,7 @@ def _output_schema(schema: TargetSchema, columns: list[str]) -> dict[str, Any]:
         "required": ["target_field", "transform", "sources", "params", "confidence", "reason"],
         "additionalProperties": False,
     }
-    return {
-        "type": "object",
-        "properties": {"mappings": {"type": "array", "items": item}, "notes": {"type": "string"}},
-        "required": ["mappings", "notes"],
-        "additionalProperties": False,
-    }
+    return item
 
 
 REPAIR_SCHEMA = {
@@ -262,25 +336,66 @@ class ClaudeAssistant:
         return AIMappingResult(mapping=mapping, notes=str(data.get("notes", "")).strip(), usage=usage,
                                dropped=dropped)
 
-    def apply_instruction(self, schema: TargetSchema, profiles: list[ColumnProfile], current: Mapping,
-                          instruction: str) -> AIMappingResult:
+    def apply_notes(self, schema: TargetSchema, profiles: list[ColumnProfile], current: Mapping,
+                    column_notes: dict[str, str], general_note: str = "") -> AINotesResult:
+        """Turn the reviewer's notes ("this column is X", "goes to Y", "dates are day-first") into mapping changes."""
         columns = [p.name for p in profiles]
+        notes = [{"column": c, "note": n.strip()} for c, n in column_notes.items() if n.strip() and c in columns]
+        if general_note.strip():
+            notes.append({"column": GENERAL_NOTE, "note": general_note.strip()})
+        if not notes:
+            return AINotesResult(Mapping(), [], "No notes to apply.")
         user = (
             "SOURCE FILE COLUMNS (with sample values):\n"
             + json.dumps(_profile_payload(profiles, self.sample_values), ensure_ascii=False, indent=1)
             + "\n\nCURRENT MAPPING (target field → transform/sources/params; fields not listed are blank):\n"
             + json.dumps(_mapping_payload(current), ensure_ascii=False, indent=1)
-            + "\n\nINSTRUCTION FROM THE REVIEWER:\n"
-            + instruction.strip()
-            + "\n\nReturn entries ONLY for target fields whose mapping should change because of the instruction "
-              "(full new definition for each). To clear a field use transform \"none\" with no sources. In notes, "
-              "say in one or two plain sentences what you changed, or why the instruction can't be applied."
+            + "\n\nREVIEWER NOTES (each is about one source column, or general):\n"
+            + json.dumps(notes, ensure_ascii=False, indent=1)
+            + "\n\nThe reviewer knows this file. Treat each note as authoritative about what the column contains, "
+              "where it goes, or how to read it, and change the mapping to match. Return in `changes` ONLY the "
+              "target fields whose mapping must change (full new definition each); to stop using a column for a "
+              "field, set that field's transform to \"none\". A column that should not be imported simply stays "
+              "unused. Give exactly one `note_results` entry per note: applied, already_correct, or not_applied "
+              "with the reason (e.g. the format has no such field, or consent is always blank). `summary`: one or "
+              "two plain sentences."
         )
         data, usage = self._call(model=self.mapping_model, system=build_system_prompt(schema), user=user,
-                                 schema=_output_schema(schema, columns), effort="medium", max_tokens=8000)
-        mapping, dropped = parse_mapping_entries(data.get("mappings", []), schema, columns)
-        return AIMappingResult(mapping=mapping, notes=str(data.get("notes", "")).strip(), usage=usage,
-                               dropped=dropped)
+                                 schema=_notes_schema(schema, columns), effort="medium", max_tokens=8000)
+        mapping, dropped = parse_mapping_entries(data.get("changes", []), schema, columns)
+        results = [r for r in data.get("note_results", []) if isinstance(r, dict)]
+        return AINotesResult(mapping, results, str(data.get("summary", "")).strip(), usage, dropped)
+
+    def review(self, schema: TargetSchema, profiles: list[ColumnProfile], current: Mapping,
+               payload: dict[str, Any]) -> AIReviewResult:
+        """Look for mistakes in a mapping/conversion, using a sample of original vs converted rows."""
+        columns = [p.name for p in profiles]
+        user = (
+            "SOURCE FILE COLUMNS (with sample values):\n"
+            + json.dumps(_profile_payload(profiles, self.sample_values), ensure_ascii=False, indent=1)
+            + "\n\nCURRENT MAPPING (field → transform/sources/params):\n"
+            + json.dumps(_mapping_payload(current), ensure_ascii=False, indent=1)
+            + (f"\n\nREVIEWER NOTES: {json.dumps(current.column_notes, ensure_ascii=False)}"
+               + (f" General: {current.general_note}" if current.general_note else "")
+               if current.column_notes or current.general_note else "")
+            + "\n\nCONVERSION RESULTS (sample rows show the original values next to what was produced; "
+              + ("digits in phone numbers are partly masked with #; " if payload.get("phones_masked") else "")
+              + "rule_findings were already found automatically):\n"
+            + json.dumps(payload, ensure_ascii=False, indent=1, default=str)
+            + "\n\nFind mistakes a careful reviewer would catch: a column mapped to the wrong field; a useful column "
+              "left unused; activity columns mixed up (calls vs transactions vs contacted vs inbound SMS vs "
+              "redemptions vs spins); birthday vs anniversary swapped; day/month swapped; wrong century; times "
+              "shifted; values that converted but look implausible. Each finding: severity (error = data will be "
+              "wrong, warning = probably wrong, info = worth a look), the field and/or column, the issue and a "
+              "concrete suggestion. Don't repeat rule_findings unless you add something new. Put mapping changes "
+              "in `changes` only when you are confident (full definition per changed field), otherwise leave it "
+              "empty. If nothing looks wrong, return no findings and say so in `summary`."
+        )
+        data, usage = self._call(model=self.mapping_model, system=build_system_prompt(schema), user=user,
+                                 schema=_review_schema(schema, columns), effort="medium", max_tokens=12000)
+        mapping, dropped = parse_mapping_entries(data.get("changes", []), schema, columns)
+        findings = [x for x in data.get("findings", []) if isinstance(x, dict) and x.get("issue")]
+        return AIReviewResult(findings, mapping, str(data.get("summary", "")).strip(), usage, dropped)
 
     # -- value repair -------------------------------------------------------
     def repair_values(self, f: FieldSpec, values: list[str], good_examples: list[str] | None = None
