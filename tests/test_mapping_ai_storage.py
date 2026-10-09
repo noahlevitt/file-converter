@@ -146,10 +146,11 @@ def test_store_users_templates_jobs(tmp_path, schema):
     assert s.find_template(["Totally", "Different"], schema.name)[0] is None
     assert header_fingerprint(headers) == header_fingerprint(list(reversed(headers)))
 
-    s.log_job("jane", "f.csv", "POS export", schema.label,
-              {"total_rows": 3, "imported": 2, "rejected": 1, "duplicates": 0, "blank_rows": 0,
-               "blanked_values": 0}, False)
-    assert s.list_jobs()[0]["rejected"] == 1
+    iid = s.create_import(username="jane", filename="f.csv", data=b"Phone\n5165550100\n", schema_label=schema.label,
+                          schema_json=schema.model_dump_json(), mapping=m, read_options={})
+    rec = s.get_import(iid)
+    assert rec.status == "queued" and s.source_path(rec).read_bytes().startswith(b"Phone")
+    assert s.list_imports(search="f.csv")[0].id == iid and s.list_imports(search=f"#{iid}")[0].id == iid
 
 
 def test_template_reused_without_ai(tmp_path, samples, schema):
