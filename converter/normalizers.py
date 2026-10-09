@@ -8,16 +8,18 @@ resolved consistently instead of value by value.
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from functools import lru_cache
 from typing import Any
 
 import phonenumbers
+import unicodedata
 from dateutil import parser as du_parser
 from email_validator import EmailNotValidError, validate_email
 from nameparser import HumanName
 
+from . import dateparse as DP
 from .schema import FieldSpec
 
 # ---------------------------------------------------------------------------
@@ -102,42 +104,107 @@ def _format_phone(num: phonenumbers.PhoneNumber, fmt: str) -> str:
     return phonenumbers.format_number(num, phonenumbers.PhoneNumberFormat.E164)
 
 
+_LOOKALIKE = str.maketrans({"O": "0", "o": "0", "I": "1", "l": "1"})
+_PHONE_PREFIX_RE = re.compile(r"^\s*(tel|sms|phone|ph|mobile|cell|callto|whatsapp)\s*[:=]\s*", re.I)
+_EXT_RE = re.compile(r"[;,]?\s*(?:ext\.?|extension|ex\.?|x|#|;ext=)\s*\d{1,6}\s*$", re.I)
+_LABEL_MOBILE_RE = re.compile(r"(mobile|cell|cel|wireless|sms|text|\bm\b|\bc\b)\W*$", re.I)
+_LABEL_FAX_RE = re.compile(r"(fax|\bf\b)\W*$", re.I)
+_LABEL_OTHER_RE = re.compile(r"(home|work|office|business|land\s*line|main|\bh\b|\bw\b|\bo\b)\W*$", re.I)
+
+
+def _prep_phone(value: str) -> str:
+    v = unicodedata.normalize("NFKC", value).replace("\u200b", "").replace("\ufeff", "").strip()
+    m = re.match(r'^=?"(.*)"$', v)  # Excel text-protection wrapper ="5165550100"
+    if m:
+        v = m.group(1)
+    v = v.strip().lstrip("'").strip()
+    v = re.sub(r"[\u2010-\u2015\u2212\u2043]", "-", v)  # unicode dashes
+    v = _PHONE_PREFIX_RE.sub("", v)  # tel:, sms:, Phone:
+    # Letters typed for digits inside a number (516-555-O1OO, 5l6…): O→0, I/l→1. Done before vanity
+    # conversion, which would otherwise read O as 6 on a keypad.
+    v = re.sub(r"[\dOoIl().\-]{4,}",
+               lambda m: m.group(0).translate(_LOOKALIKE) if sum(c.isdigit() for c in m.group(0)) >= 3 else m.group(0), v)
+    # International exit codes before the US country code: 011 1 …, 00 1 …, +011 1 …
+    v = re.sub(r"^\s*\+?\s*(?:011|00)[\s.\-]*(?=1\D?\d)", "+", v)
+    # "+" followed by 10 digits that can't start a country code of their own → the "1" was left out.
+    m = re.match(r"^\s*\+\s*([2-9][\d\s().\-]*)$", v)
+    if m and len(re.sub(r"\D", "", m.group(1))) == 10:
+        v = "+1 " + m.group(1)
+    return v
+
+
+def _digits_fallback(text: str) -> tuple[phonenumbers.PhoneNumber | None, str | None]:
+    """Last resort for values the matcher can't find a number in (one number, odd separators, vanity letters)."""
+    body = _EXT_RE.sub("", text).strip()
+    letters = re.sub(r"[^A-Za-z]", "", body)
+    if letters:
+        alnum = re.sub(r"[^0-9A-Za-z]", "", body)
+        is_vanity = (re.fullmatch(r"[\s+().\-\dA-Za-z]+", body) and 10 <= len(alnum) <= 11
+                     and sum(c.isdigit() for c in alnum) >= 3 and len(letters) >= 3)
+        if not is_vanity:
+            body = re.sub(r"[A-Za-z]+", " ", body)  # drop words like "cell" or "home"
+        else:
+            body = phonenumbers.convert_alpha_characters_in_number(body)  # 1-800-FLOWERS
+    digits = re.sub(r"\D", "", body)
+    if not digits:
+        return None, "no phone number found"
+    if len(digits) == 11 and digits[0] == "1":
+        digits = digits[1:]
+    if len(digits) == 7:
+        return None, "missing area code (only 7 digits)"
+    if len(digits) < 10:
+        return None, f"too few digits ({len(digits)})"
+    if len(digits) > 10:
+        return None, f"too many digits ({len(digits)})"
+    try:
+        return phonenumbers.parse("+1" + digits, None), None
+    except phonenumbers.NumberParseException:
+        return None, "not a phone number"
+
+
 @lru_cache(maxsize=200_000)
 def _parse_phone(value: str, region: str, countries: tuple[str, ...], fmt: str) -> tuple[str, str | None]:
-    fixed, err = _fix_numeric_artifacts(value)
+    prepped = _prep_phone(value)
+    fixed, err = _fix_numeric_artifacts(prepped)
     if err:
         return "", err
-    candidates: list[phonenumbers.PhoneNumber] = []
+    # Find every number in the text; prefer ones labelled mobile/cell, then unlabelled, then home/work, then fax.
+    candidates: list[tuple[int, int, phonenumbers.PhoneNumber]] = []
     try:
         for match in phonenumbers.PhoneNumberMatcher(fixed, region, leniency=phonenumbers.Leniency.POSSIBLE):
-            candidates.append(match.number)
+            before = fixed[max(0, match.start - 14): match.start]
+            prio = (0 if _LABEL_MOBILE_RE.search(before) else 3 if _LABEL_FAX_RE.search(before)
+                    else 2 if _LABEL_OTHER_RE.search(before) else 1)
+            candidates.append((prio, match.start, match.number))
     except Exception:
         pass
+    fallback_err = None
     if not candidates:
-        digits = re.sub(r"\D", "", fixed)
-        if not digits:
-            return "", "no phone number found"
-        try:
-            candidates.append(phonenumbers.parse(fixed, region))
-        except phonenumbers.NumberParseException:
-            return "", "not a phone number"
-    for num in candidates:
+        num, fallback_err = _digits_fallback(fixed)
+        if num is not None:
+            candidates.append((1, 0, num))
+    if not candidates:
+        return "", fallback_err or "no phone number found"
+    candidates.sort(key=lambda c: (c[0], c[1]))
+    foreign = None
+    for _, _, num in candidates:
         if not phonenumbers.is_valid_number(num):
             continue
         cc = phonenumbers.region_code_for_number(num)
         if countries and cc not in countries:
+            foreign = foreign or (cc, num.country_code)
             continue
         return _format_phone(num, fmt), None
-    num = candidates[0]
-    if phonenumbers.is_valid_number(num):
-        cc = phonenumbers.region_code_for_number(num)
-        return "", f"number is from {cc}, not an allowed country ({', '.join(countries)})"
-    digits = re.sub(r"\D", "", fixed)
+    if foreign:
+        return "", f"not a US number ({foreign[0]}, +{foreign[1]})"
+    digits = re.sub(r"\D", "", _EXT_RE.sub("", fixed))
+    if len(digits) == 7:
+        return "", "missing area code (only 7 digits)"
     if len(digits) < 10:
         return "", f"too few digits ({len(digits)})"
-    if len(digits) > 11 and not fixed.strip().startswith("+"):
+    if len(digits) > 11 and len(candidates) == 1:
         return "", f"too many digits ({len(digits)})"
-    return "", "invalid phone number (bad area code or exchange)"
+    return "", "not a real US number (area code or exchange doesn't exist)"
 
 
 def normalize_phone(value: str, field: FieldSpec, params: dict, ctx: dict) -> tuple[str, str | None]:
@@ -150,150 +217,72 @@ def normalize_phone(value: str, field: FieldSpec, params: dict, ctx: dict) -> tu
 # Dates
 # ---------------------------------------------------------------------------
 
-DATE_FORMATS_MDY = ["%m/%d/%Y", "%m/%d/%y", "%m-%d-%Y", "%m-%d-%y", "%m.%d.%Y"]
-DATE_FORMATS_DMY = ["%d/%m/%Y", "%d/%m/%y", "%d-%m-%Y", "%d-%m-%y", "%d.%m.%Y"]
-DATE_FORMATS_YMD = ["%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d", "%Y%m%d"]
-DATE_FORMATS_TEXT = ["%b %d, %Y", "%B %d, %Y", "%b %d %Y", "%B %d %Y", "%d %b %Y", "%d %B %Y", "%d-%b-%Y",
-                     "%d-%b-%y", "%a, %b %d, %Y", "%A, %B %d, %Y"]
-TIME_SUFFIXES = ["", " %H:%M:%S", " %H:%M", " %I:%M %p", " %I:%M:%S %p", "T%H:%M:%S", "T%H:%M:%SZ", " %H:%M:%S.%f",
-                 "T%H:%M:%S.%f"]
-
-ORDER_FORMATS = {"MDY": DATE_FORMATS_MDY, "DMY": DATE_FORMATS_DMY, "YMD": DATE_FORMATS_YMD}
-
-_PARTIAL_MD_RE = re.compile(r"^(\d{1,2})[/\-.](\d{1,2})$")
-_PARTIAL_TEXT_FORMATS = ["%b %d", "%B %d", "%d %b", "%d %B", "%d-%b", "%b-%d", "%b. %d", "%B, %d"]
-_ZERO_DATE_RE = re.compile(r"^0{1,4}[-/.]0{1,2}[-/.]0{1,4}(\s+0{1,2}:0{2}(:0{2})?)?$")
-_NO_YEAR = 4  # internal marker year for "month and day only" (a leap year, so Feb 29 is valid)
+DATE_ORDERS = {"MDY", "DMY", "YMD"}
+_ZERO_DATE_RE = re.compile(r"^0{1,4}[-/.]0{1,2}[-/.]0{1,4}(\s*[t ]\s*0{1,2}:0{2}(:0{2}(\.0+)?)?)?$", re.I)
 _NUMERIC_ONLY_RE = re.compile(r"^\d+(\.\d+)?$")
-_ORDINAL_RE = re.compile(r"(\d+)(st|nd|rd|th)\b", re.IGNORECASE)
-_EXCEL_EPOCH = datetime(1899, 12, 30)
-MIN_YEAR, MAX_YEAR = 1900, 2100
-
-
-def _all_formats(order_first: str) -> list[str]:
-    orders = [order_first] + [o for o in ("MDY", "DMY", "YMD") if o != order_first]
-    base = [f for o in orders for f in ORDER_FORMATS[o]] + DATE_FORMATS_TEXT
-    return [b + t for b in base for t in TIME_SUFFIXES]
-
-
-def _strip_tz(value: str) -> str:
-    return re.sub(r"(\s*(UTC|GMT|[+-]\d{2}:?\d{2}|Z))$", "", value, flags=re.IGNORECASE).strip()
+_NO_YEAR = DP.NO_YEAR
+MIN_YEAR, MAX_YEAR = DP.MIN_YEAR, DP.MAX_YEAR
 
 
 def prepare_date(field: FieldSpec, values: list[str], params: dict) -> dict:
-    """Infer one format / day-month order for the whole column."""
-    sample = [v for v in dict.fromkeys(v for v in values if v)][:500]
-    ctx: dict[str, Any] = {"order": "MDY", "format": None, "serial": False, "epoch": False}
-
+    """Decide once per column: month-first or day-first, and whether bare numbers are Excel serial dates."""
+    sample = [v for v in dict.fromkeys(v for v in values if v)][:2000]
+    ctx: dict[str, Any] = {"order": "MDY", "format": params.get("input_format") or None, "serial": False}
     requested = (params.get("date_order") or "auto").upper()
-    if params.get("input_format"):
-        ctx["format"] = params["input_format"]
-    if not sample:
-        if requested in ORDER_FORMATS:
-            ctx["order"] = requested
-        return ctx
 
     numeric = [v for v in sample if _NUMERIC_ONLY_RE.match(v)]
-    if len(numeric) >= 0.8 * len(sample):
+    if sample and len(numeric) >= 0.8 * len(sample):
         nums = [float(v) for v in numeric]
-        if all(10_000 <= n <= 80_000 for n in nums):
+        if all(1 <= n <= 2_958_465 for n in nums) and sum(10_000 <= n <= 80_000 for n in nums) >= 0.8 * len(nums):
             ctx["serial"] = True
-        elif all(946_684_800 <= n <= 4_102_444_800 for n in nums):  # 2000-01-01 .. 2100-01-01 (unix seconds)
-            ctx["epoch"] = True
 
-    # Evidence for day-first vs month-first from values where one part is > 12.
+    # Evidence for day-first: values like 15/03/2026 (first part > 12) vs month-first 03/15/2026.
     mdy_votes = dmy_votes = 0
     for v in sample:
-        m = re.match(r"^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})", v)
+        m = re.match(r"^\s*(\d{1,2})[/\-. ](\d{1,2})(?:[/\-. ](\d{2,4}))?\b", v)
         if m:
             a, b = int(m.group(1)), int(m.group(2))
             if a > 12 >= b:
                 dmy_votes += 1
             elif b > 12 >= a:
                 mdy_votes += 1
-
-    if requested in ORDER_FORMATS:
+    if requested in DATE_ORDERS:
         ctx["order"] = requested
-    else:
-        ctx["order"] = "DMY" if dmy_votes > mdy_votes else "MDY"
+    elif dmy_votes >= 2 and dmy_votes > 3 * mdy_votes:
+        ctx["order"] = "DMY"  # US default unless the column clearly is day-first
     ctx["evidence"] = {"month_first": mdy_votes, "day_first": dmy_votes}
-
-    if ctx["format"] is None and not (ctx["serial"] or ctx["epoch"]):
-        best_fmt, best_hits = None, 0
-        cleaned = [_strip_tz(_ORDINAL_RE.sub(r"\1", v)) for v in sample]
-        for fmt in _all_formats(ctx["order"]):
-            hits = 0
-            for v in cleaned:
-                try:
-                    datetime.strptime(v, fmt)
-                    hits += 1
-                except ValueError:
-                    pass
-            if hits > best_hits:
-                best_fmt, best_hits = fmt, hits
-                if hits == len(cleaned):
-                    break
-        if best_fmt and best_hits >= 0.5 * len(cleaned):
-            ctx["format"] = best_fmt
     return ctx
 
 
-def _dateutil_parse(value: str, dayfirst: bool, yearfirst: bool) -> datetime | None:
+def _dateutil_parse(value: str, dayfirst: bool) -> datetime | None:
     try:
-        a = du_parser.parse(value, dayfirst=dayfirst, yearfirst=yearfirst, default=datetime(2000, 1, 1))
-        b = du_parser.parse(value, dayfirst=dayfirst, yearfirst=yearfirst, default=datetime(2004, 2, 2))
+        a = du_parser.parse(value, dayfirst=dayfirst, default=datetime(2000, 1, 1))
+        b = du_parser.parse(value, dayfirst=dayfirst, default=datetime(2004, 2, 2))
     except (ValueError, OverflowError, TypeError):
         return None
     if (a.year, a.month, a.day) != (b.year, b.month, b.day):
-        return None  # some date component was missing and got filled in by default
+        return None  # a date part was missing and got filled in by the default
     return a.replace(tzinfo=None)
 
 
 def parse_date(value: str, ctx: dict, allow_no_year: bool = False) -> tuple[datetime | None, str | None]:
-    v = _strip_tz(_ORDINAL_RE.sub(r"\1", value.strip()))
-    if _NUMERIC_ONLY_RE.match(v):
-        n = float(v)
-        # A bare number of 20000–80000 in a date column is an Excel serial date (1954–2119).
-        if (ctx.get("serial") and 1 <= n <= 2_958_465) or (20_000 <= n <= 80_000 and not ctx.get("epoch")):
-            return _EXCEL_EPOCH + timedelta(days=n), None
-    if ctx.get("epoch") and _NUMERIC_ONLY_RE.match(v):
-        return datetime.fromtimestamp(float(v), tz=timezone.utc).replace(tzinfo=None), None
-
-    if allow_no_year:
-        m = _PARTIAL_MD_RE.match(v)
-        if m:
-            a, b = int(m.group(1)), int(m.group(2))
-            month, day = (b, a) if ctx.get("order") == "DMY" else (a, b)
-            try:
-                return datetime(_NO_YEAR, month, day), None
-            except ValueError:
-                return None, "not a real calendar date"
-        for f in _PARTIAL_TEXT_FORMATS:
-            try:
-                d = datetime.strptime(f"{v} 2000", f"{f} %Y")  # explicit (leap) year: no ambiguity, Feb 29 ok
-                return datetime(_NO_YEAR, d.month, d.day), None
-            except ValueError:
-                continue
-
     fmt = ctx.get("format")
     if fmt:
         try:
-            return datetime.strptime(v, fmt), None
+            return datetime.strptime(value.strip(), fmt), None
         except ValueError:
             pass
-    order = ctx.get("order", "MDY")
-    for f in ORDER_FORMATS[order] + DATE_FORMATS_YMD + DATE_FORMATS_TEXT:
-        for t in TIME_SUFFIXES:
-            try:
-                return datetime.strptime(v, f + t), None
-            except ValueError:
-                continue
-    if _NUMERIC_ONLY_RE.match(v):
-        return None, "number is not a recognizable date"
-    dt = _dateutil_parse(v, dayfirst=(order == "DMY"), yearfirst=(order == "YMD"))
-    if dt is None:
-        return None, "unrecognized or incomplete date"
-    return dt, None
+    try:
+        dt, _ = DP.parse(value, order=ctx.get("order", "MDY"), allow_no_year=allow_no_year,
+                         serial_hint=bool(ctx.get("serial")), target_tz=ctx.get("tz") or DP.DEFAULT_TZ)
+        return dt, None
+    except DP.DateError as exc:
+        msg = str(exc)
+    if msg.startswith("unrecognized word") or msg == "unrecognized date":
+        dt = _dateutil_parse(value, dayfirst=ctx.get("order") == "DMY")
+        if dt is not None:
+            return dt, None
+    return None, msg
 
 
 def _strftime_year(dt: datetime, fmt: str, year_text: str) -> str:
@@ -313,7 +302,9 @@ def normalize_date(value: str, field: FieldSpec, params: dict, ctx: dict) -> tup
     dt, err = parse_date(value, ctx, allow_no_year=allow_no_year)
     if err or dt is None:
         return "", err or "unrecognized date"
-    no_year = dt.year == _NO_YEAR or (no_year_value is not None and dt.year == no_year_value)
+    # Month+day only, the target's own no-year value (1600), or a placeholder year systems use for
+    # "unknown" (1900 and earlier, e.g. 01/15/1900) → output with the no-year value.
+    no_year = dt.year == _NO_YEAR or (no_year_value is not None and dt.year <= 1900)
     if no_year:
         return _strftime_year(dt, out_fmt, str(no_year_value) if no_year_value is not None else "2000"), None
     if not (MIN_YEAR <= dt.year <= MAX_YEAR):
@@ -513,9 +504,10 @@ def looks_like_state(v: str) -> bool:
 
 def looks_like_date(v: str) -> bool:
     v = v.strip()
-    if _NUMERIC_ONLY_RE.match(v):
+    if _NUMERIC_ONLY_RE.match(v) or not re.search(r"\d", v):
         return False
-    if not re.search(r"\d", v):
+    try:
+        dt, _ = DP.parse(v, allow_no_year=True)
+    except DP.DateError:
         return False
-    dt, err = parse_date(v, {"order": "MDY"}, allow_no_year=True)
-    return err is None and dt is not None and (dt.year == _NO_YEAR or MIN_YEAR <= dt.year <= MAX_YEAR)
+    return dt.year == _NO_YEAR or MIN_YEAR <= dt.year <= MAX_YEAR
