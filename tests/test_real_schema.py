@@ -38,7 +38,7 @@ def test_headers_exact_and_in_order(real_schema):
 def test_phone_is_ten_digits(real_schema):
     for raw in ["(212) 555-1234", "+1 212-555-1234", "12125551234", "212.555.1234", "2125551234.0"]:
         assert norm(real_schema, "phone_number", raw) == ("2125551234", None)
-    assert norm(real_schema, "phone_number", "(416) 555-0123")[0] == "4165550123"  # Canada: 10 digits too
+    assert "not a US number" in norm(real_schema, "phone_number", "(416) 555-0123")[1]  # US only
     assert norm(real_schema, "phone_number", "555-0199")[1]
     assert norm(real_schema, "phone_number", "+44 20 7946 0958")[1]
 
@@ -50,7 +50,7 @@ def test_activity_datetime_format(real_schema):
         "2026-11-22 16:30:59": "11/22/2026 04:30 PM",   # seconds dropped
         "11/22/25 4:30pm": "11/22/2025 04:30 PM",
         "03/07/2026": "03/07/2026 12:00 AM",           # date only → midnight
-        "2026-03-07T14:22:01Z": "03/07/2026 02:22 PM",  # time zone dropped, wall time kept
+        "2026-03-07T14:22:01Z": "03/07/2026 09:22 AM",  # UTC → Eastern (EST before DST)
         "0000-00-00 00:00:00": "",
         "Never": "",
     }
