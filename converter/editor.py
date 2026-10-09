@@ -127,7 +127,74 @@ def apply_row_edit(schema: TargetSchema, mapping: Mapping, field_name: str, chan
     fm.reason = "set by reviewer"
     fields = dict(mapping.fields)
     fields[field_name] = fm
-    return Mapping(fields=fields), error
+    # Picking a skipped column as a source un-skips it: the reviewer chose it explicitly.
+    excluded = [c for c in mapping.excluded_columns if c not in fm.sources]
+    return mapping.model_copy(update={"fields": fields, "excluded_columns": excluded}), error
+
+
+def _without_column(fm: FieldMapping, column: str) -> FieldMapping:
+    """Field mapping with one source column removed; falls back to 'not mapped' when nothing usable is left."""
+    sources = [s for s in fm.sources if s != column]
+    if not sources:
+        return FieldMapping(origin="user", reason="set by reviewer")
+    transform = fm.transform
+    if transform in ("coalesce", "concat") and len(sources) == 1:
+        transform = "copy"
+    params = fm.params if transform == fm.transform else {}
+    if check_transform(transform, sources, params):
+        return FieldMapping(origin="user", reason="set by reviewer")
+    return FieldMapping(sources=sources, transform=transform, params=params, origin="user", reason="set by reviewer")
+
+
+def apply_column_edit(schema: TargetSchema, mapping: Mapping, column: str, targets: list[str] | None = None,
+                      skip: bool | None = None) -> tuple[Mapping, list[str]]:
+    """Edit the mapping from the source column's side (the "Columns in your file" table).
+
+    targets: target field names this column should go to (None = unchanged, [] = not imported). A field that
+    gains this column takes it as its only source; whatever fed that field before is dropped from it.
+    skip: True removes the column from every field and keeps it out (also of templates and Claude's suggestions).
+    Returns (new mapping, messages describing what changed).
+    """
+    fields = {k: v.model_copy(deep=True) for k, v in mapping.fields.items()}
+    excluded = list(mapping.excluded_columns)
+    messages: list[str] = []
+    current = [n for n, fm in fields.items() if fm.transform != "none" and column in fm.sources]
+
+    if skip:
+        targets = []
+        if column not in excluded:
+            excluded.append(column)
+    elif skip is False and column in excluded:
+        excluded.remove(column)
+
+    if targets is not None:
+        wanted = []
+        for name in targets:
+            if name not in schema.field_names:
+                continue
+            f = schema.field(name)
+            if f.fixed_blank:
+                messages.append(f"{f.header} is always blank and can't take a column.")
+                continue
+            wanted.append(name)
+        for name in current:
+            if name not in wanted:
+                fields[name] = _without_column(fields[name], column)
+                messages.append(f"'{column}' no longer goes to {schema.field(name).header}.")
+        for name in wanted:
+            if name in current:
+                continue
+            f = schema.field(name)
+            before = fields.get(name, FieldMapping())
+            if before.transform != "none" and before.sources:
+                messages.append(f"{f.header} now comes from '{column}' (was {', '.join(before.sources)}).")
+            else:
+                messages.append(f"{f.header} now comes from '{column}'.")
+            fields[name] = FieldMapping(sources=[column], transform="copy", origin="user", reason="set by reviewer")
+        if wanted and column in excluded:
+            excluded.remove(column)
+
+    return mapping.model_copy(update={"fields": fields, "excluded_columns": excluded}), messages
 
 
 def row_problem(schema: TargetSchema, mapping: Mapping, field_name: str) -> str:
