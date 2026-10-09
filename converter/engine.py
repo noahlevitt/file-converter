@@ -55,9 +55,9 @@ class ConversionResult:
     fill_rates: dict[str, float] = field(default_factory=dict)
     failed_values: dict[str, list[str]] = field(default_factory=dict)  # field -> unique raw values that failed
     # One row per converted row, in file order: _row (file row number), _src (position in the source DataFrame),
-    # _extra (True for the 2nd, 3rd… row made from one file row by 'One row per value'), _status, _reason,
+    # _extra (True for the 2nd, 3rd… row made from one file row by 'One row per phone number'), _status, _reason,
     # _issues (JSON), and per field: out.<name> (converted value), raw.<name> (value before normalizing),
-    # st.<name> (cell status). Without 'One row per value' there is exactly one audit row per source row.
+    # st.<name> (cell status). Without 'One row per phone number' there is exactly one audit row per source row.
     audit: pd.DataFrame = field(default_factory=pd.DataFrame)
     extra_rows: int = 0  # rows added because a file row had several different values (e.g. phone numbers)
     skipped_values: int = 0  # invalid extra values that didn't get a row of their own
@@ -131,7 +131,7 @@ def convert(
     all_cols = list(df.columns)
     src_blank = [not any(N.clean_text(r.get(c, "")) for c in all_cols) for r in src_records]
 
-    # 'One row per value': a file row with several different values (Phone, Phone 2, Phone 3…) becomes one
+    # 'One row per phone number': a file row with several different values (Phone, Phone 2, Phone 3…) becomes one
     # row per value; every other field is copied onto each. `src` maps each working row to its file row.
     each_field = next((f for f in schema.mappable_fields if mapping.get(f.name).transform == "each_row"), None)
     src = list(range(len(src_records)))
@@ -348,7 +348,7 @@ def convert(
 def _expand_rows(records: list[dict[str, str]], blank: list[bool], f, mapping: Mapping,
                  overrides: dict[str, dict[str, str]], timezone: str | None
                  ) -> tuple[list[int], list[str], dict[int, list[RowIssue]]]:
-    """Work out the rows for 'One row per value' on field f.
+    """Work out the rows for 'One row per phone number' on field f.
 
     Returns (source index per working row, the raw value each working row uses, early issues per working row).
     A file row gets one row per different valid value (different after formatting, so 516-555-0100 and
@@ -398,7 +398,7 @@ def _expand_rows(records: list[dict[str, str]], blank: list[bool], f, mapping: M
 def source_rows(source: pd.DataFrame, audit: pd.DataFrame) -> pd.DataFrame:
     """The source rows lined up with the audit rows (one per converted row).
 
-    Needed when 'One row per value' made several rows from one file row. Safe to call more than once.
+    Needed when 'One row per phone number' made several rows from one file row. Safe to call more than once.
     """
     if "_src" not in audit.columns or len(source) == len(audit):
         return source
