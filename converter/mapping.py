@@ -50,6 +50,9 @@ class FieldMapping(BaseModel):
 
 class Mapping(BaseModel):
     fields: dict[str, FieldMapping] = Field(default_factory=dict)
+    # Reviewer notes, saved with templates and imports: what a source column is, where it goes, how to read it.
+    column_notes: dict[str, str] = Field(default_factory=dict)
+    general_note: str = ""
 
     def get(self, name: str) -> FieldMapping:
         return self.fields.get(name) or FieldMapping()
@@ -79,7 +82,8 @@ class Mapping(BaseModel):
                 fm = FieldMapping()
             fm.params = fm.clean_params()
             out[f.name] = fm
-        return Mapping(fields=out)
+        notes = {lookup[c.lower()]: n for c, n in self.column_notes.items() if c.lower() in lookup and n.strip()}
+        return Mapping(fields=out, column_notes=notes, general_note=self.general_note)
 
     def problems(self, schema: TargetSchema) -> dict[str, str]:
         issues = {}
