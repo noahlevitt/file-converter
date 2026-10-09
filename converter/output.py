@@ -84,9 +84,14 @@ def write_summary(result: ConversionResult, schema: TargetSchema, source_filenam
         lines.insert(lines.index(f"Rows converted:                      {result.imported:,}") + 1,
                      f"  of which extra rows for 2nd/3rd… phone numbers: {result.extra_rows:,}")
         lines.append(f"Invalid extra phone numbers skipped: {result.skipped_values:,}")
+    if result.repaired_values:
+        lines.append(f"Phone numbers repaired from typos:   {result.repaired_values:,}  (check these)")
     if result.reason_counts:
         lines += ["", "Why rows were rejected:"]
         lines += [f"  {count:>6,}  {reason}" for reason, count in result.reason_counts.most_common()]
+    if result.repaired_counts:
+        lines += ["", "Repaired from likely typos (imported — please check):"]
+        lines += [f"  {count:>6,}  {reason}" for reason, count in result.repaired_counts.most_common()]
     if result.skipped_counts:
         lines += ["", "Extra numbers skipped (the row was still imported with its other number):"]
         lines += [f"  {count:>6,}  {reason}" for reason, count in result.skipped_counts.most_common()]
