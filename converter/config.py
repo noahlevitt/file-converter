@@ -44,6 +44,9 @@ class Settings:
     auth_mode: str = field(default_factory=lambda: os.getenv("AUTH_MODE", "password").strip().lower())
     admin_username: str = field(default_factory=lambda: os.getenv("ADMIN_USERNAME", ""))
     admin_password: str = field(default_factory=lambda: os.getenv("ADMIN_PASSWORD", ""))
+    import_workers: int = field(default_factory=lambda: max(1, int(os.getenv("IMPORT_WORKERS", "2"))))
+    file_retention_days: int = field(default_factory=lambda: int(os.getenv("FILE_RETENTION_DAYS", "30")))
+    timezone: str = field(default_factory=lambda: os.getenv("APP_TIMEZONE", "America/New_York"))
 
     @property
     def ai_available(self) -> bool:
