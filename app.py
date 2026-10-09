@@ -25,7 +25,7 @@ from converter.config import get_settings
 from converter.checks import column_warnings
 from converter.editor import (FROM_LABEL, LABELS, OPTION_HELP, apply_column_edit, apply_row_edit, option_text,
                               row_problem)
-from converter.engine import convert, preview_values
+from converter.engine import convert, preview_values, source_rows
 from converter.jobs import ImportRunner
 from converter.mapping import Mapping, profile_columns
 from converter.reader import SUPPORTED_EXTENSIONS, ReadError, read_file
@@ -81,7 +81,8 @@ def get_assistant():
 @st.cache_data(max_entries=6, show_spinner=False)
 def load_import_tables(import_id: int, folder: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     d = Path(folder)
-    return pd.read_parquet(d / "source.parquet"), pd.read_parquet(d / "audit.parquet")
+    audit = pd.read_parquet(d / "audit.parquet")
+    return source_rows(pd.read_parquet(d / "source.parquet"), audit), audit
 
 
 store = get_store()
@@ -344,6 +345,11 @@ def page_new_import() -> None:
     )
     for e in ss.get("edit_errors") or []:
         st.error(e)
+    each = next((f for f in schema.mappable_fields if mapping.get(f.name).transform == "each_row"), None)
+    if each is not None:
+        st.caption(f"ℹ️ **{each.header}** uses *One row per value*: a customer with different numbers in "
+                   f"{', '.join(mapping.get(each.name).sources)} gets one row per number, with their other "
+                   "details copied onto each. Switch **How** to *First non-empty* to keep one row per customer.")
     unused = [c for c in df.columns if c not in mapping.used_sources()]
     if unused:
         skipped = set(mapping.excluded_columns)
@@ -449,7 +455,8 @@ def _notes_and_checks(df: pd.DataFrame) -> None:
         st.markdown("**Columns in your file**")
         st.caption("Change where a column goes with **Goes to** (clear it to leave the column out), or tick "
                    "**Skip** to keep a column out of the import completely — rules, saved templates and Claude "
-                   "won't map it again. Picking a field here replaces whatever fed that field before. "
+                   "won't map it again. Picking a field here replaces whatever fed that field before — except "
+                   "the phone field: each phone column you add gives customers one row per different number. "
                    "You can also write a note on what a column is, where it goes or how to read it — e.g. "
                    "*“this is the last visit date”*, *“dates are day-first”*. "
                    + ("Claude applies the notes when you click *Apply notes*. " if assistant else
@@ -705,7 +712,7 @@ def _completed_view(rec: ImportRecord) -> None:
     rec_schema = TargetSchema.model_validate_json(rec.schema_json)
     s = rec.summary
     if rec.rejected:
-        st.error(f"**{rec.rejected:,} bad row{'s' if rec.rejected != 1 else ''} were NOT imported.** "
+        st.error(f"**{rec.rejected:,} bad row{'s were' if rec.rejected != 1 else ' was'} NOT imported.** "
                  "See *Side by side → Bad rows* or download *Rejected rows* for the reason on each row.  \n"
                  + s.get("message", ""), icon="⚠️")
     elif not rec.imported:
@@ -717,7 +724,10 @@ def _completed_view(rec: ImportRecord) -> None:
 
     m = st.columns(6)
     m[0].metric("Rows in file", f"{rec.total_rows:,}")
-    m[1].metric("Converted", f"{rec.imported:,}")
+    extra = s.get("extra_rows", 0)
+    m[1].metric("Converted", f"{rec.imported:,}",
+                help=f"Includes {extra:,} extra row{'s' if extra != 1 else ''} for customers with more than one "
+                     "phone number (one row per number)." if extra else None)
     m[2].metric("Bad rows", f"{rec.rejected:,}")
     m[3].metric("Duplicates removed", f"{rec.duplicates:,}")
     m[4].metric("Empty rows", f"{rec.blank_rows:,}")
@@ -770,6 +780,8 @@ def _completed_view(rec: ImportRecord) -> None:
                      column_config={"Examples": st.column_config.TextColumn(width="large")})
         reasons = [{"Problem": r, "Rows": c, "Effect": "row not imported"} for r, c in s.get("reasons", {}).items()]
         reasons += [{"Problem": r, "Rows": c, "Effect": "value left blank"} for r, c in s.get("blanked", {}).items()]
+        reasons += [{"Problem": r, "Rows": c, "Effect": "extra number skipped (row imported with its other number)"}
+                    for r, c in s.get("skipped", {}).items()]
         if reasons:
             st.markdown("**Problems found**")
             st.dataframe(pd.DataFrame(reasons), hide_index=True, width="stretch")
