@@ -8,14 +8,14 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
 from pathlib import Path
 
 from . import __version__
 from .config import get_settings
-from .engine import convert
+from .jobs import run_import
 from .mapping import profile_columns
-from .output import output_filename, rejects_filename, timestamp, write_output, write_rejects, write_summary
 from .reader import ReadError, read_file
 from .schema import load_schema
 from .services import initial_mapping, make_assistant
@@ -70,32 +70,36 @@ def cmd_inspect(args) -> None:
 
 
 def cmd_convert(args) -> None:
+    """Runs through the same import pipeline as the web app, so CLI imports also appear under Imports."""
     settings, schema, store, path, rr, mapping, source, _ = _load(args)
     problems = mapping.problems(schema)
     if problems:
         for k, v in problems.items():
             print(f"PROBLEM {schema.field(k).header}: {v}", file=sys.stderr)
         sys.exit("Mapping is incomplete; fix it in the web app or pass --template.")
-    rows = [rr.excel_row_number(i) for i in range(len(rr.df))]
-    res = convert(rr.df, schema, mapping, row_numbers=rows)
-    out_dir = Path(args.out or ".")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    ts = timestamp()
-    out_path = out_dir / output_filename(schema, path.name, ts)
-    out_path.write_bytes(write_output(res.output, schema))
-    print(res.flag_message())
-    print(f"Converted file: {out_path}")
-    if not res.rejects.empty:
-        rej = out_dir / rejects_filename(path.name, len(res.rejects), ts)
-        rej.write_bytes(write_rejects(res))
-        print(f"Rejected rows:  {rej}")
-    (out_dir / f"{path.stem}_SUMMARY_{ts}.txt").write_bytes(write_summary(res, schema, path.name, "cli", __version__))
     if args.save_template:
         store.save_template(args.save_template, list(rr.df.columns), mapping,
                             {"sheet": rr.sheet, "header_row": rr.header_row}, schema.name, "cli")
         print(f"Saved template '{args.save_template}'.")
-    store.log_job("cli", path.name, args.template, schema.label, res.summary_dict(), args.ai)
-    if res.rejected:
+    import_id = store.create_import(
+        username="cli", filename=path.name, data=path.read_bytes(), schema_label=schema.label,
+        schema_json=schema.model_dump_json(), mapping=mapping,
+        read_options={"sheet": rr.sheet, "header_row": rr.header_row},
+        template_name=args.template or args.save_template, ai_used=args.ai)
+    rec = run_import(store, import_id)
+    if rec.status != "completed":
+        sys.exit(f"Import #{rec.id} {rec.status}: {rec.error or ''}")
+    out_dir = Path(args.out or ".")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Import #{rec.id}: {rec.summary.get('message', '')}")
+    for kind, download_name in (("output", None), ("rejects", "rejects_download"), ("summary", "summary_download")):
+        src = store.file_path(rec, kind)
+        if src is None or (kind == "rejects" and not (rec.rejected or rec.duplicates)):
+            continue
+        dest = out_dir / (rec.files.get(download_name) if download_name else src.name)
+        shutil.copyfile(src, dest)
+        print(f"  {kind:<8} {dest}")
+    if rec.rejected:
         sys.exit(2)  # non-zero so scripts notice bad rows
 
 
