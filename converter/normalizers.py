@@ -492,8 +492,10 @@ def parse_date(value: str, ctx: dict, allow_no_year: bool = False) -> tuple[date
 def _strftime_year(dt: datetime, fmt: str, year_text: str) -> str:
     """strftime with a literal year (portable for years like 1600 and for month/day-only values)."""
     safe = dt.replace(year=2000)  # leap year, so Feb 29 survives
-    marked = fmt.replace("%Y", "\x00Y").replace("%y", "\x00y")
-    return safe.strftime(marked).replace("\x00Y", year_text).replace("\x00y", year_text[-2:])
+    # The year goes into the format as plain text ("%m/%d/1600"); strftime copies it as-is. (A control-character
+    # marker would be cut off by macOS's strftime, which stops at a NUL byte — that gave "10/18/".)
+    literal = re.sub(r"%(%|Y|y)", lambda m: {"%": "%%", "Y": year_text, "y": year_text[-2:]}[m.group(1)], fmt)
+    return safe.strftime(literal)
 
 
 def normalize_date(value: str, field: FieldSpec, params: dict, ctx: dict) -> tuple[str, str | None]:
