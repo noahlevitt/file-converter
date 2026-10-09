@@ -128,7 +128,9 @@ RULES:
   Mapping a wrong column is worse than leaving a field blank — the reviewer can fill gaps.
 - Each source column normally feeds one target field. Exceptions: a full-name column may feed first and last
   name via name_part; a single-line address column may feed street/unit/city/state/zip via address_part.
-- Several phone columns: use coalesce with mobile/cell columns first.
+- Several phone columns (Phone, Phone 2, Mobile, Home…): use each_row with mobile/cell columns first, so every
+  different number becomes its own row. Columns ABOUT a phone (e.g. phoneMarketingPreference, Phone Type,
+  SMS Opt In) are not phone numbers — never map them to the phone field.
 - Never invent data. Use constant only when the user explicitly asks for a fixed value. Never use constant
   or a guessed column for consent, opt-in or subscription fields.
 - confidence: high = header and values clearly match; medium = probable; low = a guess the reviewer must check.
@@ -471,7 +473,7 @@ def parse_mapping_entries(entries: list[dict], schema: TargetSchema, columns: li
         params = {k: v for k, v in (e.get("params") or {}).items() if v not in (None, "", [])}
         if transform in ("none", "constant"):
             sources = []
-        if transform in ("coalesce", "concat") and len(sources) == 1:
+        if transform in ("coalesce", "concat", "each_row") and len(sources) == 1:
             transform = "copy"
         problem = check_transform(transform, sources, params)
         if problem:
