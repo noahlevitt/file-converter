@@ -1,3 +1,10 @@
+"""End-to-end conversion with the example (generic) schema: read → auto-map → convert.
+
+Covers the row counts the user sees before uploading (imported, bad, duplicate, blank and extra rows), one row per
+phone number, dedupe keys, manual value fixes and defaults. A wrong duplicate rule either drops a real customer or
+texts the same person twice, and bad rows must be traceable to the spreadsheet row the user can open and fix.
+"""
+
 import pandas as pd
 
 from converter.engine import convert
@@ -7,12 +14,21 @@ from tests.conftest import read_sample
 
 
 def run(samples, schema, name, **kw):
+    """Read a sample file, auto-map it and convert it; return (read result, mapping, conversion result).
+
+    The original file row numbers are passed in, so rejects point at the row the user sees in Excel.
+    """
     rr = read_sample(samples, name, **kw)
     m = auto_map(schema, profile_columns(rr.df))
     return rr, m, convert(rr.df, schema, m, [rr.excel_row_number(i) for i in range(len(rr.df))])
 
 
 def test_pos_export_end_to_end(samples, schema):
+    """The messy POS export converts with exactly the expected counts, row splitting, cleanup and reject report.
+
+    The file has title rows, cp1252 accents, an exact duplicate, a blank row, invalid values and a guest with two
+    numbers (see scripts/make_sample_files.py).
+    """
     rr, m, res = run(samples, schema, "pos_guest_export.csv")
     assert res.total_rows == 9 and res.blank_rows == 1
     assert res.rejected == 2  # 7-digit phone, missing phone
@@ -27,6 +43,7 @@ def test_pos_export_end_to_end(samples, schema):
     smith = smiths.iloc[0]
     assert smith["First Name"] == "John" and smith["Email"] == ""  # invalid optional email blanked
     assert (smiths.drop(columns="Phone").iloc[0] == smiths.drop(columns="Phone").iloc[1]).all()  # rest copied
+    # Patel's single address cell "77 Jericho Tpke Suite 200, Jericho, NY 11753" is split into parts.
     patel = out[out["Last Name"] == "Patel"].iloc[0]
     assert patel["Address 2"] == "Suite 200" and patel["Zip"] == "11753" and patel["State"] == "NY"
     assert set(res.rejects["Status"]) == {"Rejected", "Duplicate"}
@@ -35,9 +52,15 @@ def test_pos_export_end_to_end(samples, schema):
 
 
 def test_loyalty_xlsx(samples, schema):
+    """Excel quirks from the loyalty workbook are cleaned up on the chosen sheet.
+
+    A numeric ZIP gets its leading zero back, state names become codes, ALL-CAPS names get proper case, an Excel
+    serial number is read as a date, and an invalid optional ZIP is blanked and counted instead of rejecting the row.
+    """
     rr, m, res = run(samples, schema, "loyalty_members.xlsx", sheet="Members")
     out = res.output
     assert res.duplicates == 1 and res.rejected == 0
+    # Ana's ZIP was stored as the number 7030 and her state as "new jersey".
     assert out.iloc[1]["Zip"] == "07030" and out.iloc[1]["State"] == "NJ"
     assert out.iloc[0]["First Name"] == "John" and out.iloc[0]["Last Name"] == "McDonald"
     tara = out[out["First Name"] == "Tara"].iloc[0]
@@ -47,11 +70,15 @@ def test_loyalty_xlsx(samples, schema):
 
 
 def test_day_first_column(samples, schema):
+    """A clearly day-first column (15/03, 28/02) is read day-first throughout, so 01/04 becomes April 1."""
     _, _, res = run(samples, schema, "eu_style_semicolon.csv")
     assert list(res.output["Signup Date"]) == ["03/15/2026", "04/01/2026", "02/28/2026"]
 
 
 def test_dedupe_requires_all_keys(schema):
+    """Rows are duplicates only when every dedupe key matches after normalization (phone and signup date here)."""
+    # Row 2 is row 1 written differently (the one duplicate); row 3 has another date and row 4 has none, so both
+    # import.
     df = pd.DataFrame({
         "Phone": ["5165550100", "516-555-0100", "5165550100", "5165550100"],
         "Date": ["10/01/2026", "10/01/2026", "10/02/2026", ""],
@@ -63,6 +90,8 @@ def test_dedupe_requires_all_keys(schema):
 
 
 def test_overrides_skip_normalization(schema):
+    """A manual fix for a value is used as-is, so a row rejected for a typo imports once the user corrects it."""
+    # "5OO" uses the letter O for zero, so the number is rejected until it is fixed.
     df = pd.DataFrame({"Phone": ["516 5OO 0100", "5165550131"]})
     m = Mapping(fields={"phone": FieldMapping(sources=["Phone"], transform="copy")})
     assert convert(df, schema, m).rejected == 1
@@ -71,6 +100,7 @@ def test_overrides_skip_normalization(schema):
 
 
 def test_required_missing_and_defaults(schema):
+    """A missing required phone rejects the row with a countable reason; a constant fills an unmapped field."""
     df = pd.DataFrame({"Phone": ["", "5165550131"], "Name": ["A", "B"]})
     m = Mapping(fields={"phone": FieldMapping(sources=["Phone"], transform="copy"),
                         "notes": FieldMapping(transform="constant", params={"value": "Imported"})})
