@@ -1,7 +1,25 @@
 # Import File Converter
 
-Internal web app that converts any customer/contact file (CSV, TSV, TXT, XLSX, XLS, ODS) into the exact
-import format of the target system. Built for 5–20 internal users; each upload is one file.
+Internal web app that converts any customer/contact file (CSV, TSV, TAB, TXT, XLSX, XLSM, XLSB, XLS, ODS) into
+the exact import format of the target system. Built for 5–20 internal users; each upload is one file.
+
+**Quick start (one computer):** `./run_local.sh` (Mac/Linux) or `run_local.bat` (Windows), then open
+http://localhost:8501 and sign in with the admin account from `.env`. **Tests:** `python -m pytest -q`.
+
+## Documentation
+
+| Document | For | What's in it |
+|---|---|---|
+| This README | everyone | what the tool does, the output format, phone and date rules, settings |
+| [docs/USER_GUIDE.md](docs/USER_GUIDE.md) | people running imports | step-by-step: upload, review the mapping, fix columns, check, import, read the results |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | developers | how a file flows through the code, every module, the data structures and design decisions |
+| [docs/STACK.md](docs/STACK.md) | developers, decision makers | every library and tool used, what it does here and why it was chosen |
+| [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | developers | setup, tests, conventions, how to change the format or add a rule, release steps |
+| [docs/OPERATIONS.md](docs/OPERATIONS.md) | whoever runs it | running locally, Docker, a server with HTTPS, users, backups, updates, troubleshooting |
+| [docs/CHANGELOG.md](docs/CHANGELOG.md) | everyone | what changed in each version |
+| [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md) | developers | limits and quirks worth knowing before changing code |
+
+Every source file also starts with an overview, and every function has a docstring explaining what it does and why.
 
 ```
 New import:  upload → detect header/encoding/delimiter → auto-map columns → review/edit (or instruct Claude)
@@ -19,12 +37,12 @@ Imports:     every import with live progress, elapsed time and time left → ope
 | **Import detail** | Status and timing, the bad-row flag and counts, downloads (converted file, rejected rows, summary, original file, side-by-side Excel), and tabs: **Side by side**, **What changed**, **Converted file**, **Bad & duplicate rows**, **Mapping used** (incl. notes). **Check this import for mistakes**; Re-run and Claude fixes start a new linked import. |
 | **Templates** | Saved column mappings per file layout; rename, delete, export. |
 | **Target format** | The current target schema, output file settings, dedupe rule and file retention. |
-| **Users** | (admins) add users, reset passwords, grant admin. |
+| **Users** | (admins) add users, reset passwords, grant or remove admin, delete users. |
 
 **Side by side** shows the original file (left, exactly as uploaded) and the converted output (right) row by
 row. Column headers show where each original column went and where each output field came from. Cells are
 coloured by what happened: reformatted, built from part of / several columns, default value, Claude fix,
-invalid → left blank, invalid/missing → row rejected; the original value is shown under any changed value and
+repaired from a likely typo (orange — check these), invalid → left blank, invalid/missing → row rejected; the original value is shown under any changed value and
 on hover. Filter to rows with changes, problems, bad rows, duplicates, imported or empty rows, search for any
 value or row number, and page through large files. The same view downloads as a colour-coded Excel workbook.
 
@@ -172,7 +190,8 @@ Add source-file header names you see often to `synonyms` so they map automatical
 Under **New import → Columns in your file** every column of the uploaded file has:
 
 - **Goes to** — the field(s) it feeds. Pick a different field to move it; picking a field makes this column that
-  field's only source (whatever fed it before is dropped from it). Clear it to leave the column out.
+  field's only source (whatever fed it before is dropped from it) — except the phone field, where the column is
+  added to the others and each different number gets its own row. Clear it to leave the column out.
 - **Skip** — leave the column out and keep it out: rules, saved templates and Claude won't map it again (Claude
   isn't even shown it). Saved with the template, so the next file with the same layout skips it too.
 - **Check** — a warning when the column's name and values don't fit the field it goes to.
@@ -181,6 +200,9 @@ Under **New import → Columns in your file** every column of the uploaded file 
 The field grid above it still works the other way round (pick the source column(s) for each field).
 
 ## Running it
+
+The short version is below; [docs/OPERATIONS.md](docs/OPERATIONS.md) has the full guide (Docker on one computer,
+server with HTTPS, settings, backups, updates, troubleshooting).
 
 ### On a server (recommended for the team)
 
@@ -216,6 +238,7 @@ It opens at `http://localhost:8501`. Set `AUTH_MODE=none` in `.env` for single-p
 docker compose exec app python scripts/manage_users.py add jane            # --admin for an admin
 docker compose exec app python scripts/manage_users.py password jane
 docker compose exec app python scripts/manage_users.py list
+docker compose exec app python scripts/manage_users.py delete jane
 ```
 
 ## Claude (optional)
@@ -232,19 +255,22 @@ when someone clicks** one of these buttons:
 
 Notes are useful without Claude too: they're saved with the template and the import as documentation for the team.
 
-- **Key:** create one at platform.claude.com and set `ANTHROPIC_API_KEY`. Without it, the Claude buttons are disabled.
+- **Key:** create one at platform.claude.com and set `ANTHROPIC_API_KEY`. Without it, *Apply notes* is disabled, *Suggest
+  fixes* is hidden and *Check for mistakes* runs the rule checks only.
 - **What's sent:**
   - Notes: column names, up to 15 sample values per column, and your notes.
   - Mistake check: additionally up to 30 sample rows (original and converted) and summary counts.
   - Fixes: only the failed values.
-  - Phone digits in check samples are partly masked (`516#####00`; turn off with `AI_MASK_PHONES=false`).
+  - Phone digits in the mistake check's sample rows are partly masked (`516#####00`; turn off with
+    `AI_MASK_PHONES=false`). The up-to-15 sample values per column (notes, checks, automatic mapping) and the
+    failed values sent by *Suggest fixes* are not masked.
   - The full file is never sent.
 - **Safety:** structured outputs restrict Claude to real field, transform and column names. `consent` can't be
   touched. Every suggestion is shown for approval before anything changes.
 - **Models:** `claude-sonnet-5-5` for notes and checks, `claude-haiku-5-5` for fixes (`MAPPING_MODEL` /
   `REPAIR_MODEL`).
-- **Cost (estimate):** a notes or check call is a few thousand tokens — roughly 2–5 cents at Sonnet 5.5 list
-  prices ($2 / $10 per million input / output tokens).
+- **Cost:** a notes or check call is a few thousand tokens, so a few cents per click; see current model prices at
+  [anthropic.com/pricing](https://www.anthropic.com/pricing).
 - **Automatic mapping:** to also have Claude refine the column matching on every upload, set
   `AI_AUTO_MAP=true` (off by default).
 
@@ -256,7 +282,8 @@ Notes are useful without Claude too: they're saved with the template and the imp
   someone typed a phone number into it. This one also shows straight away in the mapping grids, without clicking
   *Check for mistakes*.
 - Activity times in the future, or mostly before 2000.
-- Birthdays/anniversaries in the future, or mostly within the last two years (looks like sign-up dates).
+- Birthdays/anniversaries with a year in the future (the year is dropped → 1600), or mostly within the last two
+  years as written in the file (looks like sign-up dates, or years Excel added).
 - Every row having the same date (an export default).
 - Columns mixing month-first and day-first dates.
 - Times that carried a zone and were converted.
@@ -280,6 +307,7 @@ Notes are useful without Claude too: they're saved with the template and the imp
 | Variable | Default | Meaning |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | — | Claude API key; leave empty to run without AI |
+| `AI_ENABLED` | true | `false` turns Claude off without removing the key |
 | `MAPPING_MODEL` / `REPAIR_MODEL` | `claude-sonnet-5-5` / `claude-haiku-5-5` | Claude models |
 | `AI_SAMPLE_VALUES` | 15 | sample values per column sent to Claude |
 | `AI_AUTO_MAP` | false | also let Claude refine column matching automatically on upload |
@@ -318,10 +346,13 @@ converter/
   normalizers.py        phone/date/email/zip/state/number/boolean/enum/string normalization
   dateparse.py          date/time reader (every numeric, written, machine and spreadsheet format)
   checks.py             rule-based mistake checks + sample prepared for Claude's review
-  transforms.py         how a field's value is built: copy, first-non-empty, combine, name part, address part, split, translate, fixed
+  transforms.py         how a field's value is built: copy, first non-empty, one row per phone number, combine, name part,
+                        address part, split, translate, fixed
   mapping.py            mapping spec, column profiling, header fingerprints
   heuristics.py         rule-based auto-mapping
   ai.py                 Claude (optional): apply notes, mistake review, value fixes (+ guards)
+  auth.py               login gate (per-user accounts, bcrypt)
+  config.py             settings from environment variables / .env
   engine.py             conversion, validation, bad rows, dedupe, progress, per-cell audit trail
   jobs.py               background import runner (queue, progress, cancel, retention)
   compare.py            side-by-side view, what-changed summary, comparison Excel
@@ -332,8 +363,13 @@ converter/
   editor.py             mapping-grid helpers
   cli.py                command line
 schemas/target_schema.yaml   the target import format (generic import format)
-tests/fixtures/              example contact schema used by the generic tests
+scripts/                     make_sample_files.py (test data), manage_users.py (logins from the command line)
+tests/                       pytest suite; tests/fixtures/ has the example contact schema used by generic tests
+docs/                        user guide, architecture, stack, development, operations, changelog, known issues
 ```
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how these fit together and [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)
+for conventions and how to make common changes.
 
 ## Known limits
 
@@ -344,3 +380,4 @@ tests/fixtures/              example contact schema used by the generic tests
 - Imports run inside the web server process. If the server restarts mid-import, that import is marked
   *Interrupted* and can be re-run with one click.
 - Throughput measured in testing: about 150,000 rows in 25 seconds for a 6-column file on one worker.
+- More quirks found while documenting the code are listed in [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md).
