@@ -3,6 +3,72 @@
 Each target field type has one normalizer. Column-level context (e.g. whether a date column is
 month-first or day-first) is inferred once per column in `prepare()` so ambiguous values are
 resolved consistently instead of value by value.
+
+What this module is responsible for
+-----------------------------------
+The per-value rules of the converter. Given one cell's text (already pulled out of the source file by a
+transform, see transforms.py) and the target field's `FieldSpec` (schema.py, schemas/target_schema.yaml), it
+returns the exact text the import file needs, or an error string that tells the person running the import, in
+plain English, why the value couldn't be converted ("missing area code (only 7 digits)", "not a date", ...).
+It never drops rows itself: the engine decides from the error and the field's `on_invalid` setting whether the
+row is rejected or only that value is blanked.
+
+Main entry points
+-----------------
+prepare(field, values, params) -> ctx
+    Called by the engine once per output column with that column's cleaned values from non-empty rows (may
+    include empty strings). Builds the column context: date order, Excel-serial detection and placeholder year for
+    dates (`prepare_date`), and the area codes the file uses for phones (`prepare_phone`). Other types get an empty
+    dict.
+normalize(value, field, params, ctx) -> (output, error)
+    Called by the engine for each distinct value (the engine caches results per value). `error is None` means
+    success; ("", None) means blank with no problem. Dispatches on `field.type` through `NORMALIZERS`.
+clean_text(value)
+    Shared cleanup (control characters, whitespace, "N/A"/"null" tokens); also used by the engine and transforms.
+looks_like_phone / looks_like_email / looks_like_zip / looks_like_state / looks_like_date
+    Cheap yes/no detectors used by column profiling, auto-mapping and the wrong-column checks (mapping.py,
+    checks.py).
+
+How the engine uses it (engine.convert, simplified):
+    cleaned = [N.clean_text(v) for v in raw]
+    ctx = N.prepare(field, [v for v in cleaned if v], params)
+    ctx["tz"] = timezone                       # the import's IANA zone, read by the date normalizer
+    out, err = N.normalize(v, field, params, ctx)
+    if v in ctx.get("repairs", {}): ...        # phone typo repairs are marked so a person can check them
+Fields with `fixed_blank` (consent) never reach this module: the engine writes them blank on every row.
+
+Phone rules (real target: 10 US digits, "(516) 555-0100" → "5165550100"), in the order they apply:
+  1. Clean-up (_prep_phone): full-width digits and invisible characters (NFKC), the Excel ="…" wrapper and
+     leading apostrophe, unicode dashes, "tel:"/"Phone:" prefixes, letters typed for digits ("516-555-O1OO").
+  2. Country-code fixes (_prep_phone): exit codes before the 1 ("011 1 516…", "001 516…" → "+1 516…") and a "+"
+     whose 1 was left out ("+5165550100" → "+1 5165550100") when that gives a real North American number.
+  3. Spreadsheet damage (_fix_numeric_artifacts): "5165550100.0" and "5.165550100E+09" are read back as digits;
+     scientific notation that already lost digits ("5.163E+09") is rejected.
+  4. A "+1" put in front of a number that already had its own "+" ("+1 +51 63 171059") is ignored.
+  5. Several numbers in one cell: one labelled mobile/cell wins, then unlabelled, then home/work, fax last;
+     ties go to the one written first.
+  6. Extensions ("ext 12", "x12", "#12") are dropped; vanity numbers are spelled out ("1-800-FLOWERS").
+  7. Only the field's `countries` are accepted (US plus territories in the real schema). A valid number from
+     another country is rejected with where it's from: "not a US number — Canada (area code 514, Quebec)".
+  8. Typo repair (_repair_phone, US region only) when exactly one US number fits: a foreign country code in
+     front of a US number, one digit too many, an area code one digit off one this file uses, or 7 digits when
+     one area code dominates the file. Every repair is recorded in ctx["repairs"] so it can be checked.
+  9. Anything else is rejected with the most specific reason found (too few/many digits, area code not in
+     use, exchange not in use, ...).
+
+Date rules (the text parsing itself is dateparse.py; its docstring lists every supported format):
+  - Ambiguous numeric dates are month-first (US) unless the column clearly is day-first or the mapping sets
+    params["date_order"]; params["input_format"] (a strptime pattern) is tried first when given.
+  - Columns of bare numbers in the Excel date range are read as Excel serial dates.
+  - "0000-00-00"-style placeholders become blank, not errors.
+  - Times that carry a zone (and Unix timestamps) are converted to the import's zone in ctx["tz"]; times with
+    no zone are kept as written. Output uses the field's strftime format ("%m/%d/%Y %I:%M %p" for activity).
+  - Birthday/anniversary (`no_year_value`, 1600 in the real schema): month+day only, a year of 1900 or earlier,
+    a year most of the column shares (a placeholder) or a date in the last two years / the future is written
+    with the no-year value: "Sep 12" → "09/12/1600", while "09/12/1985" → "09/12/1985".
+
+Other types: email (lower-cased, syntax only), ZIP (leading zeros restored), US state (2-letter code), integer,
+decimal, boolean, enum and string (re-casing and max length).
 """
 
 from __future__ import annotations
@@ -27,12 +93,27 @@ from .schema import FieldSpec
 # Shared text cleanup
 # ---------------------------------------------------------------------------
 
+# Any run of whitespace (spaces, tabs, line breaks in a cell); collapsed to one space: "a \n  b" → "a b".
 _WS_RE = re.compile(r"\s+")
+# ASCII control characters except tab, line feed and carriage return (those are whitespace, handled by _WS_RE), plus
+# DEL. They come from copy/paste and old exports, are invisible in Excel and can break the output CSV.
 _CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+# Cell contents (compared lower-cased) that mean "no value" in exports from Excel, pandas, databases and CRMs.
+# "never" covers activity columns ("Last order: Never"); "nat" is pandas' Not-a-Time; "-"/"--" are dashes for empty.
 _NULL_TOKENS = {"", "null", "none", "nan", "n/a", "na", "#n/a", "-", "--", "undefined", "nil", "never", "nat"}
 
 
 def clean_text(value: Any) -> str:
+    """Basic cleanup applied to every cell before it is normalized; returns "" for anything that means "no value".
+
+    Removes control characters, turns non-breaking spaces into normal spaces, collapses runs of whitespace and
+    trims. A value that is only a null token (see _NULL_TOKENS) becomes "", so the engine treats it as blank
+    (and, for a required field, as missing) instead of as an invalid value.
+        None                   → ""
+        "  John    Smith "     → "John Smith"
+        "N/A", "null", "-"     → ""
+        "Never"                → ""      (an activity date that never happened)
+    """
     if value is None:
         return ""
     s = _CTRL_RE.sub("", str(value)).replace(" ", " ")
@@ -41,6 +122,14 @@ def clean_text(value: Any) -> str:
 
 
 def apply_case(value: str, case: str) -> str:
+    """Re-case a cleaned string for the field's `case` setting: "none", "upper", "lower", "title" or "name".
+
+    "title" and "name" only touch text typed in a single case (ALL CAPS or all lower), because mixed case such as
+    "McDonald" or "DeAngelo" was most likely typed correctly and plain title-casing would break it.
+    "name" uses nameparser, which knows surname rules plain str.title() gets wrong:
+        "MCDONALD" → "McDonald", "O'BRIEN" → "O'Brien", "mary-jane van dyke" → "Mary-Jane van Dyke".
+    Empty values and unknown `case` values are returned unchanged.
+    """
     if not value or case == "none":
         return value
     if case == "upper":
@@ -52,8 +141,10 @@ def apply_case(value: str, case: str) -> str:
     if case == "name":
         if value.isupper() or value.islower():
             n = HumanName(value)
+            # force=True: always re-case (the check above already limits this to single-case text).
             n.capitalize(force=True)
             out = str(n).strip()
+            # nameparser can return "" for text it can't split into name parts; fall back to plain title case.
             return out or value.title()
         return value
     return value
@@ -63,17 +154,33 @@ def apply_case(value: str, case: str) -> str:
 # Phone
 # ---------------------------------------------------------------------------
 
+# Excel scientific notation for a long number: optional sign, a mantissa with optional decimals, "E"/"e", an optional
+# "+" and the exponent. Matches "5.165550100E+09", "5.165550100e9", "5E+09"; group 1 is the mantissa ("5.165550100").
 _SCI_RE = re.compile(r"^\s*([+-]?\d+(?:\.\d+)?)[eE]\+?(\d+)\s*$")
+# A whole number that picked up a ".0" because the column was read as floats: "5165550100.0" → group 1 "5165550100".
 _FLOAT_ARTIFACT_RE = re.compile(r"^(\d+)\.0+$")
 
 
 def _fix_numeric_artifacts(value: str) -> tuple[str, str | None]:
+    """Undo the damage spreadsheets do to long numbers (phones, ZIPs). Returns (value, error or None).
+
+    Excel and pandas often store phone numbers as numbers, so they arrive as floats or in scientific notation:
+        "5165550100.0"     → ("5165550100", None)
+        "5.165550100E+09"  → ("5165550100", None)      all 10 digits survived in the mantissa
+        "5.163E+09"        → ("5.163E+09", "stored in scientific notation; digits were lost in Excel")
+        "516-555-0100"     → ("516-555-0100", None)    anything else is returned unchanged
+    When the mantissa has fewer than 10 significant digits the real number can't be recovered (Excel already
+    rounded it to 5163000000), so it is rejected rather than importing a wrong number. "unreadable number" is
+    returned if Decimal can't read a value the regex accepted (defensive). normalize_zip reuses this and ignores
+    the error.
+    """
     m = _FLOAT_ARTIFACT_RE.match(value)
     if m:
         return m.group(1), None
     m = _SCI_RE.match(value)
     if m:
         mantissa = m.group(1).lstrip("+-")
+        # Digits Excel kept: "5.163" → 4 significant digits, far short of a 10-digit phone number.
         significant = len(mantissa.replace(".", "").lstrip("0"))
         if significant < 10:
             return value, "stored in scientific notation; digits were lost in Excel"
@@ -84,10 +191,20 @@ def _fix_numeric_artifacts(value: str) -> tuple[str, str | None]:
     return value, None
 
 
+# Values a phone field's `format` may take (see _format_phone). The real schema uses "digits10".
 PHONE_FORMATS = {"E164", "digits10", "digits11", "national", "dashed"}
 
 
 def _format_phone(num: phonenumbers.PhoneNumber, fmt: str) -> str:
+    """Format a parsed number in one of PHONE_FORMATS; an empty or unknown format falls back to E.164.
+
+    For +1 516-555-0100:
+        "E164"     → "+15165550100"
+        "digits10" → "5165550100"       national number only (the real import format)
+        "digits11" → "15165550100"      country code + national number
+        "national" → "(516) 555-0100"
+        "dashed"   → "516-555-0100"     numbers outside North America get the national format instead
+    """
     fmt = fmt or "E164"
     nsn = phonenumbers.national_significant_number(num)
     if fmt == "E164":
@@ -105,30 +222,68 @@ def _format_phone(num: phonenumbers.PhoneNumber, fmt: str) -> str:
     return phonenumbers.format_number(num, phonenumbers.PhoneNumberFormat.E164)
 
 
+# Letters typed (or OCR'd) in place of digits: capital or small O → 0, capital I and small l → 1.
 _LOOKALIKE = str.maketrans({"O": "0", "o": "0", "I": "1", "l": "1"})
+# A URI scheme or label at the very start followed by ":" or "=" (case-insensitive): "tel:+1516…", "sms:516…",
+# "Phone: 516…", "cell=516…". Only the prefix is removed.
 _PHONE_PREFIX_RE = re.compile(r"^\s*(tel|sms|phone|ph|mobile|cell|callto|whatsapp)\s*[:=]\s*", re.I)
+# An extension at the END of the value: optional ";" or ",", then "ext", "ext.", "extension", "ex", "x", "#" or the
+# RFC 3966 ";ext=", then 1–6 digits. Matches " ext. 12", " x12", " #12", ";ext=12", ", extension 9". Removed before
+# counting digits so the extension isn't taken for extra digits of the number.
 _EXT_RE = re.compile(r"[;,]?\s*(?:ext\.?|extension|ex\.?|x|#|;ext=)\s*\d{1,6}\s*$", re.I)
+# Labels written just before a number in cells holding several ("H: 516-555-1212 C: 516-555-0100"). Each pattern must
+# END the text before the number (only non-word characters such as ": " or " (" may follow) and is searched in the 14
+# characters before it. Single letters must stand alone (\b), so the "c" at the end of "Mac" doesn't count.
+# Mobile labels (best for a texting import): mobile, cell, cel, wireless, sms, text, M, C.
 _LABEL_MOBILE_RE = re.compile(r"(mobile|cell|cel|wireless|sms|text|\bm\b|\bc\b)\W*$", re.I)
+# Fax labels ("Fax:", "F:"): a fax line can't receive texts, so it is the last choice.
 _LABEL_FAX_RE = re.compile(r"(fax|\bf\b)\W*$", re.I)
+# Landline-type labels: home, work, office, business, land line/landline, main, H, W, O. Chosen after unlabelled.
 _LABEL_OTHER_RE = re.compile(r"(home|work|office|business|land\s*line|main|\bh\b|\bw\b|\bo\b)\W*$", re.I)
 
 
 def _prep_phone(value: str) -> str:
+    """Clean a raw phone value into text the phonenumbers matcher can read. Never fails; returns a string.
+
+    Each step fixes something seen in real exports:
+      - NFKC turns full-width digits and dashes into ASCII ("５１６－５５５" → "516-555"); zero-width
+        spaces and byte-order marks are removed.
+      - Excel text protection is unwrapped: ="5165550100" and a leading apostrophe ('5165550100).
+      - Unicode hyphens, en/em dashes and minus signs become "-".
+      - "tel:", "sms:", "Phone:", "Cell:" ... prefixes are removed.
+      - Letters typed for digits inside a number: "516-555-O1OO" → "516-555-0100".
+      - International exit codes before the US country code: "011 1 516 555 0100" → "+1 516 555 0100",
+        "001 516 555 0100" → "+1 516 555 0100".
+      - A "+" with the 1 left out: "+5165550100" → "+1 5165550100", but only when the 10 digits are a valid
+        North American number; "+51 1 4567890" stays a Peru (Lima) number.
+    Labels, extensions and further numbers in the cell are left for the matcher / _digits_fallback.
+    """
     v = unicodedata.normalize("NFKC", value).replace("\u200b", "").replace("\ufeff", "").strip()
+    # Regex: the whole value inside double quotes, optionally preceded by "=" (Excel formula that keeps text).
     m = re.match(r'^=?"(.*)"$', v)  # Excel text-protection wrapper ="5165550100"
     if m:
         v = m.group(1)
+    # A leading apostrophe is Excel's "store as text" marker: '5165550100.
     v = v.strip().lstrip("'").strip()
+    # U+2010–U+2015 (hyphens, figure dash, en/em dash, horizontal bar), U+2212 minus sign, U+2043 hyphen bullet.
     v = re.sub(r"[\u2010-\u2015\u2212\u2043]", "-", v)  # unicode dashes
     v = _PHONE_PREFIX_RE.sub("", v)  # tel:, sms:, Phone:
     # Letters typed for digits inside a number (516-555-O1OO, 5l6…): O→0, I/l→1. Done before vanity
     # conversion, which would otherwise read O as 6 on a keypad.
+    # Regex: runs of 4+ characters made only of digits, O/o/I/l, parentheses, dots and dashes ("516-555-O1OO",
+    # "5l6-555-0100"). A run is translated only if it holds at least 3 real digits, so runs that are mostly
+    # letters (initials such as "I.O.O.I") are left alone.
     v = re.sub(r"[\dOoIl().\-]{4,}",
                lambda m: m.group(0).translate(_LOOKALIKE) if sum(c.isdigit() for c in m.group(0)) >= 3 else m.group(0), v)
     # International exit codes before the US country code: 011 1 …, 00 1 …, +011 1 …
+    # Regex: optional "+", then "011" (the US exit code) or "00" (most other countries), optional separators, and only
+    # when "1" plus a digit comes next (lookahead, not consumed), i.e. the US country code follows. The exit code is
+    # replaced by "+": "011 1 516…" → "+1 516…". "0044 20…" is untouched (that isn't +1).
     v = re.sub(r"^\s*\+?\s*(?:011|00)[\s.\-]*(?=1\D?\d)", "+", v)
     # "+" followed by 10 digits that can't start a country code of their own → the "1" was left out.
     # Only when that gives a real North American number; otherwise it's a foreign number (+51 1 4567890 = Lima).
+    # Regex: the whole value is "+" then a number starting with 2–9 (North American area codes never start with 0 or
+    # 1) made only of digits, spaces, parentheses, dots and dashes. The walrus keeps its digits for the checks.
     m = re.match(r"^\s*\+\s*([2-9][\d\s().\-]*)$", v)
     if m and len(digits := re.sub(r"\D", "", m.group(1))) == 10 and phonenumbers.is_valid_number(
             phonenumbers.PhoneNumber(country_code=1, national_number=int(digits))):
@@ -137,11 +292,24 @@ def _prep_phone(value: str) -> str:
 
 
 def _digits_fallback(text: str) -> tuple[phonenumbers.PhoneNumber | None, str | None]:
-    """Last resort for values the matcher can't find a number in (one number, odd separators, vanity letters)."""
+    """Last resort for values the matcher can't find a number in (one number, odd separators, vanity letters).
+
+    Returns (PhoneNumber, None) for exactly 10 digits (after dropping a leading 1), else (None, reason):
+        "516/555/0100 cell" → +1 5165550100          words such as "cell" or "home" are dropped
+        "1-800-FLOWERS"     → +1 8003569377          vanity letters converted on a phone keypad
+        "555-0100"          → "missing area code (only 7 digits)"
+        "51655501"          → "too few digits (8)"
+        "516555010066"      → "too many digits (12)"
+        "call me"           → "no phone number found"
+    "not a phone number" if libphonenumber can't parse the 10 digits (defensive). The result is NOT validated
+    here; the caller checks is_valid_number and the allowed countries.
+    """
     body = _EXT_RE.sub("", text).strip()
     letters = re.sub(r"[^A-Za-z]", "", body)
     if letters:
         alnum = re.sub(r"[^0-9A-Za-z]", "", body)
+        # A vanity number is only phone characters and letters, 10–11 characters without punctuation, with at least
+        # 3 digits and 3 letters: "1-800-FLOWERS", "516-CALL-NOW". Any other value with letters has a label in it.
         is_vanity = (re.fullmatch(r"[\s+().\-\dA-Za-z]+", body) and 10 <= len(alnum) <= 11
                      and sum(c.isdigit() for c in alnum) >= 3 and len(letters) >= 3)
         if not is_vanity:
@@ -151,6 +319,7 @@ def _digits_fallback(text: str) -> tuple[phonenumbers.PhoneNumber | None, str | 
     digits = re.sub(r"\D", "", body)
     if not digits:
         return None, "no phone number found"
+    # 11 digits starting with 1: the US country code written without "+" ("1 516 555 0100").
     if len(digits) == 11 and digits[0] == "1":
         digits = digits[1:]
     if len(digits) == 7:
@@ -165,14 +334,24 @@ def _digits_fallback(text: str) -> tuple[phonenumbers.PhoneNumber | None, str | 
         return None, "not a phone number"
 
 
+# "+1" followed by a second "+" and a number: a system put +1 in front of a number that already had a country code.
+# Group 1 is the inner number: "+1 +51 63 171059" → "+51 63 171059"; "+1 +15165550100" → "+15165550100".
 _DOUBLE_CC_RE = re.compile(r"^\s*\+\s*1[\s.\-]*(\+\s*\d.*)$")
 
 
+# Cached: one call can test up to 800 exchanges through libphonenumber, and there are only 800 possible area codes
+# (200–999), so maxsize=1000 keeps all of them.
 @lru_cache(maxsize=1000)
 def _area_code_in_use(npa: str) -> bool:
-    """Whether any number in this North American area code can exist (US, territories or Canada…)."""
+    """Whether any number in this North American area code can exist (US, territories or Canada…).
+
+    Only used to word a rejection: "area code 433 isn't in use" vs "155 isn't a working exchange in area code
+    516". `npa` is the 3-digit area code as text and must be 2–9 followed by two digits:
+        "516" → True, "433" → False, "123" → False.
+    """
     if not re.fullmatch(r"[2-9]\d\d", npa):
         return False
+    # libphonenumber validates by area code + exchange, so try every exchange (200–999) with a dummy line number.
     for nxx in range(200, 1000):
         if phonenumbers.is_valid_number(phonenumbers.PhoneNumber(country_code=1, national_number=int(f"{npa}{nxx}4567"))):
             return True
@@ -180,7 +359,12 @@ def _area_code_in_use(npa: str) -> bool:
 
 
 def _foreign_reason(num: phonenumbers.PhoneNumber) -> str:
-    """'not a US number — Canada (area code 514, Quebec)' / 'not a US number — Peru (+51, Pasco)'."""
+    """Rejection reason naming the country (and area) of a valid number that isn't in the allowed countries.
+
+    'not a US number — Canada (area code 514, Quebec)' / 'not a US number — Peru (+51, Pasco)'.
+    North American (+1) numbers show the area code, because "+1" alone doesn't say which country; others show
+    the country code. The place is left out when the geocoder has none or it only repeats the country name.
+    """
     country = _geo.country_name_for_number(num, "en") or phonenumbers.region_code_for_number(num) or "another country"
     place = _geo.description_for_number(num, "en")
     place = "" if place == country else place
@@ -191,27 +375,53 @@ def _foreign_reason(num: phonenumbers.PhoneNumber) -> str:
     return f"not a US number — {country} ({detail})"
 
 
+# Cached (200,000 entries): the same values repeat across rows, columns and the profiling/detection passes, and
+# phonenumbers matching is the slowest step of a conversion. All arguments are hashable for this reason.
 @lru_cache(maxsize=200_000)
 def _parse_phone(value: str, region: str, countries: tuple[str, ...], fmt: str) -> tuple[str, str | None]:
+    """Parse one phone value into the output format, without typo repair. Returns (formatted, None) or ("", why).
+
+    `region` is the default country for numbers written without a country code ("US"); `countries` is the tuple
+    of allowed ISO regions (empty = any); `fmt` is one of PHONE_FORMATS. Typo repair lives in _repair_phone, so
+    this is also safe for detectors such as looks_like_phone. With fmt "digits10" and countries ("US", ...):
+        "(516) 555-0100 ext 12"            → ("5165550100", None)
+        "H: 516-555-1212 C: 516-555-0100"  → ("5165550100", None)   the cell (C:) number wins
+        "+1 +51 63 171059"                 → ("5163171059", None)   extra +1 ignored
+        "+44 20 7946 0958"                 → ("", "not a US number — United Kingdom (+44, London)")
+        "(516) 155-0100"                   → ("", "not a real US number (155 isn't a working exchange in area
+                                                code 516)")
+    Error strings: "stored in scientific notation; digits were lost in Excel", "no phone number found",
+    "missing area code (only 7 digits)", "too few digits (N)", "too many digits (N)",
+    "not a US number — <country> (<area code or +code>, <place>)" (plus " — the file put +1 in front of its own
+    country code" for the doubled form), "has two country codes (+1 and +NN) and isn't a valid number either
+    way", "not a real US number (area code NPA isn't in use)", "not a real US number (NXX isn't a working
+    exchange in area code NPA)", "not a real US number (area code or exchange doesn't exist)".
+    """
     # "+1 +51 63 171059": a system put +1 in front of a number that already had a country code.
     m = _DOUBLE_CC_RE.match(unicodedata.normalize("NFKC", value))
     if m:
+        # Parse the inner number on its own (recursive, and cached too). If it is fine, the extra +1 was just noise.
         out, err = _parse_phone(m.group(1), region, countries, fmt)
         if err is None:
             return out, None
         if err.startswith("not a US number"):
             return "", err + " — the file put +1 in front of its own country code"
+        # The inner number failed for another reason: name its country code in the message if it parses at all.
         try:
             cc = phonenumbers.parse(m.group(1), None).country_code
         except phonenumbers.NumberParseException:
             cc = None
         return "", ("has two country codes (+1 and " + (f"+{cc}" if cc else "another") + ") and isn't a valid "
                     "number either way")
+    # Clean-up, then undo Excel float/scientific-notation damage (which may reject the value outright).
     prepped = _prep_phone(value)
     fixed, err = _fix_numeric_artifacts(prepped)
     if err:
         return "", err
     # Find every number in the text; prefer ones labelled mobile/cell, then unlabelled, then home/work, then fax.
+    # Leniency.POSSIBLE finds anything shaped like a number (validity is checked below, so an invalid candidate can
+    # still give a specific error). Each candidate gets a priority from the label in the 14 characters before it:
+    # 0 mobile/cell, 1 no label, 2 home/work/main, 3 fax. Candidates are (priority, position, number).
     candidates: list[tuple[int, int, phonenumbers.PhoneNumber]] = []
     try:
         for match in phonenumbers.PhoneNumberMatcher(fixed, region, leniency=phonenumbers.Leniency.POSSIBLE):
@@ -219,6 +429,7 @@ def _parse_phone(value: str, region: str, countries: tuple[str, ...], fmt: str) 
             prio = (0 if _LABEL_MOBILE_RE.search(before) else 3 if _LABEL_FAX_RE.search(before)
                     else 2 if _LABEL_OTHER_RE.search(before) else 1)
             candidates.append((prio, match.start, match.number))
+    # The matcher can raise on unusual input; that counts as "nothing found" and the digits fallback takes over.
     except Exception:
         pass
     fallback_err = None
@@ -228,8 +439,11 @@ def _parse_phone(value: str, region: str, countries: tuple[str, ...], fmt: str) 
             candidates.append((1, 0, num))
     if not candidates:
         return "", fallback_err or "no phone number found"
+    # Best label first; equal labels keep the order in which they were written.
     candidates.sort(key=lambda c: (c[0], c[1]))
     foreign = None
+    # The first candidate that is a valid number in an allowed country wins. The first valid number from another
+    # country is remembered so the rejection can name that country.
     for _, _, num in candidates:
         if not phonenumbers.is_valid_number(num):
             continue
@@ -240,13 +454,16 @@ def _parse_phone(value: str, region: str, countries: tuple[str, ...], fmt: str) 
         return _format_phone(num, fmt), None
     if foreign:
         return "", _foreign_reason(foreign)
+    # Nothing usable: explain why, from the digits of the whole value (extension removed).
     digits = re.sub(r"\D", "", _EXT_RE.sub("", fixed))
     if len(digits) == 7:
         return "", "missing area code (only 7 digits)"
     if len(digits) < 10:
         return "", f"too few digits ({len(digits)})"
+    # Cells with several numbers legitimately have more than 11 digits, so "too many" only for a single candidate.
     if len(digits) > 11 and len(candidates) == 1:
         return "", f"too many digits ({len(digits)})"
+    # Right length for a US number but invalid: say whether the area code or the exchange (next 3 digits) is wrong.
     if len(digits) == 10 or (len(digits) == 11 and digits[0] == "1"):
         npa, nxx = digits[-10:-7], digits[-7:-4]
         if not _area_code_in_use(npa):
@@ -256,14 +473,28 @@ def _parse_phone(value: str, region: str, countries: tuple[str, ...], fmt: str) 
 
 
 def normalize_phone(value: str, field: FieldSpec, params: dict, ctx: dict) -> tuple[str, str | None]:
+    """Normalizer for "phone" fields: parse, and for US imports try to repair likely typos.
+
+    Region (default country for numbers without a country code): params["region"], else the field's first allowed
+    country, else "US". Output format: field.format (default "E164"; the real schema uses "digits10").
+    Successful repairs (and an ignored extra "+1") are recorded as ctx["repairs"][raw value] = note; the engine
+    marks those cells as repaired so a person can check them. A failed repair adds its reason to the error.
+    In a file of 516/631 numbers:
+        "5149689696"        → ("5169689696", None), repairs note "area code 514 looks like a typo of 516, ..."
+        "+1 (433) 309-8420" → ("", "not a real US number (area code 433 isn't in use) — not a likely typo of
+                                this file's area codes (516, 631)")
+    The repair evidence (phone_local, phone_dominant, phone_known) comes from prepare_phone through ctx.
+    """
     region = (params.get("region") or (field.countries[0] if field.countries else "US")).upper()
     countries = tuple(c.upper() for c in field.countries)
     fmt = field.format or "E164"
     out, err = _parse_phone(value, region, countries, fmt)
     if err is None:
+        # It only parsed after dropping a doubled "+1": report that like a repair so it gets checked.
         if _DOUBLE_CC_RE.match(unicodedata.normalize("NFKC", value)):
             ctx.setdefault("repairs", {})[value] = "ignored an extra +1 in front of a number that already had a +"
         return out, err
+    # Repairs assume North American numbering (area codes, 10 digits), so other regions just get the error.
     if region != "US":
         return out, err
     # Only US numbers are expected, so a number that fails is most likely a typo: try to repair it.
@@ -280,11 +511,20 @@ def prepare_phone(field: FieldSpec, values: list[str]) -> dict:
     """The area codes this file's valid numbers use — evidence for repairing area-code typos.
 
     phone_local: area codes used by at least 5% of the valid numbers (and at least twice).
-    phone_dominant: the one area code used by 80%+ of them, if there is one (fills in 7-digit numbers).
+    phone_dominant: the one area code used by 80%+ of them and by at least 5 numbers, if there is one (fills in
+        7-digit numbers).
+    phone_known: every valid 10-digit number in the column (breaks ties when a typo has several possible fixes).
+
+    Called by prepare() once per phone column with the column's cleaned values from non-empty rows (empty strings
+    are skipped). Example: a Long Island file with 5 × 516, 2 × 631 and 1 × 917 numbers → phone_local ("516", "631") and phone_dominant None (516 is only
+    62%); ten 516 numbers and one 631 → phone_dominant "516". Only a quick digit check is used (no full parsing),
+    so cells holding several numbers don't count as evidence. Example call result:
+        {"phone_local": ("516", "631"), "phone_dominant": None, "phone_known": frozenset({"5165550100", ...})}
     """
     counts: dict[str, int] = {}
     known: set[str] = set()
     total = 0
+    # Distinct values only (first-seen order), capped at 20,000 so huge files stay fast; that's plenty of evidence.
     for v in list(dict.fromkeys(v for v in values if v))[:20_000]:
         d = re.sub(r"\D", "", _EXT_RE.sub("", v))
         if len(d) == 11 and d[0] == "1":
@@ -294,13 +534,21 @@ def prepare_phone(field: FieldSpec, values: list[str]) -> dict:
         counts[d[:3]] = counts.get(d[:3], 0) + 1
         known.add(d)
         total += 1
+    # Most-used first, so typo repair tries the commonest area code first and messages list it first.
     local = tuple(sorted((c for c, n in counts.items() if n >= 2 and n >= 0.05 * total), key=lambda c: -counts[c]))
     dominant = next((c for c, n in counts.items() if n >= 5 and n >= 0.8 * total), None)
     return {"phone_local": local, "phone_dominant": dominant, "phone_known": frozenset(known)}
 
 
+# Cached (100,000 entries): typo repair calls this for every candidate fix of every failing value, and
+# prepare_phone for every number in the column.
 @lru_cache(maxsize=100_000)
 def _us_number(d10: str, countries: tuple[str, ...]) -> bool:
+    """Whether 10 digits are a valid North American number in one of `countries` (an empty tuple allows any).
+
+    "5165550100" → True; "5555555555" → False (555 isn't an area code); "4165550123" → False when countries is
+    ("US", ...) because 416 is Toronto.
+    """
     if not re.fullmatch(r"\d{10}", d10):
         return False
     num = phonenumbers.PhoneNumber(country_code=1, national_number=int(d10))
@@ -310,10 +558,16 @@ def _us_number(d10: str, countries: tuple[str, ...]) -> bool:
 
 
 def _fmt_us(d10: str) -> str:
+    """Human-readable US format for messages: "5165550100" → "(516) 555-0100" (used in "could be ... or ...")."""
     return f"({d10[:3]}) {d10[3:6]}-{d10[6:]}"
 
 
 def _one_digit_off(a: str, b: str) -> bool:
+    """Whether two equal-length digit strings differ by one wrong digit or by two neighbouring digits swapped.
+
+    Used on area codes: ("514", "516") → True (one digit), ("156", "516") → True (swap), ("212", "516") → False.
+    Both strings must be the same length (callers pass 3-digit area codes).
+    """
     diff = [i for i in range(len(a)) if a[i] != b[i]]
     return len(diff) == 1 or (len(diff) == 2 and diff[1] == diff[0] + 1 and a[diff[0]] == b[diff[1]]
                               and a[diff[1]] == b[diff[0]])  # one wrong digit, or two neighbours swapped
@@ -331,17 +585,35 @@ def _repair_phone(value: str, countries: tuple[str, ...], fmt: str, local: tuple
        514 in a file full of 516 numbers → 516. Also covers area codes that don't exist (433).
     4. 7 digits (no area code) when one area code makes up most of the file.
     When several numbers fit, the one that already appears elsewhere in the file wins; otherwise nothing is guessed.
+
+    The rules run in that order and a later rule only runs when the earlier ones found nothing. Why repair at
+    all: the import is US-only, so a number that fails is far more often a typo than a real foreign number. Why
+    so careful: a wrong guess would text a stranger, hence "exactly one fit" and a note on every repair.
+    `local`, `dominant` and `known` are prepare_phone's phone_local, phone_dominant and phone_known.
+    Examples in a file of 516/631 numbers (fmt "digits10"):
+        "+44 516 555 0188" → ("5165550188", "removed country code +44 in front of a US number")
+        "5149689696"       → ("5169689696", "area code 514 looks like a typo of 516, which this file uses")
+        "51655501444"      → ("5165550144", "one digit too many (a digit typed twice); the same number appears
+                              elsewhere in this file")             when 516-555-0144 is in the file
+        "555-0177"         → ("5165550177", "no area code; used 516, ...")     only when 516 is phone_dominant
+    Failures return ("", reason): "could be (516) 946-1961 or (516) 946-1966, so it wasn't guessed", "not a
+    likely typo of this file's area codes (516, 631)", or "" when no rule applied at all.
     """
     body = _EXT_RE.sub("", _prep_phone(value))
     digits = re.sub(r"\D", "", body)
+    # Digit sequences to try: as typed, and without a leading 1 (US country code) when there are 11+ digits.
     seqs = [digits] + ([digits[1:]] if digits[:1] == "1" and len(digits) >= 11 else [])
     found: dict[str, str] = {}
 
     def add(d10: str, note: str) -> None:
+        """Record d10 as a candidate fix (the first note for a number wins) if it's a valid allowed number."""
         if _us_number(d10, countries) and d10 not in found:
             found[d10] = note
 
     # 1. Foreign country code in front of a US number.
+    # Only when the value has a "+": strip a 1–3 digit country code (never "1") that leaves exactly 10 digits. If the
+    # value is itself a valid foreign number (+44 20 7946 0958 is London) it is only repaired when the remaining
+    # area code is one this file uses; otherwise it is more likely a real foreign number than a typo.
     if "+" in body:
         double = _DOUBLE_CC_RE.match(body)
         try:
@@ -353,6 +625,8 @@ def _repair_phone(value: str, countries: tuple[str, ...], fmt: str, local: tuple
                 if len(seq) - k == 10 and seq[:k] != "1" and (not real_foreign or seq[k:k + 3] in local):
                     add(seq[k:], f"removed country code +{seq[:k]} in front of a US number")
     # 2. One digit too many.
+    # For 11 digits, try removing each digit that equals a neighbour (typed twice), plus the first and the last digit.
+    # Every valid result is a candidate; the checks after rule 4 decide whether one of them is safe to use.
     if not found:
         for seq in seqs:
             if len(seq) != 11:
@@ -364,6 +638,7 @@ def _repair_phone(value: str, countries: tuple[str, ...], fmt: str, local: tuple
                            else "an extra digit at the start")
                     add(seq[:i] + seq[i + 1:], f"one digit too many ({why})")
     # 3. Area code typo, judged against the area codes this file actually uses.
+    # (phone_local only: comparing with every US area code would let almost any wrong area code "match" one.)
     if not found and local:
         for seq in seqs:
             if len(seq) != 10:
@@ -372,9 +647,11 @@ def _repair_phone(value: str, countries: tuple[str, ...], fmt: str, local: tuple
                 if code != seq[:3] and _one_digit_off(seq[:3], code):
                     add(code + seq[3:], f"area code {seq[:3]} looks like a typo of {code}, which this file uses")
     # 4. Missing area code.
+    # Only when one area code covers 80%+ of the file (phone_dominant); with a mix there is no safe guess.
     if not found and dominant and len(digits) == 7:
         add(dominant + digits, f"no area code; used {dominant}, the area code most numbers in this file have")
 
+    # Several fits: prefer the single one that already appears elsewhere in the file (likely the same person).
     if len(found) > 1:
         seen = [d for d in found if d in known]
         if len(seen) == 1:
@@ -385,6 +662,7 @@ def _repair_phone(value: str, countries: tuple[str, ...], fmt: str, local: tuple
     if len(found) > 1:
         options = " or ".join(_fmt_us(d) for d in list(found)[:3])
         return "", f"could be {options}, so it wasn't guessed"
+    # Explain the failure in terms of this file's area codes (only for values with a US-like number of digits).
     if local and len(digits) in (10, 11):
         return "", f"not a likely typo of this file's area codes ({', '.join(local[:4])})"
     return "", ""
@@ -394,19 +672,48 @@ def _repair_phone(value: str, countries: tuple[str, ...], fmt: str, local: tuple
 # Dates
 # ---------------------------------------------------------------------------
 
+# Accepted values of params["date_order"]; anything else ("auto", the default) means: decide from the column.
 DATE_ORDERS = {"MDY", "DMY", "YMD"}
+# All-zero "no date" placeholders from databases and exports: zeros separated by "-", "/" or ".", optionally with an
+# all-zero time after a space or "T". Matches "0000-00-00", "00/00/0000", "0000-00-00 00:00:00",
+# "0000-00-00T00:00:00.000".
 _ZERO_DATE_RE = re.compile(r"^0{1,4}[-/.]0{1,2}[-/.]0{1,4}(\s*[t ]\s*0{1,2}:0{2}(:0{2}(\.0+)?)?)?$", re.I)
+# A bare number, optionally with decimals: "46304", "46304.65625" (Excel serial dates), "20261009".
 _NUMERIC_ONLY_RE = re.compile(r"^\d+(\.\d+)?$")
+# dateparse's marker year (4) for "month and day only" values; never output, replaced by the field's no_year_value.
 _NO_YEAR = DP.NO_YEAR
+# Years accepted in output (1900–2100); others are reported as "year N is out of range".
 MIN_YEAR, MAX_YEAR = DP.MIN_YEAR, DP.MAX_YEAR
 
 
 def prepare_date(field: FieldSpec, values: list[str], params: dict) -> dict:
-    """Decide once per column: month-first or day-first, and whether bare numbers are Excel serial dates."""
+    """Decide once per column: month-first or day-first, and whether bare numbers are Excel serial dates.
+
+    `values` are the column's cleaned values from non-empty rows (may include empty strings); `params` are the
+    mapping's params for the field.
+    Returns the ctx dict later passed to normalize_date / parse_date:
+        order             "MDY" (default, US), "DMY" or "YMD"; params["date_order"] wins when given
+        format            params["input_format"] (a strptime pattern tried before the flexible parser) or None
+        serial            True when the column is (almost) all Excel serial numbers
+        evidence          vote counts {"month_first": n, "day_first": n} (informational)
+        placeholder_year  birthday/anniversary fields only: a year that stands for "unknown" (_placeholder_year)
+    The engine adds ctx["tz"] (the import's time zone) afterwards.
+
+    Why per column: "01/04/2026" alone could be January 4 or April 1. A column that also holds "15/03/2026" and
+    "28/02/2026" is clearly day-first, so the whole column is read that way; deciding value by value would mix
+    both orders in one file. Day-first needs strong evidence (at least 2 votes and more than 3× the month-first
+    votes) because the businesses are American:
+        ["15/03/2026", "28/02/2026", "01/04/2026"] → order "DMY" (so "01/04/2026" → April 1)
+        ["10/09/2026", "11/03/2026", "13/10/2026"] → order "MDY" (one odd value isn't enough)
+    """
+    # The first 2,000 distinct values are plenty to decide and keep huge files fast.
     sample = [v for v in dict.fromkeys(v for v in values if v)][:2000]
     ctx: dict[str, Any] = {"order": "MDY", "format": params.get("input_format") or None, "serial": False}
     requested = (params.get("date_order") or "auto").upper()
 
+    # Excel serial dates: 80%+ of the sample are bare numbers, all within Excel's date range (up to 2,958,465 =
+    # 9999-12-31) and 80%+ of them between 10,000 and 80,000 (1927–2119), where real dates fall. With this hint,
+    # short or decimal numbers in the column are read as serials too instead of as compact dates.
     numeric = [v for v in sample if _NUMERIC_ONLY_RE.match(v)]
     if sample and len(numeric) >= 0.8 * len(sample):
         nums = [float(v) for v in numeric]
@@ -416,6 +723,8 @@ def prepare_date(field: FieldSpec, values: list[str], params: dict) -> dict:
     # Evidence for day-first: values like 15/03/2026 (first part > 12) vs month-first 03/15/2026.
     mdy_votes = dmy_votes = 0
     for v in sample:
+        # Regex: two 1–2 digit numbers at the start separated by "/", "-", "." or a space, optionally followed by a
+        # 2–4 digit year: "15/03/2026", "03-15", "15.03.26". Only values where exactly one part is over 12 vote.
         m = re.match(r"^\s*(\d{1,2})[/\-. ](\d{1,2})(?:[/\-. ](\d{2,4}))?\b", v)
         if m:
             a, b = int(m.group(1)), int(m.group(2))
@@ -423,11 +732,14 @@ def prepare_date(field: FieldSpec, values: list[str], params: dict) -> dict:
                 dmy_votes += 1
             elif b > 12 >= a:
                 mdy_votes += 1
+    # An explicit order from the mapping wins; otherwise switch to day-first only on clear evidence. A value that
+    # only fits one way ("13/10/2026" in a US column) is still read correctly by itself (see dateparse._md).
     if requested in DATE_ORDERS:
         ctx["order"] = requested
     elif dmy_votes >= 2 and dmy_votes > 3 * mdy_votes:
         ctx["order"] = "DMY"  # US default unless the column clearly is day-first
     ctx["evidence"] = {"month_first": mdy_votes, "day_first": dmy_votes}
+    # Birthday/anniversary columns only: look for a year used to mean "unknown" (1970, 2000, the year it was typed).
     if field.type == "date" and field.no_year_value is not None:
         ctx["placeholder_year"] = _placeholder_year(sample, ctx)
     return ctx
@@ -438,6 +750,11 @@ def _placeholder_year(sample: list[str], ctx: dict) -> int | None:
 
     Real birthdays spread over decades. When one year covers most of the column (all 1970, all 2000, or the year
     someone typed "9/12" into Excel, which silently adds the current year), it's a placeholder, not a year.
+
+    Counted over the distinct values in `sample` that have a real year after 1900 (1900 and earlier already mean
+    "no year"). A year is the placeholder when it has at least half of 10+ such values, or 80% of 5–9 of them.
+    Example: "2025-09-12", "2025-03-14", "2025-07-04", "2025-12-25", "2025-01-02", "1985-06-01" → 2025, so those
+    five come out as MM/DD/1600 while "1985-06-01" stays 06/01/1985. Returns None when there is no such year.
     """
     years: dict[int, int] = {}
     for v in sample:
@@ -457,6 +774,14 @@ def _placeholder_year(sample: list[str], ctx: dict) -> int | None:
 
 
 def _dateutil_parse(value: str, dayfirst: bool) -> datetime | None:
+    """Fallback parse with python-dateutil for values our own parser doesn't know. Returns None if it can't.
+
+    dateutil fills missing parts from `default`, so "October" alone would silently become October 1, 2000. The
+    value is therefore parsed twice with different defaults (2000-01-01 and 2004-02-02); if year, month or day
+    differ between the two, that part was invented, and the value is refused. Any zone is dropped, not converted.
+        "October"                    → None
+        "2026-10-09 15:45:00 CEST"   → 2026-10-09 15:45 (zone name dateparse doesn't know; kept as written)
+    """
     try:
         a = du_parser.parse(value, dayfirst=dayfirst, default=datetime(2000, 1, 1))
         b = du_parser.parse(value, dayfirst=dayfirst, default=datetime(2004, 2, 2))
@@ -468,7 +793,19 @@ def _dateutil_parse(value: str, dayfirst: bool) -> datetime | None:
 
 
 def parse_date(value: str, ctx: dict, allow_no_year: bool = False) -> tuple[datetime | None, str | None]:
+    """Parse a date/datetime value with the column context. Returns (naive datetime, None) or (None, reason).
+
+    Attempts, in order:
+      1. ctx["format"] (params["input_format"]) with datetime.strptime, when the mapping gives one.
+      2. dateparse.parse with the column's order, Excel-serial hint and the import's zone (ctx["tz"], default
+         America/New_York). Times that carry a zone come back converted to that zone.
+      3. dateutil (_dateutil_parse), only when dateparse failed on an unknown word or an unrecognized layout.
+    `allow_no_year` lets month/day-only values through, with year dateparse.NO_YEAR (birthday-type fields).
+    Errors are dateparse's messages ("no year", "not a real calendar date", "unrecognized word 'asap'", ...) or
+    "not a date" for any unexpected exception, so one odd value can never stop an import.
+    """
     fmt = ctx.get("format")
+    # An explicit input format is tried first; a value that doesn't match it still gets the flexible parser.
     if fmt:
         try:
             return datetime.strptime(value.strip(), fmt), None
@@ -482,6 +819,7 @@ def parse_date(value: str, ctx: dict, allow_no_year: bool = False) -> tuple[date
         msg = str(exc)
     except (ValueError, OverflowError, TypeError):  # never let one odd value stop an import
         return None, "not a date"
+    # Only these two failures mean "layout not understood"; others ("no year", "invalid time") are final.
     if msg.startswith("unrecognized word") or msg == "unrecognized date":
         dt = _dateutil_parse(value, dayfirst=ctx.get("order") == "DMY")
         if dt is not None:
@@ -490,18 +828,43 @@ def parse_date(value: str, ctx: dict, allow_no_year: bool = False) -> tuple[date
 
 
 def _strftime_year(dt: datetime, fmt: str, year_text: str) -> str:
-    """strftime with a literal year (portable for years like 1600 and for month/day-only values)."""
+    """strftime with a literal year (portable for years like 1600 and for month/day-only values).
+
+    `dt` supplies month, day and time; `year_text` replaces %Y, and its last two digits replace %y:
+        (Sep 12, "%m/%d/%Y", "1600")               → "09/12/1600"
+        (Feb 29, "%Y-%m-%d (%y) 100%%", "1600")    → "1600-02-29 (00) 100%"
+    Why not dt.replace(year=1600).strftime(...): the no-year marker is year 4, and strftime of years below 1000
+    differs by platform (some zero-pad, some don't). Writing the year as text avoids that.
+    """
     safe = dt.replace(year=2000)  # leap year, so Feb 29 survives
     # The year goes into the format as plain text ("%m/%d/1600"); strftime copies it as-is. (A control-character
     # marker would be cut off by macOS's strftime, which stops at a NUL byte — that gave "10/18/".)
+    # Regex: "%%", "%Y" or "%y". "%%" is matched (and written back as "%%") so a literal percent sign followed by Y
+    # isn't taken for the year directive: "100%%Y" still prints "100%Y".
     literal = re.sub(r"%(%|Y|y)", lambda m: {"%": "%%", "Y": year_text, "y": year_text[-2:]}[m.group(1)], fmt)
     return safe.strftime(literal)
 
 
 def normalize_date(value: str, field: FieldSpec, params: dict, ctx: dict) -> tuple[str, str | None]:
+    """Normalizer for "date" and "datetime" fields. Returns (formatted, None), ("", None) or ("", reason).
+
+    Output format: field.format, else "%Y-%m-%d %H:%M:%S" (datetime) or "%Y-%m-%d" (date). In the real schema,
+    activity columns use "%m/%d/%Y %I:%M %p" ("2026-10-09T19:45:00Z" → "10/09/2026 03:45 PM" for a New York
+    import) and birthday/anniversary use "%m/%d/%Y" with no_year_value 1600.
+    Rules, in order:
+      - "0000-00-00"-style values are blank, not errors.
+      - Month+day without a year is accepted only when the output has no year or the field has a no_year_value.
+      - The no-year value replaces the year when the value has none or (no_year_value fields only) the year is
+        1900 or earlier, is the column's placeholder year, or the date is within the last two years or in the
+        future, because Excel stores "9/12" typed into a cell with the year it was typed:
+        "Sep 12" → "09/12/1600", "01/15/1900" → "01/15/1600", "12/25/2099" → "12/25/1600".
+      - Any other year must be 1900–2100, else "year N is out of range".
+    """
     out_fmt = field.format or ("%Y-%m-%d %H:%M:%S" if field.type == "datetime" else "%Y-%m-%d")
+    # Regex: see _ZERO_DATE_RE ("0000-00-00", "00/00/0000 00:00").
     if _ZERO_DATE_RE.match(value.strip()):
         return "", None  # "0000-00-00" style placeholders mean no date
+    # Month/day-only values are allowed when the output has no year at all, or the field has a no-year value.
     has_year = "%Y" in out_fmt or "%y" in out_fmt
     no_year_value = field.no_year_value if field.type == "date" else None
     allow_no_year = not has_year or no_year_value is not None
@@ -514,7 +877,9 @@ def normalize_date(value: str, field: FieldSpec, params: dict, ctx: dict) -> tup
     no_year = dt.year == _NO_YEAR or (no_year_value is not None and (
         dt.year <= 1900 or dt.year == ctx.get("placeholder_year") or dt.date() > date.today() - timedelta(days=730)))
     if no_year:
+        # Without a no_year_value the output format has no year (see allow_no_year), so "2000" never shows.
         return _strftime_year(dt, out_fmt, str(no_year_value) if no_year_value is not None else "2000"), None
+    # Catches typos such as "10/09/0226" or "3026" in activity columns.
     if not (MIN_YEAR <= dt.year <= MAX_YEAR):
         return "", f"year {dt.year} is out of range"
     return dt.strftime(out_fmt), None
@@ -524,9 +889,20 @@ def normalize_date(value: str, field: FieldSpec, params: dict, ctx: dict) -> tup
 # Email
 # ---------------------------------------------------------------------------
 
+# Cached (200,000 entries): addresses repeat across rows and full RFC syntax validation is comparatively slow.
 @lru_cache(maxsize=200_000)
 def _parse_email(value: str) -> tuple[str, str | None]:
+    """Validate and normalize one email address. Returns (address, None) or ("", "invalid email (<reason>)").
+
+    Accepts "<John@Gmail.com>", "mailto:a@b.com" and cells with several addresses separated by ";", "," or
+    spaces (the first one is used). Syntax only, no DNS/deliverability check, so it is fast and works offline.
+    The address is lower-cased.
+        "JOHN@GMAIL.COM" → ("john@gmail.com", None)
+        "a@b"            → ("", "invalid email (the part after the @-sign is not valid)")
+    The reason is the first sentence of email_validator's message, lower-cased.
+    """
     v = value.strip().strip("<>").removeprefix("mailto:").strip()
+    # Several addresses in one cell ("a@b.com; c@d.com" or "a@b.com, c@d.com"): keep the first.
     v = re.split(r"[;,\s]+", v)[0] if v else v
     try:
         info = validate_email(v, check_deliverability=False)
@@ -536,6 +912,7 @@ def _parse_email(value: str) -> tuple[str, str | None]:
 
 
 def normalize_email(value: str, field: FieldSpec, params: dict, ctx: dict) -> tuple[str, str | None]:
+    """Normalizer for "email" fields; see _parse_email (cached). field, params and ctx aren't needed."""
     return _parse_email(value)
 
 
@@ -543,11 +920,23 @@ def normalize_email(value: str, field: FieldSpec, params: dict, ctx: dict) -> tu
 # ZIP / State
 # ---------------------------------------------------------------------------
 
+# 5 digits, optionally followed by 4 more (ZIP+4) after "-", a space or nothing: "07030", "07030-1234", "070301234".
 _ZIP_RE = re.compile(r"^(\d{5})(?:[-\s]?(\d{4}))?$")
 
 
 def normalize_zip(value: str, field: FieldSpec, params: dict, ctx: dict) -> tuple[str, str | None]:
+    """Normalizer for "zip" fields: US ZIP codes, restoring leading zeros that spreadsheets drop.
+
+    Output: 5 digits, or "12345-6789" when field.format is "zip5_4" and the value has the +4 part.
+        "7030"       → "07030"       NJ / New England ZIPs start with 0; Excel stores them as numbers
+        "11801.0"    → "11801"       float artifact
+        "07030-1234" → "07030"       format "zip5" (default)
+        "70301234"   → "07030-1234"  format "zip5_4"
+        "ABCDE"      → ("", "invalid ZIP code")
+    """
+    # Any error from _fix_numeric_artifacts is ignored: a mangled value simply fails the ZIP pattern below.
     v, _ = _fix_numeric_artifacts(value.strip())
+    # Spaces inside an all-numeric value are dropped ("07030 1234" → "070301234"); text with letters is left alone.
     v = v.replace(" ", "") if re.fullmatch(r"[\d\s-]+", v) else v
     if re.fullmatch(r"\d{3,4}", v):
         v = v.zfill(5)  # Excel dropped leading zeros (NJ, New England)
@@ -562,6 +951,8 @@ def normalize_zip(value: str, field: FieldSpec, params: dict, ctx: dict) -> tupl
     return zip5, None
 
 
+# Lower-cased full names (plus DC and the territories) and common abbreviations → USPS 2-letter codes. Keys are
+# matched after normalize_state turns dots and spaces into single spaces ("N.Y." → "n y", "Penna." → "penna").
 US_STATES = {
     "alabama": "AL", "alaska": "AK", "arizona": "AZ", "arkansas": "AR", "california": "CA", "colorado": "CO",
     "connecticut": "CT", "delaware": "DE", "district of columbia": "DC", "washington dc": "DC",
@@ -579,13 +970,22 @@ US_STATES = {
     "penn": "PA", "penna": "PA", "mass": "MA", "calif": "CA", "conn": "CT", "fla": "FL", "ill": "IL",
     "wash": "WA", "tex": "TX", "n y": "NY", "n j": "NJ", "nyc": "NY",
 }
+# The valid 2-letter output codes ("NY", "PR", ...); a value that already is one is accepted as is.
 STATE_CODES = set(US_STATES.values())
 
 
 def normalize_state(value: str, field: FieldSpec, params: dict, ctx: dict) -> tuple[str, str | None]:
+    """Normalizer for "state" fields: US state/territory name or abbreviation → 2-letter USPS code.
+
+        "NY", "ny", "New York", "N.Y.", "NYC" → "NY";  "Washington D.C." → "DC";  "Penna" → "PA"
+        "Atlantis" → ("", "not a US state")
+    Also used by looks_like_state with field=None (the field isn't read here).
+    """
+    # Dots and whitespace → single spaces: "N.Y." → "n y", "Washington  D.C." → "washington d c".
     v = re.sub(r"[.\s]+", " ", value.strip().lower()).strip()
     if v.upper() in STATE_CODES:
         return v.upper(), None
+    # "n y" → "ny".
     compact = v.replace(" ", "")
     if len(compact) == 2 and compact.upper() in STATE_CODES:
         return compact.upper(), None
@@ -599,6 +999,12 @@ def normalize_state(value: str, field: FieldSpec, params: dict, ctx: dict) -> tu
 # ---------------------------------------------------------------------------
 
 def _to_decimal(value: str) -> Decimal | None:
+    """Read a number written the way spreadsheets and people write money and counts. Returns None if it isn't one.
+
+    Thousands commas, $ € £ and % signs are removed; accounting negatives in parentheses become negative:
+        "1,200" → 1200, "$1,200.50" → 1200.50, "(1,200.50)" → -1200.50, "15%" → 15 (not 0.15), "abc" → None.
+    A comma is always read as a thousands separator, so a European "1,5" reads as 15.
+    """
     v = value.strip().replace(",", "").replace("$", "").replace("€", "").replace("£", "").replace("%", "")
     neg = v.startswith("(") and v.endswith(")")
     v = v.strip("()").strip()
@@ -610,6 +1016,7 @@ def _to_decimal(value: str) -> Decimal | None:
 
 
 def normalize_integer(value: str, field: FieldSpec, params: dict, ctx: dict) -> tuple[str, str | None]:
+    """Normalizer for "integer" fields: "1,200" → "1200", "1200.00" → "1200", "1.5" → ("", "not a whole number")."""
     d = _to_decimal(value)
     if d is None or d != d.to_integral_value():
         return "", "not a whole number"
@@ -617,17 +1024,29 @@ def normalize_integer(value: str, field: FieldSpec, params: dict, ctx: dict) -> 
 
 
 def normalize_decimal(value: str, field: FieldSpec, params: dict, ctx: dict) -> tuple[str, str | None]:
+    """Normalizer for "decimal" fields: "$1,200.50" → "1200.5", "abc" → ("", "not a number").
+
+    Trailing zeros are dropped (Decimal.normalize) and the result is written in plain notation ("f"), because
+    normalize() alone would turn "1200" into "1.2E+3".
+    """
     d = _to_decimal(value)
     if d is None:
         return "", "not a number"
     return format(d.normalize(), "f"), None
 
 
+# Words (lower-cased) meaning yes / no in opt-in, status and checkbox columns ("x" and "✓" are ticked boxes).
 TRUE_TOKENS = {"y", "yes", "true", "t", "1", "x", "on", "opted in", "opt in", "optin", "subscribed", "active", "✓"}
 FALSE_TOKENS = {"n", "no", "false", "f", "0", "off", "opted out", "opt out", "optout", "unsubscribed", "inactive"}
 
 
 def normalize_boolean(value: str, field: FieldSpec, params: dict, ctx: dict) -> tuple[str, str | None]:
+    """Normalizer for "boolean" fields: yes/no words → field.true_value / field.false_value.
+
+    "yes", "Y", "1", "x", "Subscribed" → true_value; "no", "0", "Unsubscribed", "opted out" → false_value;
+    anything else → ("", "not a yes/no value"). The real schema's consent column never gets here: it is
+    fixed_blank and always written empty.
+    """
     v = value.strip().lower()
     if v in TRUE_TOKENS:
         return field.true_value, None
@@ -637,6 +1056,11 @@ def normalize_boolean(value: str, field: FieldSpec, params: dict, ctx: dict) -> 
 
 
 def normalize_enum(value: str, field: FieldSpec, params: dict, ctx: dict) -> tuple[str, str | None]:
+    """Normalizer for "enum" fields: case-insensitive match against field.allowed_values, output in their spelling.
+
+    With allowed ["Gold", "Silver"]: "gold" → "Gold"; "bronze" → ("", "not one of the allowed values (Gold,
+    Silver)"). At most 8 allowed values are listed in the message.
+    """
     lookup = {a.lower(): a for a in field.allowed_values}
     hit = lookup.get(value.strip().lower())
     if hit is None:
@@ -645,6 +1069,11 @@ def normalize_enum(value: str, field: FieldSpec, params: dict, ctx: dict) -> tup
 
 
 def normalize_string(value: str, field: FieldSpec, params: dict, ctx: dict) -> tuple[str, str | None]:
+    """Normalizer for "string" fields: re-case (field.case, see apply_case) and enforce field.max_length.
+
+    Too long → cut and right-trimmed when field.truncate, else ("", "longer than N characters").
+    With case="name", max_length=5, truncate=True: "MCDONALD" → "McDon".
+    """
     v = apply_case(value, field.case)
     if field.max_length and len(v) > field.max_length:
         if field.truncate:
@@ -653,6 +1082,8 @@ def normalize_string(value: str, field: FieldSpec, params: dict, ctx: dict) -> t
     return v, None
 
 
+# Field type (FieldSpec.type) → normalizer. Every normalizer takes (value, field, params, ctx), gets a value that
+# clean_text already cleaned and that isn't empty, and returns (output, error or None).
 NORMALIZERS = {
     "string": normalize_string,
     "phone": normalize_phone,
@@ -669,6 +1100,13 @@ NORMALIZERS = {
 
 
 def prepare(field: FieldSpec, values: list[str], params: dict) -> dict:
+    """Build the column context for one output field before its values are normalized (see the module docstring).
+
+    Called by the engine once per field with the column's cleaned values from non-empty rows (for "one row per phone
+    number" mappings, the values of all its source columns together). Dates → prepare_date; phones →
+    prepare_phone; other types need no context ({}). The engine then adds ctx["tz"] and passes the same dict to
+    every normalize() call for the column, which is how normalizers can report back (ctx["repairs"]).
+    """
     if field.type in ("date", "datetime"):
         return prepare_date(field, values, params)
     if field.type == "phone":
@@ -677,7 +1115,16 @@ def prepare(field: FieldSpec, values: list[str], params: dict) -> dict:
 
 
 def normalize(value: str, field: FieldSpec, params: dict, ctx: dict) -> tuple[str, str | None]:
-    """Return (output_value, error). Empty input returns ("", None); required-ness is checked by the engine."""
+    """Return (output_value, error). Empty input returns ("", None); required-ness is checked by the engine.
+
+    The single per-value entry point: cleans the value (clean_text), dispatches on field.type through NORMALIZERS,
+    then enforces field.max_length for non-string types (strings handle it themselves, with optional truncation).
+    `params` are the mapping's params for the field; `ctx` comes from prepare() for the same column.
+    For the real phone_number field:
+        "(516) 555-0100" → ("5165550100", None)
+        "N/A"            → ("", None)       the engine then reports the required value as missing
+        "555-1234"       → ("", "missing area code (only 7 digits)")
+    """
     v = clean_text(value)
     if not v:
         return "", None
@@ -692,6 +1139,13 @@ def normalize(value: str, field: FieldSpec, params: dict, ctx: dict) -> tuple[st
 # ---------------------------------------------------------------------------
 
 def looks_like_phone(v: str) -> bool:
+    """Detector: does this look like ONE valid phone number? Used to score columns when profiling/auto-mapping.
+
+    Stricter than the normalizer on purpose: 10–11 digits, no letters (besides "ext"/"x") and no "@", and it must
+    parse as a valid US or Canadian number, so ID, order-number or ZIP+4 columns don't look like phones.
+        "516-555-0100" → True; "416-555-0123" → True (Canada counts for detection); "Cell 516-555-0100" → False.
+    Uses the cached _parse_phone, so profiling and conversion share work.
+    """
     digits = re.sub(r"\D", "", v)
     if not (10 <= len(digits) <= 11):
         return False
@@ -701,18 +1155,29 @@ def looks_like_phone(v: str) -> bool:
 
 
 def looks_like_email(v: str) -> bool:
+    """Detector: something@something.tld with a 2+ letter TLD and no spaces. A fast regex, not full validation."""
+    # Regex: non-"@"/space characters, "@", more of them, then "." and 2+ letters at the end: "a@b.com", not "a@b".
     return bool(re.match(r"^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$", v.strip()))
 
 
 def looks_like_zip(v: str) -> bool:
+    """Detector: "11801", "07030-1234", or 3–4 digits (a ZIP that lost its leading zeros, "7030")."""
+    # Regex 1: 5 digits with an optional "-" and 4 more; regex 2: 3 or 4 digits only.
     return bool(re.fullmatch(r"\d{5}(-\d{4})?", v.strip())) or bool(re.fullmatch(r"\d{3,4}", v.strip()))
 
 
 def looks_like_state(v: str) -> bool:
+    """Detector: a US state/territory name or code (reuses normalize_state; the field argument isn't used)."""
     return normalize_state(v, None, {}, {})[1] is None  # type: ignore[arg-type]
 
 
 def looks_like_date(v: str) -> bool:
+    """Detector: a value dateparse can read as a date with a plausible year (or month and day only).
+
+    Bare numbers are excluded (otherwise ID, ZIP and amount columns would look like dates: "46304", "20261009"),
+    and so are values without any digit ("today", "October"). "10/09/2026" and "Sep 12" → True; "46304" → False.
+    Any parse error counts as False: profiling must never stop on an odd value ("+1 +51694619661").
+    """
     v = v.strip()
     if _NUMERIC_ONLY_RE.match(v) or not re.search(r"\d", v):
         return False
