@@ -13,12 +13,36 @@
 #   - birthday / anniversary: MM/DD/YYYY; month + day with no year → year 1600.
 #
 # Field attributes are documented in README.md ("Setting the target schema").
+#
+# How this file is used
+#   - Every part of the tool reads it: column matching (header + synonyms), the mapping grid, validation, the
+#     output file (headers, order, formats), the mistake checks and the instructions given to Claude.
+#   - Changing it needs no code change. In Docker the schemas/ folder is mounted, so edits are picked up on the
+#     next page load; with run_local.sh just reload the page.
+#   - Each import stores a copy of the schema it used, so old imports keep showing what they were converted with.
+#   - Run the tests after editing (python -m pytest -q): tests/test_real_schema.py pins the expected output.
+#
+# Field attributes used below
+#   name           internal id (used in templates, dedupe keys and the code); don't rename without care —
+#                  saved templates refer to fields by name
+#   header         exact column header written to the output file (order of the list = column order)
+#   type           phone | datetime | date | string | email | zip | state | integer | decimal | boolean | enum
+#   required       true → a row without a valid value is rejected (a "bad row")
+#   format         phone: digits10 = 10 digits; dates/times: a strftime pattern
+#   countries      phone: country codes that are accepted (anything else is rejected or repaired as a typo)
+#   no_year_value  date: the year written when the source has month + day only (or a placeholder year)
+#   fixed_blank    always empty in the output, whatever the file or mapping says; locked in the UI and for Claude
+#   description    shown in the app and given to Claude to explain the field
+#   synonyms       other header names that mean this field (the more, the better automatic matching)
 # ---------------------------------------------------------------------------
 
+# Shown in the app ("Target format: Generic import format v1.0") and stored with every import.
 name: Generic import format
 version: "1.0"
 description: Consumer import file — phone number, activity timestamps, birthday and anniversary.
 
+# How the converted file is written: a plain comma-separated UTF-8 CSV with a header row and "\n" line endings.
+# format can also be xlsx; quote_all: true puts every value in quotes.
 output:
   format: csv
   delimiter: ","
@@ -33,7 +57,9 @@ dedupe:
   keys: ["*"]
   keep: first
 
+# The output columns, in order.
 fields:
+  # 10 digits, e.g. 5165550100. Several phone columns in a file → one row per different number.
   - name: phone_number
     header: phone_number
     type: phone
@@ -46,12 +72,16 @@ fields:
                telephone, tel, contact number, sms number, primary phone, customer phone, guest phone,
                "phone #", "cell #", "mobile #", phone1, msisdn]
 
+  # Locked blank: consent can only come from the consumer, never from a file, a rule or Claude.
   - name: consent
     header: consent
     type: string
     fixed_blank: true
     description: Always blank. A blank consent never changes anyone's consent.
 
+  # Activity times: MM/DD/YYYY HH:MM AM/PM. Times that include a zone (Z, UTC, EST, +00:00) or Unix timestamps
+  # are converted to the client time zone chosen on the New import page; times without a zone are kept as written.
+  # A date without a time becomes 12:00 AM.
   - name: calls_last
     header: calls_last
     type: datetime
@@ -100,6 +130,8 @@ fields:
     description: When the consumer last played spin-to-win
     synonyms: [last spin, last spin date, spin date, last wheel spin, spin to win, last game played, spin last]
 
+  # Birthday / anniversary: MM/DD/YYYY. No real year (09/12, Sep 12, 0000/XXXX years, a year shared by most of the
+  # column, recent or future years) → year 1600, e.g. 09/12/1600. Month and day in separate columns are combined.
   - name: birthday
     header: birthday
     type: date
