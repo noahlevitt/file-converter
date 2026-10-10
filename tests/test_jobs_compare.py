@@ -1,3 +1,11 @@
+"""Background import jobs (run_import, ImportRunner), file retention, and the before/after comparison view.
+
+Imports run in the background of a shared web server. A job that fails, is cancelled or is cut off by a restart
+must say so, or someone assumes a customer list went in when it didn't. Old customer files are purged while the
+history record stays. The comparison is what a person checks before uploading, so it must line every converted row
+up with its file row (including extra rows for second numbers), and it must escape whatever text the file contains.
+"""
+
 import io
 import time
 
@@ -14,6 +22,11 @@ from tests.conftest import read_sample
 
 
 def make_import(store, samples, schema, name="pos_guest_export.csv", **kw):
+    """Queue an import of a sample file the way the upload screen does, and return its id.
+
+    The raw bytes, schema, auto-mapping and the sheet/header row the reader picked are stored with the record,
+    so the background job can re-read the file exactly as the user saw it.
+    """
     rr = read_sample(samples, name, **kw)
     m = auto_map(schema, profile_columns(rr.df))
     data = (samples / name).read_bytes()
@@ -23,6 +36,10 @@ def make_import(store, samples, schema, name="pos_guest_export.csv", **kw):
 
 
 def test_run_import_writes_everything(tmp_path, samples, schema):
+    """A completed job records its status, progress, counts and timings and stores every file the app offers.
+
+    The summary keeps the failed values so the history page can show what went wrong without re-running.
+    """
     st = Store(tmp_path / "c.db")
     iid = make_import(st, samples, schema)
     rec = run_import(st, iid)
@@ -32,10 +49,12 @@ def test_run_import_writes_everything(tmp_path, samples, schema):
     for kind in ("output", "rejects", "summary", "audit", "source_table"):
         assert st.file_path(rec, kind) is not None, kind
     assert "bad row" in rec.summary["message"]
+    # "555-1234" is the POS sample's 7-digit phone with no area code.
     assert rec.summary["failed_values"]["phone"] == ["555-1234"]
 
 
 def test_xlsx_import_with_sheet(tmp_path, samples, schema):
+    """The chosen Excel sheet is stored with the import and used by the job, not the workbook's first sheet."""
     st = Store(tmp_path / "c.db")
     iid = make_import(st, samples, schema, "loyalty_members.xlsx", sheet="Members")
     rec = run_import(st, iid)
@@ -43,6 +62,11 @@ def test_xlsx_import_with_sheet(tmp_path, samples, schema):
 
 
 def test_failure_and_cancel_and_interrupt(tmp_path, samples, schema):
+    """Three ways a job ends without completing, each recorded so nobody assumes the list was imported.
+
+    An unreadable stored file fails with an error, a cancel requested before the job runs cancels it, and a job
+    still queued when the server restarts is marked interrupted when the new runner starts.
+    """
     st = Store(tmp_path / "c.db")
     iid = make_import(st, samples, schema)
     st.source_path(st.get_import(iid)).write_bytes(b"")  # corrupt the stored file
@@ -60,6 +84,10 @@ def test_failure_and_cancel_and_interrupt(tmp_path, samples, schema):
 
 
 def test_background_runner_progress(tmp_path, samples, schema):
+    """Several imports submitted to the thread pool all complete.
+
+    The loop polls with a 20-second deadline, so a stuck worker fails the test instead of hanging the suite.
+    """
     st = Store(tmp_path / "c.db")
     runner = ImportRunner(st, workers=2)
     ids = [make_import(st, samples, schema) for _ in range(3)]
@@ -73,9 +101,11 @@ def test_background_runner_progress(tmp_path, samples, schema):
 
 
 def test_purge_keeps_record(tmp_path, samples, schema):
+    """Retention: files of old finished imports are deleted (customer data isn't kept forever), the record stays."""
     st = Store(tmp_path / "c.db")
     iid = make_import(st, samples, schema)
     run_import(st, iid)
+    # Backdate the finish time so the import is outside the 30-day retention window.
     with st._conn() as con:
         con.execute("UPDATE imports SET finished_at='2000-01-01T00:00:00+00:00' WHERE id=?", (iid,))
     assert st.purge_files(30) == 1
@@ -85,6 +115,12 @@ def test_purge_keeps_record(tmp_path, samples, schema):
 
 
 def test_comparison(tmp_path, samples, schema):
+    """The comparison data and views built from a finished import agree with each other and with the file.
+
+    Covers source rows lined up with converted rows, status counts and filters (including search by name and by
+    file row number), the HTML table (escaped, script-free, extra rows and phone origin marked), the per-field
+    change summary and the Excel export.
+    """
     st = Store(tmp_path / "c.db")
     rec = run_import(st, make_import(st, samples, schema))
     folder = st.files_root / str(rec.id)
@@ -100,6 +136,7 @@ def test_comparison(tmp_path, samples, schema):
     counts = status_counts(audit, schema)
     assert counts["rejected"] == 2 and counts["duplicate"] == 1 and counts["empty"] == 1
     assert set(counts) == set(FILTERS)
+    # filter_rows returns positions in the audit table; "#14" searches by file row number (row 14 in Excel).
     assert filter_rows(audit, src, schema, "rejected") == [7, 10]
     assert filter_rows(audit, src, schema, "all", "patel") == [8]
     assert filter_rows(audit, src, schema, "all", "#14") == [10]
