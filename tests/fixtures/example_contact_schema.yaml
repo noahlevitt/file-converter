@@ -1,8 +1,9 @@
 # ---------------------------------------------------------------------------
 # EXAMPLE CONTACT SCHEMA — used only by the generic tests (not the real import format)
-# Replace the fields below with the real import format once it is provided.
-# Every part of the tool (auto-mapping, Claude prompts, validation, output file)
-# reads from this file; no code changes are needed when it changes.
+# The real import format is schemas/target_schema.yaml. This richer example exercises the
+# features the real format doesn't use (names, addresses, state, ZIP, email, E.164
+# phones, a dedupe rule on phone + signup date), so they keep working if a future
+# import format needs them. Loaded by the `schema` fixture in tests/conftest.py.
 #
 # Field attributes:
 #   name          internal id (snake_case) — used in templates and dedupe keys
