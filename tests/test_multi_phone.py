@@ -1,4 +1,10 @@
-"""Files with several phone columns (Toast: phone, phone2, phone3, phone4) and phone-setting columns."""
+"""Files with several phone columns (Toast: phone, phone2, phone3, phone4) and phone-setting columns.
+
+Every phone number is a separate text recipient. Each different number must become its own row (or the second
+number never gets the restaurant's texts), the same number written twice must not be imported twice, and
+"phone…MarketingPreference" style columns next to the numbers must never be read as numbers or mapped to any
+field (they count as consent columns, which are never imported).
+"""
 
 import pandas as pd
 
@@ -10,12 +16,18 @@ from converter.output import write_summary
 
 
 def toast_like():
+    """A Toast-style guest export with four phone columns and two phone marketing-preference columns.
+
+    Each guest is a different case: Ana has one number in two formats plus another, Ben has two numbers and a junk
+    '123', Cy has no number, Di only a broken one ('555-12'), and Ed has one.
+    """
     return pd.DataFrame({
         "firstName": ["Ana", "Ben", "Cy", "Di", "Ed"],
         "phone": ["201-555-0111", "2015550112", "", "", "201-555-0150"],
         "phone2": ["(201) 555-0111", "2015550198", "", "555-12", ""],
         "phone3": ["2015550177", "123", "", "", ""],
         "phone4": ["", "", "", "", ""],
+        # Header contains "phone" but the values are true/false opt-in flags.
         "phoneMarketingPreference": ["true", "false", "", "true", ""],
         "phone4MarketingPreference": ["", "", "", "", ""],
         "lastVisitDate": ["10/01/2026", "10/02/2026", "10/03/2026", "10/04/2026", "10/05/2026"],
@@ -23,6 +35,11 @@ def toast_like():
 
 
 def test_phone_setting_columns_are_not_phone_numbers(real_schema):
+    """All four phone columns are mapped as one row per number; preference and other phone-setting columns are not.
+
+    Preference columns are recognised as consent columns (which are never imported), and headers such as phone
+    type, verified flag, extension and SMS opt-in are not taken for phone numbers.
+    """
     m = auto_map(real_schema, profile_columns(toast_like()))
     phone = m.get("phone_number")
     assert phone.transform == "each_row" and phone.sources == ["phone", "phone2", "phone3", "phone4"]
@@ -33,6 +50,11 @@ def test_phone_setting_columns_are_not_phone_numbers(real_schema):
 
 
 def test_one_row_per_different_number(real_schema):
+    """Each different number becomes its own row with the guest's other data copied.
+
+    The same number in two formats counts once, an invalid extra number is skipped and counted, and a guest with no
+    valid number is a bad row. Output, counts, flag message, rejects, audit and summary must all agree.
+    """
     df = toast_like()
     m = auto_map(real_schema, profile_columns(df))
     res = convert(df, real_schema, m)
@@ -49,6 +71,7 @@ def test_one_row_per_different_number(real_schema):
     assert "too few digits" in res.rejects.loc[res.rejects["firstName"] == "Di", "Reason"].iloc[0]
     assert res.rejects.columns[3] == "phone_number"  # which number of the file row it was
 
+    # _row is the file row number (the header is row 1); _extra marks the rows added for a guest's 2nd number.
     a = res.audit
     assert a["_row"].tolist() == [2, 2, 3, 3, 4, 5, 6] and a["_extra"].tolist() == [False, True, False, True,
                                                                                    False, False, False]
@@ -58,6 +81,7 @@ def test_one_row_per_different_number(real_schema):
 
 
 def test_same_number_in_two_columns_is_one_row(real_schema):
+    """The same number in two columns (written differently) gives one row: no extra row and no duplicate."""
     df = pd.DataFrame({"Mobile": ["2015550111"], "Home Phone": ["+1 (201) 555-0111"]})
     m = Mapping(fields={"phone_number": FieldMapping(sources=["Mobile", "Home Phone"], transform="each_row")})
     res = convert(df, real_schema, m)
@@ -65,6 +89,7 @@ def test_same_number_in_two_columns_is_one_row(real_schema):
 
 
 def test_phones_always_one_row_per_number_even_from_old_templates(real_schema):
+    """An old template using 'First non-empty' for the phone is upgraded, so it can't drop customers' 2nd numbers."""
     df = toast_like()
     # A template saved before this rule used 'First non-empty' on the phone field: it is upgraded.
     m = Mapping(fields={"phone_number": FieldMapping(sources=["phone", "phone2", "phone3"], transform="coalesce")})
@@ -74,6 +99,10 @@ def test_phones_always_one_row_per_number_even_from_old_templates(real_schema):
 
 
 def test_first_non_empty_cannot_be_picked_for_phones(real_schema):
+    """The editor refuses 'First non-empty' for the phone and 'One row per phone number' for any other field.
+
+    Each refusal explains why, and the other field falls back to first non-empty.
+    """
     m = Mapping(fields={"phone_number": FieldMapping(sources=["phone", "phone2"], transform="each_row")})
     m2, err = apply_row_edit(real_schema, m, "phone_number", {"How": "First non-empty"}, "How", "Source column(s)",
                              "Option")
