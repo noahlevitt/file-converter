@@ -1,15 +1,27 @@
+# Streamlit settings for the web app (read automatically when Streamlit starts from the project folder).
+# Reference: https://docs.streamlit.io/develop/api-reference/configuration/config.toml
+
 [server]
+# Largest file that can be uploaded on the New import page.
 maxUploadSize = 200          # MB
+# Don't try to open a browser window on the server.
 headless = true
+# Protect form posts and uploads against cross-site request forgery.
 enableXsrfProtection = true
 
 [browser]
+# Don't send usage statistics to Streamlit.
 gatherUsageStats = false
 
 [theme]
+# Blue accent (buttons, links) on a light background.
 primaryColor = "#2563EB"
 base = "light"
 
 [client]
+# Hide developer menu items from regular users.
 toolbarMode = "minimal"
+# Legacy value false = "stacktrace" in Streamlit 1.65: on an error users still see the exception type and
+# traceback, but not the exception message. Full details always go to the server log (docker compose logs / the
+# terminal). Use "none" to hide errors from users completely.
 showErrorDetails = false
