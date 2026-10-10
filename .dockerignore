@@ -1,3 +1,5 @@
+# Kept out of the Docker image: secrets (.env is passed at run time instead), the database and import files
+# (data/ is mounted as a volume), test sample files, caches and git history.
 .env
 data/
 sample_data/
