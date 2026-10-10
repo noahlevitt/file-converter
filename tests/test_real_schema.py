@@ -1,4 +1,10 @@
-"""Tests against the real target format (schemas/target_schema.yaml — generic import format)."""
+"""Tests against the real target format (schemas/target_schema.yaml — generic import format).
+
+This is exactly what the import system receives, so it is pinned down tightly: header names and order, 10-digit
+US phone numbers, activity times as MM/DD/YYYY HH:MM AM/PM in the import's time zone, and 1600 for birthdays and
+anniversaries without a year. Consent is always blank: it can only come from the customer, so no file column,
+rule, editor choice or Claude suggestion may ever fill it.
+"""
 
 import json
 from types import SimpleNamespace as NS
@@ -14,28 +20,33 @@ from converter.mapping import FieldMapping, Mapping, profile_columns
 from converter.output import write_output
 from tests.conftest import read_sample
 
+# The import's header row, in the required order. HEADERS[2:8] are the six activity timestamp columns.
 HEADERS = ["phone_number", "consent", "calls_last", "transactions_last", "last_contacted", "in_sms_last",
            "redemptions_last", "spin_last", "birthday", "anniversary"]
 
 
 def norm(schema, field, value):
+    """Normalize one value into a real-schema field (with only itself as column context); return (output, error)."""
     f = schema.field(field)
     return N.normalize(value, f, {}, N.prepare(f, [value], {}))
 
 
 def run(samples, schema, name, **kw):
+    """Read, auto-map and convert a sample file, keeping file row numbers; return (read, mapping, result)."""
     rr = read_sample(samples, name, **kw)
     m = auto_map(schema, profile_columns(rr.df))
     return rr, m, convert(rr.df, schema, m, [rr.excel_row_number(i) for i in range(len(rr.df))])
 
 
 def test_headers_exact_and_in_order(real_schema):
+    """The output header row matches the import format exactly and in order, even when there are no rows."""
     assert [f.header for f in real_schema.fields] == HEADERS
     out = write_output(pd.DataFrame(columns=HEADERS), real_schema).decode()
     assert out == ",".join(HEADERS) + "\n"  # every header kept even with no rows
 
 
 def test_phone_is_ten_digits(real_schema):
+    """phone_number is written as 10 digits without +1; Canadian, 7-digit and other foreign numbers are errors."""
     for raw in ["(212) 555-1234", "+1 212-555-1234", "12125551234", "212.555.1234", "2125551234.0"]:
         assert norm(real_schema, "phone_number", raw) == ("2125551234", None)
     assert "not a US number" in norm(real_schema, "phone_number", "(416) 555-0123")[1]  # US only
@@ -44,6 +55,10 @@ def test_phone_is_ten_digits(real_schema):
 
 
 def test_activity_datetime_format(real_schema):
+    """All six activity columns use MM/DD/YYYY HH:MM AM/PM the same way.
+
+    Seconds are dropped, a date alone means midnight, UTC is converted to Eastern, and placeholders are blank.
+    """
     cases = {
         "03/07/2026 09:05 AM": "03/07/2026 09:05 AM",
         "3/7/2026 9:05": "03/07/2026 09:05 AM",
@@ -60,6 +75,7 @@ def test_activity_datetime_format(real_schema):
 
 
 def test_birthday_anniversary_no_year_is_1600(real_schema):
+    """Both date fields write 1600 for a missing year, keep real years, allow Feb 29 and reject Feb 30."""
     for field in ("birthday", "anniversary"):
         assert norm(real_schema, field, "09/12") == ("09/12/1600", None)
         assert norm(real_schema, field, "Sep 12") == ("09/12/1600", None)
@@ -73,6 +89,10 @@ def test_birthday_anniversary_no_year_is_1600(real_schema):
 
 
 def test_consent_is_always_blank(real_schema):
+    """Consent stays blank even when a mapping copies an opt-in column or sets a constant; normalizing clears it.
+
+    Texting someone because a spreadsheet said "true" is exactly what this guards against.
+    """
     df = pd.DataFrame({"Phone": ["2125551234", "2125551235"], "Opt-In": ["true", "false"]})
     # Even a mapping that tries to fill consent produces blanks.
     m = Mapping(fields={"phone_number": FieldMapping(sources=["Phone"], transform="copy"),
@@ -86,6 +106,11 @@ def test_consent_is_always_blank(real_schema):
 
 
 def test_consent_cannot_be_set_by_rules_editor_or_claude(real_schema):
+    """Every route to filling consent is closed: rules, the editor, and Claude's answer schema and parser.
+
+    Consent-like columns (including an opt-in date) aren't auto-mapped anywhere, the editor refuses consent, it is
+    left out of the fields Claude may answer with, and a Claude entry for it is dropped.
+    """
     assert is_consent_column("Opt-In Status") and is_consent_column("SMS Consent") and is_consent_column("Subscribed")
     assert not is_consent_column("Last Text Received")
     df = pd.DataFrame({"Mobile": ["2125551234"], "Consent": ["true"], "Opt In Date": ["10/01/2026"]})
@@ -106,12 +131,18 @@ def test_consent_cannot_be_set_by_rules_editor_or_claude(real_schema):
 
 
 def test_claude_prompt_marks_consent_fixed(real_schema):
+    """The system prompt tells Claude that consent is always blank and that 1600 means no year."""
     captured = {}
 
     class Client:
+        """Fake Anthropic client: records the request instead of calling the API."""
+
         class messages:
+            """Stands in for `client.messages`."""
+
             @staticmethod
             def create(**kw):
+                """Capture the request and answer with an empty mapping."""
                 captured.update(kw)
                 return NS(stop_reason="end_turn", content=[NS(type="text", text=json.dumps(
                     {"mappings": [], "notes": ""}))], usage=None)
@@ -124,6 +155,7 @@ def test_claude_prompt_marks_consent_fixed(real_schema):
 
 
 def test_dedupe_across_all_fields(real_schema):
+    """In the real format a duplicate must match on every field; same phone with other dates is a separate row."""
     df = pd.DataFrame({
         "Mobile": ["2125551234", "212-555-1234", "2125551234", "2125551234"],
         "Last Visit": ["10/05/2026 7:42 PM", "10/05/2026 7:42 PM", "10/07/2026 8:10 PM", "10/07/2026 8:10 PM"],
@@ -136,6 +168,10 @@ def test_dedupe_across_all_fields(real_schema):
 
 
 def test_restaurant_crm_export(samples, real_schema):
+    """The CRM sample maps each activity column by its header and ignores Opt-In and Created.
+
+    The output CSV lines are pinned exactly, including blank consent on every row.
+    """
     rr, m, res = run(samples, real_schema, "restaurant_crm_export.csv")
     assert m.get("phone_number").sources == ["Mobile"]
     assert m.get("transactions_last").sources == ["Last Visit"]
@@ -147,23 +183,33 @@ def test_restaurant_crm_export(samples, real_schema):
     assert m.get("spin_last").transform == "none"
     assert "Opt-In Status" not in m.used_sources() and "Created" not in m.used_sources()
 
+    # Rejected: no phone and a 7-digit phone. Duplicate: Maria's exact repeat (her later visit is kept).
     assert (res.imported, res.rejected, res.duplicates) == (5, 2, 1)
     csv_text = write_output(res.output, real_schema).decode().splitlines()
     assert csv_text[0] == ",".join(HEADERS)
+    # Maria Lopez: every activity column filled, birthday "09/12" without a year, anniversary with its real year.
     assert csv_text[1] == ("5165550100,,10/01/2026 12:15 PM,10/05/2026 07:42 PM,10/03/2026 11:00 AM,"
                            "10/04/2026 06:01 PM,09/28/2026 08:30 PM,,09/12/1600,06/20/2015")
+    # Tom Becker: ISO timestamps reformatted, birthday "Mar 3" → 03/03/1600.
     assert csv_text[2] == "6315550101,,,10/03/2026 06:15 PM,10/03/2026 11:00 AM,,,,03/03/1600,"
+    # Daniel Cho: "0000-00-00 00:00:00" last visit → blank; "September 12th" and "12/31" → 1600.
     assert csv_text[5] == "6315550188,,,,,,,,09/12/1600,12/31/1600"
     assert all(line.split(",")[1] == "" for line in csv_text[1:])  # consent blank everywhere
 
 
 def test_loyalty_activity_xlsx(samples, real_schema):
+    """The loyalty workbook: header found below a title, Excel date-time cells formatted, no-year DOBs → 1600.
+
+    An 'N/A' phone is a missing phone, so that row is rejected.
+    """
     rr, m, res = run(samples, real_schema, "loyalty_activity.xlsx")
+    # 0-based: the header is the 3rd row, below "Loyalty Activity Report" and a blank row.
     assert rr.header_row == 2
     assert m.get("spin_last").sources == ["Last Spin"] and m.get("birthday").sources == ["DOB"]
     assert m.get("redemptions_last").sources == ["Last Redeemed"]
     out = res.output
     assert out["phone_number"].tolist() == ["5165550100", "2015550111", "9175550123"]
     assert out["spin_last"].tolist() == ["10/04/2026 06:30 PM", "10/01/2026 09:05 AM", ""]
+    # A real Excel date (1990), then the text values "12-Sep" and "02/29" with no year.
     assert out["birthday"].tolist() == ["02/28/1990", "09/12/1600", "02/29/1600"]
     assert res.rejected == 1  # "N/A" phone
