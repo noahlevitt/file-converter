@@ -4,6 +4,36 @@ Built from two tables stored with every completed import:
   source.parquet  – the uploaded file exactly as read (text)
   audit.parquet   – per row: file row number, status (imported/rejected/duplicate/empty), reason,
                     and per target field: converted value, value before normalizing, cell status
+
+Overview
+--------
+Both tables are written by ``jobs.run_import`` into the import's folder and loaded by the web app
+(``app.load_import_tables``). Before they reach this module, ``engine.source_rows`` lines the source rows up with
+the audit rows, so row *i* of ``source`` is the file row that produced audit row *i* -- even when
+"One row per phone number" made several converted rows from one file row. Every function here relies on that
+alignment and on both frames having a default ``RangeIndex`` (index labels == positions).
+
+Audit columns used here (see ``engine.ConversionResult.audit``):
+  _row (file row number), _extra (True for the 2nd/3rd... row made from one file row), _status, _reason,
+  _issues (JSON {field_name: reason}), and per target field ``out.<name>`` (converted value), ``raw.<name>``
+  (value before normalizing) and ``st.<name>`` (cell status code, one of ``engine.CELL_*`` or "" for empty).
+
+Responsibilities and main entry points
+--------------------------------------
+* ``column_plan`` -- decide the order of the source columns and describe which target fields each one feeds
+  (and where each target field comes from). Shared by the HTML view and the Excel export.
+* ``status_counts`` / ``filter_rows`` -- the filter buttons above the table ("Rows with changes",
+  "Problems only", "Bad rows", ...) and the free-text search; they return the matching row positions.
+* ``build_compare_html`` -- render one page of rows as an HTML table (original on the left, converted on the
+  right, colour-coded by cell status, with hover tooltips). Shown with ``st.html``.
+* ``field_change_summary`` -- the "What changed" tab: per target field, how many cells were unchanged,
+  reformatted, built, defaulted, fixed, repaired, blanked or rejected, with a few examples.
+* ``comparison_xlsx`` -- the same side-by-side view, all rows, as a downloadable Excel workbook.
+
+Cell status colour code (identical in the HTML legend/CSS and in the Excel fills):
+  unchanged = no colour, reformatted = blue, built from part of / several columns = purple,
+  default/fixed value = grey (italic in HTML), approved Claude fix = green, repaired typo = orange,
+  invalid -> left blank = yellow, invalid/missing -> row rejected = red.
 """
 
 from __future__ import annotations
@@ -20,9 +50,13 @@ from .engine import (CELL_BLANKED, CELL_DEFAULT, CELL_DERIVED, CELL_FIXED, CELL_
 from .mapping import Mapping
 from .schema import TargetSchema
 
+# Cell statuses that count as "the converted value differs from (or doesn't simply copy) the original". Used by
+# the "Rows with changes" filter. Everything except CELL_SAME and "" (empty cell) is a change.
 CHANGED_CELLS = {CELL_FORMAT, CELL_DERIVED, CELL_DEFAULT, CELL_FIXED, CELL_REPAIRED, CELL_BLANKED, CELL_REJECT}
 ATTENTION_CELLS = [CELL_BLANKED, CELL_REPAIRED]  # imported, but worth a look ("Problems only")
 
+# Filter modes for the side-by-side view: key -> button label. The keys are understood by filter_rows() and
+# status_counts(); the app shows "label (count)" and hides buttons with a zero count (except all/changed).
 FILTERS = {
     "all": "All rows",
     "changed": "Rows with changes",
@@ -33,6 +67,7 @@ FILTERS = {
     "empty": "Empty rows",
 }
 
+# Plain-language meaning of each cell status code, used in the hover tooltip of converted cells.
 CELL_LABELS = {
     CELL_SAME: "unchanged",
     CELL_FORMAT: "reformatted",
@@ -44,6 +79,8 @@ CELL_LABELS = {
     CELL_REJECT: "invalid or missing — row rejected",
 }
 
+# Row status (audit "_status") -> (badge text, CSS modifier class for the .cmp-b badge). The badge text is also
+# what the Excel export writes in its "Status" column.
 STATUS_BADGE = {
     "imported": ("Imported", "ok"),
     "rejected": ("Bad row", "bad"),
@@ -54,6 +91,20 @@ STATUS_BADGE = {
 
 @dataclass
 class ColumnPlan:
+    """How the source columns are laid out and labelled in the comparison (built by ``column_plan``).
+
+    Attributes:
+        source_columns: display order of the original file's columns -- columns used by the mapping first (in the
+            order of the target fields they feed), then the unused ones in file order, so related columns on the
+            left and right are roughly aligned.
+        unused: source columns that feed no target field (greyed out, labelled "not imported").
+        feeds: source column -> headers of the target fields it feeds (shown under the column header).
+        origin: target field name -> short "where it comes from" text (shown under the converted header).
+        each_field: name of the field that uses 'One row per phone number' (``each_row`` transform), or "".
+        each_sources: that field's source columns; used to underline the exact source cell each extra row was
+            made from.
+    """
+
     source_columns: list[str]          # mapped columns first (in target-field order), then unused ones
     unused: set[str]
     feeds: dict[str, list[str]]        # source column -> target headers it feeds
@@ -63,28 +114,48 @@ class ColumnPlan:
 
 
 def column_plan(schema: TargetSchema, mapping: Mapping, source_columns: list[str]) -> ColumnPlan:
+    """Build the ``ColumnPlan`` for an import from its schema, mapping and the source file's columns.
+
+    Args:
+        schema: the target schema snapshot of the import.
+        mapping: the mapping the import ran with.
+        source_columns: column names of ``source.parquet`` in file order.
+
+    Returns:
+        A ``ColumnPlan``. Pure function, no side effects.
+    """
     ordered: list[str] = []
     feeds: dict[str, list[str]] = {c: [] for c in source_columns}
     origin: dict[str, str] = {}
     for f in schema.fields:
         fm = mapping.get(f.name)
+        # Fields the import format always leaves blank have no source; their sources (if any) are not counted.
         if f.fixed_blank:
             origin[f.name] = "always blank (fixed)"
             continue
+        # Mapped -> the mapping's own summary ("first non-empty of A, B", "fixed value 'x'", ...); unmapped ->
+        # whether the schema fills a default or the field simply stays empty.
         origin[f.name] = fm.summary() if fm.transform != "none" else ("default" if f.default else "not mapped")
         for s in fm.sources:
+            # Mapping sources missing from this file (e.g. a template made for another layout) are ignored.
             if s in feeds:
                 feeds[s].append(f.header)
                 if s not in ordered:
                     ordered.append(s)
     unused = {c for c in source_columns if not feeds[c]}
     ordered += [c for c in source_columns if c in unused]
+    # At most one field can use 'One row per phone number' (each_row); remember it and its source columns.
     each = next((f for f in schema.mappable_fields if mapping.get(f.name).transform == "each_row"), None)
     return ColumnPlan(ordered, unused, feeds, origin, each.name if each else "",
                       tuple(mapping.get(each.name).sources) if each else ())
 
 
 def changed_mask(audit: pd.DataFrame, schema: TargetSchema) -> pd.Series:
+    """Boolean Series (aligned with ``audit``): True for rows where at least one cell status is in ``CHANGED_CELLS``.
+
+    Only ``st.<field>`` columns of fields in the schema are considered; if there are none (e.g. an empty audit),
+    every row is False.
+    """
     st_cols = [f"st.{f.name}" for f in schema.fields if f"st.{f.name}" in audit.columns]
     if not st_cols:
         return pd.Series(False, index=audit.index)
@@ -93,6 +164,26 @@ def changed_mask(audit: pd.DataFrame, schema: TargetSchema) -> pd.Series:
 
 def filter_rows(audit: pd.DataFrame, source: pd.DataFrame, schema: TargetSchema, mode: str = "all",
                 search: str = "") -> list[int]:
+    """Return the row positions to show for a filter mode and an optional search text.
+
+    Args:
+        audit: the import's audit table.
+        source: source rows aligned with ``audit`` (see module docstring).
+        schema: target schema (to know which status columns exist).
+        mode: a ``FILTERS`` key:
+            * "all"      -- every row;
+            * "changed"  -- rows with any changed cell, plus all bad and duplicate rows;
+            * "problems" -- bad and duplicate rows, plus imported rows with a cell that was left blank as invalid
+              or repaired from a likely typo (``ATTENTION_CELLS``): things a person should look at;
+            * "rejected" / "duplicate" / "imported" / "empty" -- rows with exactly that row status.
+            Unknown modes behave like "all".
+        search: case-insensitive substring searched in every original cell and every converted cell; the text
+            (with an optional leading "#") also matches a file row number exactly, so "#120" finds row 120.
+
+    Returns:
+        Index labels of the matching audit rows, in file order. With the default ``RangeIndex`` these are
+        positions, which is what ``build_compare_html`` expects (it uses ``iloc``). The caller pages this list.
+    """
     mask = pd.Series(True, index=audit.index)
     status = audit["_status"]
     if mode == "changed":
@@ -104,6 +195,7 @@ def filter_rows(audit: pd.DataFrame, source: pd.DataFrame, schema: TargetSchema,
         mask &= status == mode
     if search.strip():
         q = search.strip().lower()
+        # Plain substring search (regex=False) so characters like "(" or "+" in phone numbers need no escaping.
         hay = source.astype(str).apply(lambda col: col.str.lower().str.contains(q, regex=False, na=False))
         out_cols = [c for c in audit.columns if c.startswith("out.")]
         hay_out = audit[out_cols].astype(str).apply(lambda col: col.str.lower().str.contains(q, regex=False,
@@ -114,6 +206,11 @@ def filter_rows(audit: pd.DataFrame, source: pd.DataFrame, schema: TargetSchema,
 
 
 def status_counts(audit: pd.DataFrame, schema: TargetSchema) -> dict[str, int]:
+    """Number of rows each ``FILTERS`` mode would show (ignoring search), for the "label (count)" buttons.
+
+    The "changed" and "problems" definitions must stay identical to ``filter_rows`` so a button's count matches
+    the rows it shows. Note: ``blanked`` below covers both left-blank and repaired cells (``ATTENTION_CELLS``).
+    """
     vc = audit["_status"].value_counts()
     blanked = audit[[c for c in audit.columns if c.startswith("st.")]].isin(ATTENTION_CELLS).any(axis=1)
     return {
@@ -131,6 +228,27 @@ def status_counts(audit: pd.DataFrame, schema: TargetSchema) -> dict[str, int]:
 # HTML table
 # ---------------------------------------------------------------------------
 
+# Stylesheet emitted in front of every rendered table (st.html renders it in the page, so it is self-contained).
+# Layout:
+#   .cmpw            scroll container (max 640px high, scrolls both ways) around the table
+#   table.cmp        the comparison table; cells don't wrap and long values are cut with an ellipsis (the full
+#                    value is in the cell's title tooltip)
+#   thead tr.g       first header row: group labels "Original file" (th.gsrc, grey) | gap | "Converted" (th.gout,
+#                    blue); sticky at top:0
+#   thead tr.h       second header row: one header per column with a .sub line saying where it goes / comes from;
+#                    sticky at top:30px, just under tr.g
+#   .gap             narrow grey separator column between the original and converted halves
+#   .meta            the "Row" column; sticky on the left so the file row number stays visible while scrolling
+#   .unused          source columns not used by the mapping (greyed)
+#   .sub / .was / .why  small secondary lines: header detail / original value (struck through) / problem reason
+#   .cmp-b.<kind>    row status badge: ok (green, imported), bad (red, rejected), dup (grey), empty (light grey)
+# Row classes (tr.r-<status>): rejected rows get a pink tint on the original side and diagonal hatching on the
+# converted cells that weren't themselves the cause; duplicate and empty rows are shown in grey text.
+# td.o.each underlines the source cell a 'One row per phone number' row was made from.
+# Cell status classes on converted cells are "c-" + the engine.CELL_* code, so they match automatically:
+#   c-fmt reformatted (blue)   c-drv built/derived (purple)   c-def default (grey, italic)   c-fix Claude fix (green)
+#   c-blk invalid, left blank (yellow)   c-rpr repaired typo (orange, bold)   c-rej rejected cause (red, bold)
+# The swatch colours in legend_html() and XLSX_FILL below repeat these hex values; keep them in sync.
 CSS = """
 <style>
 .cmpw{max-height:640px;overflow:auto;border:1px solid #d9dde3;border-radius:8px;background:#fff}
@@ -177,6 +295,15 @@ td .blank{color:#9aa1a9;font-style:italic;font-weight:400}
 
 
 def legend_html(each_row: bool = False) -> str:
+    """Return the colour legend shown above the table: one swatch + label per changed-cell status.
+
+    Args:
+        each_row: True when the mapping uses 'One row per phone number'; adds an explanation of the underlined
+            source cell and of the "N +" row labels used for the extra rows.
+
+    The first tuple element (CSS class) is informational only; the swatch uses the inline colour, which must match
+    the corresponding ``td.c-*`` rule in ``CSS``. Labels are HTML-escaped.
+    """
     items = [("c-fmt", "#e8f1ff", "reformatted"), ("c-drv", "#f2ecff", "built from part of / several columns"),
              ("c-def", "#f3f4f6", "default / fixed value"), ("c-fix", "#e3f6e9", "fixed by approved Claude suggestion"),
              ("c-rpr", "#ffe2c6", "repaired from a likely typo — check it"), ("c-blk", "#fff4d6", "invalid → left blank"), ("c-rej", "#fde1e1", "invalid / missing → row rejected")]
@@ -189,20 +316,52 @@ def legend_html(each_row: bool = False) -> str:
 
 
 def _e(value) -> str:
+    """HTML-escape any value for safe insertion into the table (``None`` -> "").
+
+    Every value from the uploaded file, the mapping or the schema goes through this, because file contents are
+    untrusted and the HTML is rendered directly in the page. Escaping also covers quotes, so it is safe inside
+    ``title="..."`` attributes.
+    """
     return html.escape("" if value is None else str(value))
 
 
 def build_compare_html(source: pd.DataFrame, audit: pd.DataFrame, rows: list[int], schema: TargetSchema,
                        plan: ColumnPlan, file_label: str = "Original file", target_label: str = "Converted",
                        show_was: bool = True) -> str:
+    """Render the side-by-side table for the given rows as one HTML string (CSS + legend + table).
+
+    Args:
+        source: source rows aligned with ``audit``.
+        audit: the import's audit table.
+        rows: positions of the rows to render -- normally one page of ``filter_rows`` output; the app pages the
+            result (50-250 rows) to keep the HTML small.
+        schema: target schema snapshot of the import (defines the converted columns, in schema order).
+        plan: the ``ColumnPlan`` (source column order, unused columns, header sub-labels).
+        file_label / target_label: texts of the two group headers.
+        show_was: also show the original value (struck through) under converted cells whose value was changed
+            (reformatted, Claude-fixed, repaired, or blanked) -- the "Show original under changed values" toggle.
+
+    Table structure (columns, left to right):
+        Row (sticky; file row number, "N +" for extra rows from one file row) | Status (badge + bad-row reason) |
+        one column per source column (``td.o``) | gap | one column per target field (``td.n``, coloured by cell
+        status; "*" in the header marks required fields).
+    Every cell has a ``title`` tooltip with the full value and, for converted cells, the status meaning, the
+    original value and the problem reason.
+
+    Returns:
+        HTML to pass to ``st.html``. No side effects.
+    """
     cols = plan.source_columns
     fields = schema.fields
     parts = [CSS, legend_html(bool(plan.each_field)), '<div class="cmpw"><table class="cmp"><thead>']
+    # Header row 1 (tr.g): group labels spanning the original and converted halves; the 2 meta columns are blank.
     parts.append(
         f'<tr class="g"><th class="meta" colspan="2"></th>'
         f'<th class="gsrc" colspan="{len(cols)}">{_e(file_label)}</th><th class="gap"></th>'
         f'<th class="gout" colspan="{len(fields)}">{_e(target_label)}</th></tr>'
     )
+    # Header row 2 (tr.h): one header per column. Source headers say which target fields they feed ("→ ...") or
+    # "not imported"; converted headers say where the value comes from ("← ...").
     head = ['<tr class="h"><th class="meta">Row</th><th>Status</th>']
     for c in cols:
         if c in plan.unused:
@@ -219,19 +378,26 @@ def build_compare_html(source: pd.DataFrame, audit: pd.DataFrame, rows: list[int
     head.append("</tr></thead><tbody>")
     parts.append("".join(head))
 
+    # Only the requested rows are converted to dicts (fast even for very large imports).
     src_records = source.iloc[rows].to_dict("records") if rows else []
     aud_records = audit.iloc[rows].to_dict("records") if rows else []
     for srow, arow in zip(src_records, aud_records):
         status = arow["_status"]
         label, cls = STATUS_BADGE.get(status, (status, "empty"))
+        # Per-field problem reasons for this row: {field_name: reason}.
         issues = json.loads(arow["_issues"]) if arow.get("_issues") else {}
         row_label = _e(arow["_row"])
+        # Extra rows made by 'One row per phone number' repeat the file row number with a "+" suffix.
         if arow.get("_extra"):
             row_label = (f'<span title="Another number from the same file row — one row per different number">'
                          f'{row_label} +</span>')
+        # Row class r-<status> drives the row-level styling (pink/hatched for rejected, grey for duplicate/empty).
         cells = [f'<tr class="r-{status}"><td class="meta">{row_label}</td>'
                  f'<td><span class="cmp-b {cls}">{label}</span>'
                  + (f'<span class="why">{_e(arow["_reason"])}</span>' if arow["_reason"] else "") + "</td>"]
+        # --- original (left) half -------------------------------------------------------------------------
+        # For 'One row per phone number', the raw value of that field is the number this row was made from; find
+        # and underline the first source cell holding it (only one cell is marked even if the value repeats).
         used_value = str(arow.get(f"raw.{plan.each_field}", "")) if plan.each_field else ""
         marked = False
         for c in cols:
@@ -244,17 +410,23 @@ def build_compare_html(source: pd.DataFrame, audit: pd.DataFrame, rows: list[int
                 marked = True
             cells.append(f'<td class="{klass}" title="{_e(title)}">{_e(v)}</td>')
         cells.append('<td class="gap"></td>')
+        # --- converted (right) half -----------------------------------------------------------------------
         for f in fields:
             out = arow.get(f"out.{f.name}", "")
             raw = arow.get(f"raw.{f.name}", "")
             st = arow.get(f"st.{f.name}", "")
             reason = issues.get(f.name, "")
+            # Tooltip: "<header>: <status meaning> — original: <raw> — <reason>".
             tip = f"{f.header}: {CELL_LABELS.get(st, '')}"
             if raw and raw != out:
                 tip += f" — original: {raw}"
             if reason:
                 tip += f" — {reason}"
+            # CSS class "c-<status code>" colours the cell; unchanged and empty cells get no colour class.
             klass = f' class="n c-{st}"' if st and st != CELL_SAME else ' class="n"'
+            # Rejected cell: there is no output value, so show the offending original value (or "missing" for an
+            # empty required field). Blanked cell: show "(left blank)". Both add the reason underneath, and a
+            # blanked cell can also show the value that was dropped.
             if st in (CELL_REJECT, CELL_BLANKED):
                 body = (_e(raw) if raw else '<span class="blank">missing</span>') if st == CELL_REJECT else \
                     '<span class="blank">(left blank)</span>'
@@ -262,6 +434,8 @@ def build_compare_html(source: pd.DataFrame, audit: pd.DataFrame, rows: list[int
                 if st == CELL_BLANKED and show_was and raw:
                     body = f'{body}<span class="was">{_e(raw)}</span>'
             else:
+                # Normal cell: the converted value; for value-changing statuses optionally the struck-through
+                # original underneath. Derived/default cells don't show it -- their "original" isn't one cell.
                 body = _e(out)
                 if show_was and st in (CELL_FORMAT, CELL_FIXED, CELL_REPAIRED) and raw and raw != out:
                     body += f'<span class="was">{_e(raw)}</span>'
@@ -269,6 +443,7 @@ def build_compare_html(source: pd.DataFrame, audit: pd.DataFrame, rows: list[int
         cells.append("</tr>")
         parts.append("".join(cells))
     if not rows:
+        # One full-width message row; +3 covers the Row, Status and gap columns.
         parts.append(f'<tr><td colspan="{len(cols) + len(fields) + 3}" style="padding:24px;color:#6e7781">'
                      "No rows match this filter.</td></tr>")
     parts.append("</tbody></table></div>")
@@ -280,6 +455,17 @@ def build_compare_html(source: pd.DataFrame, audit: pd.DataFrame, rows: list[int
 # ---------------------------------------------------------------------------
 
 def field_change_summary(audit: pd.DataFrame, schema: TargetSchema, mapping: Mapping) -> pd.DataFrame:
+    """Per target field, count how each cell was produced across the whole import ("What changed" tab).
+
+    Empty rows are excluded. One output row per schema field that has a status column, with columns:
+    Field, From (mapping summary), one count per cell status (Unchanged, Reformatted, Built/split, Default,
+    Claude fix, Repaired typo, Left blank (invalid), Rejected rows), Empty (cells with no value) and Examples --
+    up to three distinct "original → converted" pairs taken from repaired, reformatted or Claude-fixed cells, so
+    the user can see what a reformat actually did.
+
+    Returns:
+        A DataFrame ready for ``st.dataframe``. No side effects.
+    """
     live = audit[audit["_status"] != "empty"]
     rows = []
     for f in schema.fields:
@@ -313,6 +499,8 @@ def field_change_summary(audit: pd.DataFrame, schema: TargetSchema, mapping: Map
 # Excel export of the side-by-side view
 # ---------------------------------------------------------------------------
 
+# Background fill per cell status in the Excel export -- the same colours as the HTML td.c-* classes.
+# CELL_SAME and empty cells are not listed and get the plain text format.
 XLSX_FILL = {CELL_FORMAT: "#E8F1FF", CELL_DERIVED: "#F2ECFF", CELL_DEFAULT: "#F3F4F6", CELL_FIXED: "#E3F6E9",
              CELL_REPAIRED: "#FFE2C6",
              CELL_BLANKED: "#FFF4D6", CELL_REJECT: "#FDE1E1"}
@@ -320,9 +508,40 @@ XLSX_FILL = {CELL_FORMAT: "#E8F1FF", CELL_DERIVED: "#F2ECFF", CELL_DEFAULT: "#F3
 
 def comparison_xlsx(source: pd.DataFrame, audit: pd.DataFrame, schema: TargetSchema, plan: ColumnPlan,
                     title: str) -> bytes:
+    """Build the side-by-side view of *all* rows (no filter, no paging) as an .xlsx workbook in memory.
+
+    Args:
+        source: source rows aligned with ``audit``.
+        audit: the import's audit table.
+        schema: target schema snapshot (converted columns, in schema order).
+        plan: the ``ColumnPlan`` (same column order and labels as the HTML view).
+        title: text for cell A1 (the app passes "Import #<id> — <file> → <format>").
+
+    Returns:
+        The workbook as bytes (the app offers it as a download; nothing is saved in the import folder).
+
+    Sheet "Side by side" layout (0-based rows/columns):
+        row 0  title
+        row 1  colour key (text)
+        row 2  group labels: "ORIGINAL FILE" over the source columns, "CONVERTED" over the target columns
+               (merged when they span more than one column -- merge_range needs at least two cells)
+        row 3  headers: File row | Status | Reason | Notes | source columns ("→ fields" or "(not imported)") |
+               gap | target fields ("← origin"); wrapped text, 45pt high
+        row 4+ one row per audit row, in file order
+        Columns 0-3 hold the row number, row status, bad-row reason and per-field problem notes; the original
+        values start at column 4, followed by a narrow grey gap column and the converted values. Panes are
+        frozen below the headers and right of the "File row" column.
+
+    Converted cells get the ``XLSX_FILL`` colour of their status; for a rejected cell the original value (or
+    "(missing)") is written, because the converted value is empty. All file values are written as text.
+    """
     buf = io.BytesIO()
     import xlsxwriter
 
+    # constant_memory: each finished row is flushed to a temporary file, so very large imports don't hold the whole
+    # sheet in memory (this requires writing row by row, top to bottom -- as done below).
+    # strings_to_numbers/formulas/urls = False: keep every value exactly as text -- no leading zeros lost from ZIP
+    # codes or phone numbers, no "=..." cell from the file ever becoming a live formula, no auto-hyperlinks.
     wb = xlsxwriter.Workbook(buf, {"constant_memory": True, "strings_to_numbers": False,
                                    "strings_to_formulas": False, "strings_to_urls": False})
     ws = wb.add_worksheet("Side by side")
@@ -330,22 +549,29 @@ def comparison_xlsx(source: pd.DataFrame, audit: pd.DataFrame, schema: TargetSch
     f_grp_src = wb.add_format({"bold": True, "bg_color": "#EEF1F5", "border": 1})
     f_grp_out = wb.add_format({"bold": True, "bg_color": "#EAF2FF", "font_color": "#1D4ED8", "border": 1})
     f_head = wb.add_format({"bold": True, "bg_color": "#F6F7F9", "border": 1, "text_wrap": True, "valign": "top"})
+    # num_format "@" = Excel's Text format, so values typed into the cells later aren't reinterpreted either.
     f_text = wb.add_format({"num_format": "@"})
     f_unused = wb.add_format({"num_format": "@", "font_color": "#9AA1A9"})
     f_gap = wb.add_format({"bg_color": "#C9CED6"})
+    # Font colour of the "Status" column per row status (mirrors the HTML badges).
     f_status = {"imported": wb.add_format({"font_color": "#116329"}),
                 "rejected": wb.add_format({"font_color": "#B42318", "bold": True}),
                 "duplicate": wb.add_format({"font_color": "#57606A"}),
                 "empty": wb.add_format({"font_color": "#9AA1A9"})}
     f_cell = {k: wb.add_format({"num_format": "@", "bg_color": v}) for k, v in XLSX_FILL.items()}
 
+    # Column positions: 4 fixed columns (File row, Status, Reason, Notes), then the source block, one gap column,
+    # then the converted block.
     cols, fields = plan.source_columns, schema.fields
     c_src0 = 4
     c_gap = c_src0 + len(cols)
     c_out0 = c_gap + 1
     ws.write(0, 0, title, f_title)
+    # Colour key. It names the most common colours; the grey (default) and orange (repaired) fills are explained
+    # by the HTML legend only.
     ws.write(1, 0, "Blue = reformatted · purple = built from other columns · green = Claude fix · "
                    "yellow = invalid, left blank · red = invalid/missing, row rejected")
+    # Group labels: merge across the block when it is wider than one column, otherwise write a single cell.
     ws.merge_range(2, c_src0, 2, c_gap - 1, "ORIGINAL FILE", f_grp_src) if len(cols) > 1 else \
         ws.write(2, c_src0, "ORIGINAL FILE", f_grp_src)
     ws.merge_range(2, c_out0, 2, c_out0 + len(fields) - 1, "CONVERTED", f_grp_out) if len(fields) > 1 else \
@@ -353,14 +579,18 @@ def comparison_xlsx(source: pd.DataFrame, audit: pd.DataFrame, schema: TargetSch
     headers = ["File row", "Status", "Reason", "Notes"]
     for i, h in enumerate(headers):
         ws.write(3, i, h, f_head)
+    # Source headers: name + second line saying which target fields the column feeds, or "(not imported)".
     for j, c in enumerate(cols):
         ws.write(3, c_src0 + j, c + ("\n(not imported)" if c in plan.unused else "\n→ " + ", ".join(plan.feeds[c])),
                  f_head)
     ws.write(3, c_gap, "", f_gap)
+    # Target headers: header + second line saying where the value comes from.
     for j, f in enumerate(fields):
         ws.write(3, c_out0 + j, f"{f.header}\n← {plan.origin.get(f.name, '')}", f_head)
     ws.set_row(3, 45)
+    # Keep the 4 title/header rows and the "File row" column visible while scrolling.
     ws.freeze_panes(4, 1)
+    # Column widths: row number, status, reason + notes (wide), source block, gap (narrow), converted block.
     ws.set_column(0, 0, 8)
     ws.set_column(1, 1, 11)
     ws.set_column(2, 3, 34)
@@ -374,11 +604,13 @@ def comparison_xlsx(source: pd.DataFrame, audit: pd.DataFrame, schema: TargetSch
     for srow, arow in zip(src_records, aud_records):
         status = arow["_status"]
         issues = json.loads(arow["_issues"]) if arow.get("_issues") else {}
+        # "Notes" column: every per-field problem of the row as "<field header>: <reason>; ...".
         notes = "; ".join(f"{schema.field(k).header}: {v}" for k, v in issues.items() if k in schema.field_names)
         ws.write_number(r, 0, int(arow["_row"]))
         ws.write(r, 1, STATUS_BADGE.get(status, (status,))[0], f_status.get(status))
         ws.write_string(r, 2, arow["_reason"] or "")
         ws.write_string(r, 3, notes)
+        # write_string (not write) so nothing is ever converted to a number, formula or URL.
         for j, c in enumerate(cols):
             ws.write_string(r, c_src0 + j, str(srow.get(c, "") or ""), f_unused if c in plan.unused else f_text)
         ws.write(r, c_gap, "", f_gap)
