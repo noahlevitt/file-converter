@@ -1,0 +1,228 @@
+# User guide
+
+How to convert a customer file, check the result and fix problems. No technical knowledge needed.
+
+The converter takes a customer or contact file in any layout and produces the import file in the exact format the
+target system expects:
+- 10-digit US phone numbers;
+- activity dates and times as `MM/DD/YYYY HH:MM AM/PM`;
+- birthdays and anniversaries as `MM/DD/YYYY`, with year `1600` when there's no real year;
+- `consent` always blank.
+
+## Signing in
+
+Open the converter's address in a browser (on one computer: http://localhost:8501) and sign in with the
+username and password an administrator gave you. You can change your own password under **My account** in the
+sidebar. **Sign out** is just below it.
+
+## Converting a file
+
+### 1 · Upload
+
+On **New import**, drag the file onto the upload box or click to choose it. Accepted: `.csv`, `.tsv`, `.tab`,
+`.txt`, `.xlsx`, `.xlsm`, `.xlsb`, `.xls`, `.ods`. One file at a time.
+
+The **File** section shows what was detected: rows, columns, sheet, text encoding and delimiter. Check two things
+here:
+
+- **Client time zone.** Choose the business's time zone. Times in the file that include a zone (`Z`, `UTC`,
+  `EST`, `+00:00`…) and Unix timestamps are converted to it. Times without a zone are kept exactly as written.
+  Templates remember the zone.
+- **File options and raw preview.** If the column names look wrong, open this. You can pick another sheet, or
+  say which row holds the headers (`0` = the file has no header row), then click **Re-read file**. The preview
+  shows the first rows exactly as they are in the file.
+
+### 2 · Review the column mapping
+
+The converter matches the file's columns to the import fields automatically. If you have uploaded a file with
+the same columns before and saved its mapping, that **template** is applied instantly. Check the result in the
+two tables.
+
+**The field table** has one row per import field:
+
+| Column | Meaning |
+|---|---|
+| Field | The import field. `*` = required (rows without it are bad rows). 🔒 = always blank (consent). |
+| How | How the value is built: *Copy column*, *One row per phone number*, *Combine columns*, *Leave blank*, … |
+| Source column(s) | Which column(s) of your file feed this field. Click to change. |
+| Option | Extra setting, e.g. date order `MDY` / `DMY` for dates (`auto` normally works). |
+| Sample output | What the first converted values look like. ⚠ means some values in the first rows can't be converted. |
+| Check | A warning when something needs attention (e.g. a required field with no column). |
+| Mapped by / Why | Who chose this (Template, Rules, Claude, You), how confident, and why. |
+
+**Columns in your file** has one row per column of your file. This is usually the easiest place to fix things:
+
+- **Goes to:** the field(s) this column feeds.
+  - Pick a different field to move the column there. That field takes this column as its only source, *except*
+    the phone field: adding a phone column gives each extra number its own row.
+  - Clear the cell to leave the column out.
+- **Skip:** tick to keep a column out completely. The rules, saved templates and Claude won't map it again, and
+  the template remembers it for next time.
+- **Check:** a warning when the column's name and values don't fit the field it feeds. Example: *Occupation*
+  sent to the phone field because someone typed a phone number into it.
+- **Your note:** optional, e.g. "this is the last visit date" or "dates are day-first". With Claude configured,
+  **Apply notes with Claude** turns notes into mapping changes. You see each proposed change and choose
+  **Accept changes** or **Discard**. Without Claude, notes are kept with the template as documentation.
+
+**Check for mistakes** runs rule checks on the first 1,000 rows, plus a Claude review of a sample when Claude is
+configured. It flags things like:
+- sign-up dates mapped as birthdays;
+- visit dates in the future;
+- 7-digit phone numbers;
+- day/month order that mixes both conventions.
+
+### 3 · Start the import
+
+- **Remember this mapping** (on by default) saves the mapping as a template under **Template name**, so the next
+  file with the same columns maps instantly.
+- **Start import** is enabled once every required field has a source. The import runs in the background; you're
+  taken to its page and can leave and come back.
+
+## Following imports
+
+**Imports** lists every import, newest first. Filter with **Show** (Everyone / Mine), **Status**, and **Search**
+(file name, template name or `#id`). Running imports appear on top with a progress bar, the current step, elapsed
+time and time left. Each has **Open** and **Cancel**. Click a row to open an import.
+
+Statuses:
+- **queued:** waiting for a free slot.
+- **running:** being converted.
+- **completed:** finished.
+- **failed:** an error stopped it (the message is shown).
+- **cancelled:** someone clicked Cancel.
+- **interrupted:** the app restarted while it was running. Use **Re-run this import**.
+
+## Reading a finished import
+
+The banner at the top shows the result in one sentence, for example:
+
+> 5 rows ready to import from 4 file rows (2 extra rows for customers with more than one phone number).
+> 1 bad row was NOT imported. 1 phone number was repaired from likely typos — check them under Side by side →
+> Problems only.
+
+The numbers below it are:
+
+| Number | Meaning |
+|---|---|
+| Rows in file | Data rows in the file, not counting empty rows. |
+| Converted | Rows in the import file. Can be higher than *Rows in file*: a customer with several different phone numbers gets one row per number. |
+| Bad rows | Rows NOT imported, because the required phone is missing or can't be read. |
+| Duplicates removed | Rows identical to an earlier row in **every** column. Same phone with a different date is not a duplicate. |
+| Empty rows | Completely blank rows, skipped. |
+
+**Downloads:**
+- **Converted file:** the file to upload to the target system.
+- **Rejected rows:** every bad and duplicate row with its reason and original values.
+- **Summary:** counts and reasons as text.
+- **Original file:** exactly what was uploaded.
+- **Prepare side-by-side Excel:** builds the comparison as a colour-coded workbook.
+
+**Tabs:**
+
+- **Side by side:** your original file on the left, the converted result on the right, cell by cell.
+  - **Filters:**
+    - **Rows with changes:** rows where any value was changed.
+    - **Problems only:** bad rows, duplicates, values left blank and **repaired** values.
+    - **Bad rows**, **Imported rows** and the others: rows with that status.
+  - **Find:** search for any value, or a row number like `#14`.
+  - **Colours:**
+    - blue: reformatted;
+    - purple: built from part of or several columns;
+    - grey: default or fixed value;
+    - green: fix you approved;
+    - **orange: repaired from a likely typo — check it;**
+    - yellow: invalid, left blank;
+    - red: invalid or missing, row rejected.
+  - **Original values:** with **Show original under changed values** on, the original is shown under each changed
+    value. Hover over any cell for details.
+  - **Extra rows:** these are marked `N +`, meaning another row made from file row N, one per phone number. The
+    number that row was made from is underlined on the left.
+- **What changed:** for every field, how many values were unchanged, reformatted, built, defaulted, fixed,
+  repaired, left blank or rejected, with examples. Below it:
+  - **Problems found**, grouped by reason;
+  - **How full each column is**.
+- **Converted file:** a preview of the import file.
+- **Bad & duplicate rows:** the rejected rows with reasons.
+- **Mapping used:** the exact mapping, notes and options this import ran with.
+
+**After the import:**
+- **Check this import for mistakes:** the same checks as before importing, on every row.
+- **Try to fix … unconvertible values with Claude** (only when Claude is configured and values failed):
+  1. Click **Suggest fixes**. Claude proposes reformatted versions of values the converter couldn't read, for
+     example a phone written as words.
+  2. Each suggestion is re-checked. Suggestions that change the data instead of reformatting it are refused.
+  3. **Apply fixes and re-run** creates a new import with the approved fixes.
+- **Re-run this import:** runs the same file and mapping again with the current rules, as a new import. The
+  original stays as it was.
+
+## How values are converted
+
+### Phone numbers
+
+- **US only; +1 assumed.** Any punctuation, spacing, extension, label (`Cell:`), Excel artifact (`5165550100.0`,
+  `="5165550100"`) or letters typed for digits (`516-555-O1OO`) is handled.
+- **Typos are repaired when exactly one US number fits,** using the area codes the rest of the file uses:
+  - `514…` in a file of `516` numbers becomes `516…`;
+  - an extra digit is removed;
+  - a country code typed in front of a US number is removed;
+  - a missing area code is added when 80% of the file shares one.
+
+  Every repair is imported **and shown in orange**. Check them: a wrong guess texts a stranger.
+- **Not guessed:** when two numbers fit equally, the row is a bad row and the reason lists both options, e.g.
+  "could be (516) 946-1961 or (516) 946-1966".
+- **Bad rows with a reason:** missing area code, too few or too many digits, an area code that isn't in use,
+  non-US numbers (with the country), and Excel scientific notation that already lost digits.
+- **Several phone columns** (Phone, Phone 2, Mobile, Home…):
+  - each **different** number becomes its own row, with the other columns copied from the same file row;
+  - the same number in two columns counts once;
+  - an invalid extra number is skipped, and the row still imports with the customer's other number(s).
+- **Columns about a phone** (`phone4MarketingPreference`, Phone Type, SMS Opt In) are never treated as numbers.
+
+### Dates and times
+
+- **Any common format works:** `10/9/2026 3:45 PM`, `2026-10-09T15:45:00Z`, `Oct 9, 2026`, `9-Oct-26`, Excel
+  serial numbers, Unix timestamps and more.
+- **Ambiguous order:** `03/04` is read month-first unless the column is clearly day-first. You can force it with
+  **Option** = `DMY`.
+- **Activity fields:** a date with no time becomes `12:00 AM`. Seconds are dropped.
+- **Birthday / anniversary** become `MM/DD/1600` when there is no real year. That includes:
+  - month and day only: `09/12`, `Sep 12`, `12-Sep`, `--09-12`;
+  - placeholder years: `0000`, `XXXX`, `1900`;
+  - a year shared by most of the column, e.g. a year Excel added to dates typed without one;
+  - years in the last two years or in the future.
+
+  Separate *Birth Month* and *Birth Day* columns are combined automatically.
+
+### Always blank
+
+`consent` is always left blank, whatever the file says. Opt-in and marketing-preference columns are never
+imported.
+
+## Templates, target format, users
+
+- **Templates:**
+  - lists saved mappings, with columns, how often each was used, and who created or updated it;
+  - you can view, rename, delete (creator or admin only) or download any template as JSON;
+  - a template is applied automatically to files with exactly the same columns, in any order or capitalisation;
+  - a similar layout (75%+ of the same columns) starts from that template's rules.
+- **Target format:** a read-only description of every field of the import format and its rules.
+- **Users** (administrators only): add users, reset passwords, make or remove administrators, delete users.
+
+## Common questions
+
+**A birthday shows `1600`.** That's intended: it means "month and day known, year unknown". The target system
+expects this.
+
+**A phone is orange.** It was repaired from a likely typo. Check the original underneath. If the repair is wrong,
+fix the number in the original file and re-run.
+
+**Converted is higher than Rows in file.** Some customers have several different phone numbers; each gets its
+own row.
+
+**A column went to the wrong field.** Under **Columns in your file**, change **Goes to** or tick **Skip**, then
+start the import again. With **Remember this mapping** on, the template is updated for next time.
+
+**The header row is wrong / column names are numbers.** Open **File options and raw preview**, set the header
+row and click **Re-read file**.
+
+**An import says *interrupted*.** The app restarted while it ran. Open it and click **Re-run this import**.
