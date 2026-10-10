@@ -1,9 +1,20 @@
+# ---------------------------------------------------------------------------
+# One-service setup for running the converter with Docker (on a server or on your own computer).
+#
+#   docker compose up -d --build      start (or update after `git pull`)
+#   docker compose logs -f            follow the logs
+#   docker compose down               stop
+#   docker compose exec app python scripts/manage_users.py list     manage logins from the command line
+#
+# Before the first start: `cp .env.example .env` and set ADMIN_USERNAME / ADMIN_PASSWORD (and optionally
+# ANTHROPIC_API_KEY). On Linux: `mkdir -p data && sudo chown 1000 data` (the container runs as uid 1000).
+# ---------------------------------------------------------------------------
 services:
   app:
-    build: .
+    build: .                     # build the image from the Dockerfile in this folder
     container_name: file-converter
-    restart: unless-stopped
-    env_file: .env
+    restart: unless-stopped      # come back after crashes and reboots, unless stopped on purpose
+    env_file: .env               # settings and secrets; see .env.example for every option
     ports:
       - "8501:8501"          # put a reverse proxy with HTTPS in front (see README) before exposing publicly
     volumes:
