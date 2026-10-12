@@ -54,7 +54,7 @@ value or row number, and page through large files. The same view downloads as a 
 | Step | What happens |
 |---|---|
 | **Read** | Every cell is read as text (no lost ZIP zeros, no phones turned into `5.16E+09`). Header row, encoding (UTF-8 / Windows-1252 / etc.), delimiter and Excel sheets are detected; the user can override. The header row is found below any title or report lines, and files without one are recognised (see [Files without a header row](#files-without-a-header-row)). |
-| **Map** | 1) A saved **template** with the same column headers is applied instantly, including its notes and time zone (any template can also be picked by hand under *Use a saved template*). 2) Otherwise **rules** match headers, synonyms and value types (phones, dates…), and find every phone column (Phone, Phone 2…, Mobile, Home) — but not columns *about* a phone such as `phone4MarketingPreference`, Phone Type or SMS Opt In. A column only counts as a phone column by its values alone when nearly all of its values are phone numbers, so a stray number typed into e.g. *Occupation* doesn't pull that column into the phone field. 3) Optionally, your **notes on columns** are applied by Claude. |
+| **Map** | 1) A saved **template** with the same column headers is applied instantly, including its notes and time zone. 2) Otherwise **rules** match headers, synonyms and value types (phones, dates…), and find every phone column (Phone, Phone 2…, Mobile, Home) — but not columns *about* a phone such as `phone4MarketingPreference`, Phone Type or SMS Opt In. A column only counts as a phone column by its values alone when nearly all of its values are phone numbers, so a stray number typed into e.g. *Occupation* doesn't pull that column into the phone field. 3) Optionally, your **notes on columns** are applied by Claude. |
 | **Review** | A grid shows each target field, its source column(s), how it's built, a sample of converted output, and any problem. Edit it directly, add notes per column, and run **Check for mistakes** before importing. |
 | **Convert** | Runs in a background worker pool (default 2 at a time; more wait in a queue) so users can keep working. Deterministic Python converts every row — Claude never touches the full file. Phones are validated with Google's libphonenumber, dates are interpreted per column (month-first vs day-first decided once for the whole column, Excel serial dates handled), ZIP/state/email normalized. |
 | **Report** | **Bad rows are not imported** and the result is flagged: *"37 bad rows were NOT imported"* with a reason per row in the rejected-rows file. Optional fields with invalid values are left blank (configurable per field). |
@@ -225,25 +225,25 @@ The field grid above it still works the other way round (pick the source column(
 
 ## Files without a header row
 
-The header row is found by comparing each row with the rest of its columns, not by looking at cells on their own:
-a header is a row of labels sitting over columns that hold phone numbers, emails or dates; a customer row holds
+The header row is found by comparing each row with the column below it, not by looking at cells on their own: a
+header is a row of labels sitting over columns that hold phone numbers, emails or dates; a customer row holds
 values of the same kind as the rest of its column.
 
 - **Titles and report lines above the header** (`Guest export`, `Store, Kravit Bayside`, `Generated, 10/12/2026`,
   blank rows) are skipped. The header is the label row just above the first customer.
 - **No header row:** when the first full row already holds a customer (its phone number, email or date matches its
   column), the file has no header row. Columns are named `Column 1`, `Column 2`, … and every row is data.
-- **A customer row is never used as the header.** The only thing that can end up as column names is a row with no
-  phone number, email or date that fits its column, so no customer who could be imported is lost.
+- **A customer is never lost.** A row with a valid phone number or email (in any column, even when an unquoted
+  comma has shifted it) is never used as the header, and the header is never looked for below it. Only rows
+  without one can end up as column names, so no customer who could be imported is dropped.
 - **Unsure cases** (e.g. a file of names only, a header with no customers, a single customer) show a warning asking
   you to check *File options and raw preview*. A header row that holds a phone number, email or date (for
   example one picked by hand) also shows a warning.
 - **Mapping:** without names, only the phone column can be recognised (from its values). Choose where the other
   columns go under *Columns in your file*; the sample values show what each column holds.
-- **Templates:** a file without a header row is never matched to a template automatically, because every
-  headerless file with the same number of columns has the same stand-in names. Save its mapping with *Remember
-  this mapping*, and next time pick it under **Use a saved template**: columns are matched by position
-  (`Column 1` is the first column), so it fits files with the same column order.
+- **No templates:** files without a header row don't use templates. They are never matched to one and never
+  saved as one (*Remember this mapping* is switched off for them): every headerless file with the same number of
+  columns has the same stand-in names, so a template would be applied to another client's file.
 - To override: *File options and raw preview → Header is on row* (`0` = no header row) → **Re-read file**. The
   preview's row numbers match that box.
 
