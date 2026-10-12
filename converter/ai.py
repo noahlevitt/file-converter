@@ -237,8 +237,10 @@ RULES:
   SMS Opt In) are not phone numbers — never map them to the phone field.
 - A phone cell holding several numbers ("516-555-0100 / 917-555-1234") is split by the engine into one row per
   number automatically; map that column normally and don't report it as a problem.
-- Import every date that records a customer's latest activity. A date that is not a last activity - when the
-  record was created, a sign-up or join date, a first visit, an expiry - must not be mapped to an activity field.
+- A row has one last date. Map a column that names a last activity to its field (both, if the file names both a
+  last call and a last transaction). If there is none, map the best generic date column (Date, Start Time,
+  Timestamp) to one activity field. Only if the file has no other date, map a creation-type date (Date Created,
+  Sign Up Date, First Visit) instead - never alongside a real last date. Never map expiry, due or opt-in dates.
 - Never invent data. Use constant only when the user explicitly asks for a fixed value. Never use constant
   or a guessed column for consent, opt-in or subscription fields.
 - confidence: high = header and values clearly match; medium = probable; low = a guess the reviewer must check.
