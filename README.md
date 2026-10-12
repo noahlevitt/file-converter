@@ -164,16 +164,20 @@ How the numbers in one cell are told apart (no digit is ever added, removed or m
 - A column that names its activity goes to that field: *Last Visit* / *Last Order* → `transactions_last`,
   *Last Call* / *Call Time* → `calls_last`, *Last Text Received* → `in_sms_last`, *Last Reward Redeemed* →
   `redemptions_last`, *Last Spin* → `spin_last`, *Birthday* / *DOB* → `birthday`.
-- **A date column with a generic name** (*Date*, *Start Time*, *Timestamp*, *Updated*…) is still imported:
-  - in a **call log** (a header like *Caller ID*, *Duration*, *Direction*, *Missed*, or both a *From* and a *To*
-    column) it goes to `calls_last`;
-  - in any other file it goes to `transactions_last`;
-  - a second generic date goes to the other of the two, unless it's only an end or edit time (*End Time*);
-  - separate *Date* and *Time* columns are combined into one date-time.
-- **Never used as a last activity:** dates that aren't one — *Date Created*, *Created At*, *Sign Up Date*,
-  *Joined*, *Member Since*, *First Visit*, *Expiration Date*, *Opt-In Date*.
-- Generic dates are marked *low* confidence on the mapping page so a person checks them. Every phone number of a
-  call log is imported, the client's own line included (cell-phone validation happens later).
+- **One last date per row.** Unlike phone numbers, a row has one last date, chosen in this order:
+  1. columns that name their activity, as above (if a file names both a last call and a last transaction, both
+     are kept);
+  2. otherwise the best **generically named date** (*Last Updated*, *Visit Date*, *Date*, *Start Time*,
+     *Timestamp*, *Updated*, *End Time*);
+  3. only if the file has no other date, a **creation date** (*Date Created*, *Created At*, *Sign Up Date*,
+     *Joined*, *Member Since*, *First Visit*): better than no date at all, never alongside a real last date.
+- Cases 2 and 3 go to `calls_last` in a **call log** (a header like *Caller ID*, *Duration*, *Direction*,
+  *Missed*, or both a *From* and a *To* column) and to `transactions_last` in any other file. Separate *Date* and
+  *Time* columns are combined into one date-time. They are marked *low* confidence for review.
+- **Never used:** expiry, due and opt-in dates (*Expiration Date*, *Due Date*, *Opt-In Date*); birthdays go to
+  `birthday`.
+- Every phone number of a call log is imported, the client's own line included (cell-phone validation happens
+  later).
 
 ### Dates and times
 
