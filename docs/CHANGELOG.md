@@ -3,6 +3,16 @@
 What changed in each version. The running version is shown in the app's sidebar. Each version is tagged in git
 (`vX.Y.Z`).
 
+## 0.10.0 — light and dark mode
+
+- A light/dark toggle at the top right of every page: a small square with a moon (switch to dark mode) or a sun
+  (switch to light mode). The switch is instant and keeps everything on the page (no sign-out, no lost mapping).
+- The choice is saved per user (new `user_prefs` table, created automatically) and in the browser, so it applies
+  after signing in again, on other computers and on the login page. Until a user chooses, the app follows the
+  computer's light/dark setting.
+- Streamlit's real dark theme is used for every element, including the mapping grids. The side-by-side comparison
+  has matching dark colours with the same meanings (orange = repaired, red = rejected, …).
+
 ## 0.9.0 — no assumed area codes (compliance)
 
 Every feature that guesses or assumes data was reviewed and approved or removed one by one.
