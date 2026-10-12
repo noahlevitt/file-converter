@@ -22,8 +22,8 @@ Main entry points
            mapping is returned with a note. In the web app this step runs only with ``AI_AUTO_MAP=true``; in the
            CLI only with ``--ai``.
 
-      A file without a header row is never matched to a template (see ``Store.find_template``); the reviewer can
-      apply one by hand (:func:`template_mapping`).
+      Files without a header row don't use templates at all (never matched, never saved; see
+      ``Store.find_template`` / ``Store.save_template``).
     * :func:`template_mapping` — a saved template's mapping fitted to the current file.
     * :func:`merge` — apply a partial mapping (e.g. Claude's suggested changes) on top of an existing one.
     * :func:`validate_repairs` — double-check Claude's "Suggest fixes" value repairs before they are offered.
@@ -148,9 +148,9 @@ def initial_mapping(schema: TargetSchema, df: pd.DataFrame, profiles: list[Colum
     rules = auto_map(schema, profiles).normalized(schema, columns)
     notes: list[str] = []
     if has_generic_columns(columns):
-        notes.append("This file has no header row: saved templates aren't matched automatically, and columns can "
-                     "only be recognised from their values (phone numbers). Pick a template under Use a saved "
-                     "template, or choose where each column goes under Columns in your file.")
+        notes.append("This file has no header row: templates aren't used for it, and columns can only be "
+                     "recognised from their values (phone numbers). Choose where each column goes under Columns in "
+                     "your file.")
     near_tpl, near_sim = (None, 0.0)
     if store is not None:
         # Same lookup as step 1; here it can only return a *similar* template (>= the similarity threshold) or None.
@@ -197,11 +197,9 @@ def initial_mapping(schema: TargetSchema, df: pd.DataFrame, profiles: list[Colum
 def template_mapping(schema: TargetSchema, tpl: Template, columns: list[str]) -> Mapping:
     """A saved template's mapping fitted to this file: ``Mapping.normalized``, every mapped field marked "template".
 
-    Used for an exact template match (:func:`initial_mapping`) and when the reviewer picks a template by hand on the
-    mapping page. Columns the template uses that the file lacks are dropped, current rules are enforced (phones
-    one row per number, consent never mapped), and the saved template itself is not changed. For a file without a
-    header row the columns match by position ("Column 1" is the first column), which is why such files only get a
-    template the reviewer chose.
+    Used for an exact template match (:func:`initial_mapping`) and by the CLI's ``--template``. Columns the template
+    uses that the file lacks are dropped, current rules are enforced (phones one row per number, consent never
+    mapped), and the saved template itself is not changed.
     """
     m = tpl.mapping.normalized(schema, columns)
     for fm in m.fields.values():
