@@ -32,7 +32,7 @@ The suite needs no network and no API key. Claude is replaced by fake clients. T
 | Test module | Covers |
 |---|---|
 | `test_formats.py` | Hundreds of date, time and phone spellings against the real format, plus every rejection reason |
-| `test_phone_repair.py` | Phone typo repair, ambiguity, tie-breaking, marking of repairs |
+| `test_phone_repair.py` | Phone typo repair (allowed repairs only; area codes never changed or filled in), ambiguity, tie-breaking, marking |
 | `test_multi_phone.py` | Several phone columns → one row per different number; phone-setting columns |
 | `test_birthdays.py` | No-year birthdays/anniversaries → 1600 (placeholders, Excel-added years, split columns) |
 | `test_real_schema.py` | The real import format end to end: headers, consent blank, dedupe, sample exports |
