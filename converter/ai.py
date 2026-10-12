@@ -195,7 +195,8 @@ def build_system_prompt(schema: TargetSchema) -> str:
     then lists the target schema (:func:`_schema_docs`), the transforms (:func:`_transform_docs`), the parameters
     and the rules: copy names exactly, prefer leaving a field blank to guessing, send every phone column to the
     phone field with each_row (one row per different number, never coalesce), never map columns *about* phones
-    (preference, type, opt-in) as phone numbers, never invent data or touch consent.
+    (preference, type, opt-in) as phone numbers, cells with several numbers are split automatically (not a
+    problem to report), never invent data or touch consent.
 
     It depends only on the schema - nothing file-specific goes in here - so it is identical across calls and can
     be served from the prompt cache (see ``ClaudeAssistant._call``). File details go in the user message.
@@ -228,6 +229,8 @@ RULES:
 - Several phone columns (Phone, Phone 2, Mobile, Home…): put all of them on the phone field with each_row, so
   every different number becomes its own row (never coalesce for phones). Columns ABOUT a phone (e.g. phoneMarketingPreference, Phone Type,
   SMS Opt In) are not phone numbers — never map them to the phone field.
+- A phone cell holding several numbers ("516-555-0100 / 917-555-1234") is split by the engine into one row per
+  number automatically; map that column normally and don't report it as a problem.
 - Never invent data. Use constant only when the user explicitly asks for a fixed value. Never use constant
   or a guessed column for consent, opt-in or subscription fields.
 - confidence: high = header and values clearly match; medium = probable; low = a guess the reviewer must check.
