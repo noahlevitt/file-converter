@@ -378,7 +378,7 @@ def auto_map(schema: TargetSchema, profiles: list[ColumnProfile]) -> Mapping:
     # date, ...) need 60 because values add evidence; header-only fields need 72 so a vague similarity alone
     # doesn't map a column. Fixed-blank fields (e.g. consent) are not mappable and never considered.
     scored = []
-    for f in schema.mappable_fields:
+    for f in schema.auto_fields:  # never manual-only fields (consent, last_contacted): a person maps those
         threshold = 60 if f.type in TYPED else 72
         for p in profiles:
             s = score(p, f)
@@ -625,22 +625,22 @@ def _map_generic_dates(schema: TargetSchema, profiles: list[ColumnProfile], fiel
 
     Candidates are unused, non-consent columns whose values are clearly dates (80%+, see :func:`enough_evidence`),
     never birthday / expiry / opt-in dates (:data:`NEVER_ACTIVITY_DATE_WORDS`) and never a column that names an
-    always-blank field ("Last Campaign Sent" is last_contacted, which stays blank).
+    always-blank or hand-mapped-only field ("Last Campaign Sent" is last_contacted, which only a person maps).
 
     Examples (real schema): a call log with "Date", "Direction", "From", "To" -> calls_last <- "Date"; a customer
     list with "Date Created" and "Updated" -> transactions_last <- "Updated"; a list whose only date is "Date
     Created" -> transactions_last <- "Date Created"; "Last Visit" + "Date Created" -> only "Last Visit".
     """
-    targets = {f.generic_date: f.name for f in schema.mappable_fields if f.generic_date}
+    targets = {f.generic_date: f.name for f in schema.auto_fields if f.generic_date}
     if not targets:
         return
-    if any(f.type == "datetime" and fields[f.name].transform != "none" for f in schema.mappable_fields):
+    if any(f.type == "datetime" and fields[f.name].transform != "none" for f in schema.auto_fields):
         return  # the file already gives a last date by name
     call_log = _looks_like_call_log(profiles)
     target = targets.get("call_log" if call_log else "default") or next(iter(targets.values()))
-    # Columns that name an always-blank field (e.g. "Last Campaign Sent" = last_contacted, when we last texted the
-    # customer) are about that field and stay out, like consent columns.
-    fixed = [f for f in schema.fields if f.fixed_blank]
+    # Columns that name an always-blank or hand-mapped-only field (e.g. "Last Campaign Sent" = last_contacted, when
+    # we last texted the customer) are about that field and stay out, like consent columns.
+    fixed = [f for f in schema.fields if f.fixed_blank or f.manual_only]
     dates = [p for p in profiles
              if p.name not in used and not is_consent_column(p.name)
              and not set(_words(p.name)) & NEVER_ACTIVITY_DATE_WORDS
