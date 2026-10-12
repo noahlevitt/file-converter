@@ -67,7 +67,7 @@ def test_one_row_per_different_number(real_schema):
         "10/05/2026 12:00 AM"]
     assert (res.total_rows, res.imported, res.rejected, res.extra_rows, res.skipped_values) == (5, 5, 2, 2, 1)
     msg = res.flag_message()
-    assert "5 rows ready to import from 5 file rows (2 extra rows" in msg and "1 invalid extra number" in msg
+    assert "5 rows ready to import from 5 file rows (2 extra rows" in msg and "1 extra phone number skipped" in msg
     assert "too few digits" in res.rejects.loc[res.rejects["firstName"] == "Di", "Reason"].iloc[0]
     assert res.rejects.columns[3] == "phone_number"  # which number of the file row it was
 
