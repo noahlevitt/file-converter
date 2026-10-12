@@ -240,8 +240,8 @@ def _validate_final(f, value: str, params: dict, timezone: str | None = None) ->
     trusting the exact output format avoids a silent day/month swap. Otherwise the value goes through the normal
     date pipeline (``N.prepare`` on this one value, then ``N.normalize``), with the import's time zone when given.
 
-    Other types: normalized with an empty context, i.e. without file-level evidence such as the file's common
-    area codes — a repaired phone must be valid on its own.
+    Other types: normalized with an empty context, i.e. without file-level evidence such as the file's other
+    numbers — a repaired phone must be valid on its own.
     """
     if f.type in ("date", "datetime"):
         out_fmt = f.format or ("%Y-%m-%d %H:%M:%S" if f.type == "datetime" else "%Y-%m-%d")
