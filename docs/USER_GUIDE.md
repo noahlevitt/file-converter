@@ -38,8 +38,8 @@ here:
   needs checking: no header row found, a header below title lines, an unsure guess, or a header row that holds a
   phone number, email or date (usually a customer, not a header).
 - **Files without a header row** get columns named *Column 1*, *Column 2*, …. Only the phone column is
-  recognised (from its values); choose where the others go under **Columns in your file**. Saved templates are
-  not applied automatically to such files: pick one under **Use a saved template** (columns match by position).
+  recognised (from its values); choose where the others go under **Columns in your file**. Templates aren't used
+  for such files: none is applied, and *Remember this mapping* is switched off.
 
 ### 2 · Review the column mapping
 
@@ -238,8 +238,5 @@ start the import again. With **Remember this mapping** on, the template is updat
 
 **The header row is wrong / column names are numbers or a customer's details.** Open **File options and raw
 preview**, set the header row (`0` = the file has no header row) and click **Re-read file**.
-
-**Use the mapping from another file.** Open **Use a saved template** above the field grid, pick the template and
-click **Apply template**. This is how files without a header row reuse a mapping.
 
 **An import says *interrupted*.** The app restarted while it ran. Open it and click **Re-run this import**.
