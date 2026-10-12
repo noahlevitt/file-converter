@@ -410,7 +410,8 @@ def profile_columns(df: pd.DataFrame, sample_size: int = 300, n_samples: int = 1
             # Share of the sampled distinct values each lightweight detector accepts. Each detector is applied on
             # its own, so the shares need not add up to 1 (free text matches none of them).
             shares = {
-                "phone": sum(N.looks_like_phone(v) for v in sample) / n,
+                # Cells with several numbers count: each number becomes its own row (see normalizers.split_phones).
+                "phone": sum(N.looks_like_phones(v) for v in sample) / n,
                 "email": sum(N.looks_like_email(v) for v in sample) / n,
                 "date": sum(N.looks_like_date(v) for v in sample) / n,
                 "zip": sum(N.looks_like_zip(v) for v in sample) / n,
