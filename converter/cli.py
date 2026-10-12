@@ -52,7 +52,7 @@ from pathlib import Path
 from . import __version__
 from .config import get_settings
 from .jobs import run_import
-from .mapping import profile_columns
+from .mapping import has_generic_columns, profile_columns
 from .reader import ReadError, read_file
 from .schema import load_schema
 from .services import initial_mapping, make_assistant
@@ -167,6 +167,10 @@ def cmd_convert(args) -> None:
         store.save_template(args.save_template, list(rr.df.columns), mapping,
                             {"sheet": rr.sheet, "header_row": rr.header_row}, schema.name, "cli")
         print(f"Saved template '{args.save_template}'.")
+        if has_generic_columns(list(rr.df.columns)):
+            # Never matched automatically (see Store.find_template): it must be named again with --template.
+            print("  This file has no header row, so the template is only used when you pass "
+                  f"--template \"{args.save_template}\".")
     # Store the header row that was actually used (detected or given), so the import re-reads the file the same
     # way. ai_used records whether --ai was passed.
     import_id = store.create_import(
