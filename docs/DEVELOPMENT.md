@@ -14,8 +14,8 @@ cp .env.example .env              # then edit: admin account, optional ANTHROPIC
 .venv/bin/streamlit run app.py    # http://localhost:8501
 ```
 
-`./run_local.sh` (Mac/Linux) or `run_local.bat` (Windows) does the same in one step. For a quick single-user
-session without a login, set `AUTH_MODE=none` in `.env`.
+`./run_local.sh` (Mac/Linux) or `run_local.bat` (Windows) does the same in one step. Logins are off by default
+(`AUTH_MODE=none`); set `AUTH_MODE=password` in `.env` to work on the login or Users page.
 
 ## Tests
 
