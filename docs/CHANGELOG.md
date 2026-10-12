@@ -3,6 +3,26 @@
 What changed in each version. The running version is shown in the app's sidebar. Each version is tagged in git
 (`vX.Y.Z`).
 
+## 0.12.1 — header detection hardened; no templates for files without a header row
+
+- **No templates for files without a header row.** They are never matched to a template and never saved as one
+  (*Remember this mapping* is switched off for them; the CLI skips `--save-template` and refuses `--template`).
+  The *Use a saved template* picker added in 0.12.0 is removed, so files with headers work exactly as before it.
+  Templates saved from headerless files by older versions are never matched; they can be deleted on the Templates
+  page.
+- Header detection, checked against 0.11.0 on 54,000 generated exports (clean and messy) and end to end on 400
+  files with headers plus the sample files:
+  - a row holding a valid phone number or email - in any column, also when an unquoted comma shifted it - is never
+    the header and the header is never looked for below it, so no customer is dropped (0.11.0 dropped the first
+    customer in about a third of files without a header);
+  - files with a header: the right row in 99.9% of clean files (0.11.0: 83%); every file where both versions agree
+    on the header row converts to byte-identical output, and every difference is a header 0.11.0 got wrong;
+  - "N/A", "none" and the like count as empty; a report line such as `Generated, 10/12/2026` or
+    `Date range, 09/01/2026 - 09/30/2026` is no longer mistaken for a customer or a phone number; columns that only
+    shifted rows reach no longer count.
+- A cell holding several phone numbers now counts as a phone value when a column is recognised by its values, so the
+  phone column of a file without a header row is still found when some customers have two numbers in one cell.
+
 ## 0.12.0 — files without a header row
 
 - **Fix:** in most files without a header row, the first customer was taken as the header and silently left out
