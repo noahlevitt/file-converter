@@ -11,14 +11,15 @@ Responsibilities
       parse with the ``csv`` module (:func:`_read_text_grid`).
     * Spreadsheets: list the sheets (:func:`list_sheets`) and read the chosen one as text
       (:func:`_read_excel_grid`, calamine engine).
-    * Find the header row in the raw grid (:func:`detect_header_row`), or use the row the reviewer picked.
+    * Find the header row in the raw grid (:func:`detect_header`: titles above it skipped, files without one
+      recognised, unsure cases flagged), or use the row the reviewer picked.
     * Build a clean, text-only DataFrame with unique column names (:func:`build_frame`).
     * Report what was detected and anything suspicious (:class:`ReadResult`: encoding, delimiter, sheet,
       header row, warnings, a raw preview for choosing the header row by hand).
 
 Main entry point
-    :func:`read_file` - used by the web app, the CLI and the background import jobs. :func:`detect_header_row`
-    and :func:`build_frame` are also usable on their own.
+    :func:`read_file` - used by the web app, the CLI and the background import jobs. :func:`detect_header`,
+    :func:`detect_header_row` and :func:`build_frame` are also usable on their own.
 
 Data flow
     upload bytes -> raw grid (list of rows of strings) -> cell cleaning -> header-row detection ->
@@ -37,11 +38,14 @@ from __future__ import annotations
 import csv
 import io
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import pandas as pd
 from charset_normalizer import from_bytes
+
+from .normalizers import looks_like_date, looks_like_email, looks_like_phone
 
 # Delimited text files (the delimiter is sniffed, except .tsv/.tab which are always tab-separated).
 TEXT_EXTENSIONS = {".csv", ".tsv", ".txt", ".tab"}
@@ -90,6 +94,8 @@ class ReadResult:
     header_row: int | None = 0  # 0-based index in the raw grid; None = file has no header row
     # What auto-detection found, kept even when the caller chose another header row (or "no header").
     detected_header_row: int | None = 0
+    # False when detection had to fall back to a guess (see detect_header); a warning then asks the reviewer to check.
+    header_sure: bool = True
     # Text files: the encoding used to decode the bytes ("utf-8", "utf-8-sig", "cp1252", ...).
     encoding: str | None = None
     # Text files: the column separator ("," ";" "\t" "|").
@@ -230,55 +236,169 @@ def _looks_like_data(cell: str) -> bool:
     """True when a cell looks like a data value (number / amount / phone, date, email) rather than a header label.
 
     Examples: "2015550111", "$12.50", "10/01/2026", "ana@example.com" -> True; "Phone", "Last Visit" -> False.
-    Formatted phones such as "(201) 555-0111" don't match any pattern and count as text.
+    Formatted phones such as "(201) 555-0111" don't match any pattern and count as text. Only used by the fallback
+    of :func:`detect_header` (files where no column holds phones, emails or dates); the main rule uses
+    :func:`_cell_kind`.
     """
     return bool(_NUMERIC_RE.match(cell) or _DATEISH_RE.match(cell) or _EMAIL_RE.match(cell))
 
 
+# Header detection compares each row with the rest of its columns, learned from this many rows at the top of the
+# file (enough to know what a column holds; few enough to stay fast on huge files).
+KIND_SAMPLE_ROWS = 100
+# Kinds of value that never appear as a column label: a header row doesn't hold phone numbers, emails or dates.
+_STRONG_KINDS = {"phone", "email", "date"}
+# Kinds a data column can have, as opposed to free text.
+_TYPED_KINDS = _STRONG_KINDS | {"number", "flag"}
+# Yes/no style values ("flag" kind).
+_FLAG_WORDS = {"y", "n", "yes", "no", "true", "false", "t", "f", "x"}
+
+
+def _cell_kind(cell: str) -> str | None:
+    """What kind of value a cell holds, for header detection. None for an empty cell.
+
+    "email" (ana@x.com), "phone" (a valid number in any format, or 7+ digits outweighing the letters: typos and
+    7-digit numbers are still phone-shaped), "date" (any date the date parser reads, including "03/15"),
+    "number" (amounts, counts, ZIPs, years), "flag" (Y/N, true/false) or "text" (everything else - names, labels).
+        "516-555-0100", "(516) 555-0100", "555-1212" -> "phone";   "10/01/2026 3:15 PM", "Sep 12" -> "date"
+        "Phone", "Last Visit", "Visits 2024", "Ana Lee" -> "text";  "$12.50", "2024" -> "number";  "Y" -> "flag"
+    """
+    if not cell:
+        return None
+    if looks_like_email(cell):
+        return "email"
+    if looks_like_phone(cell):
+        return "phone"
+    if looks_like_date(cell):
+        return "date"
+    digits = sum(ch.isdigit() for ch in cell)
+    letters = sum(ch.isalpha() for ch in cell)
+    if digits >= 7 and digits >= 2 * letters:
+        return "phone"
+    if digits and digits >= letters:
+        return "number"
+    if cell.lower() in _FLAG_WORDS:
+        return "flag"
+    return "text"
+
+
+def _usual_kind(counts: Counter, own: str | None) -> str | None:
+    """The kind most cells of a column hold, not counting one row's own cell (``own``); None if no kind has 60%.
+
+    ``counts`` counts the kinds of the column's non-empty cells in the sample. Leaving the row's own cell out lets a
+    file with only one or two data rows still be judged.
+    """
+    c = Counter(counts)
+    if own:
+        c[own] -= 1
+    total = sum(n for n in c.values() if n > 0)
+    if not total:
+        return None
+    kind, n = max(c.items(), key=lambda kv: kv[1])
+    return kind if n / total >= 0.6 else None
+
+
+def detect_header(grid: list[list[str]]) -> tuple[int | None, bool]:
+    """Find the header row: (0-based index or None when the file has no header row, sure?).
+
+    Exports often start with titles, report dates, store names or blank rows; some have no header at all. Header
+    labels and customer values differ in a way cell shapes alone can't show ("516-555-0100" and "Name" are both
+    "text" to a naive check), so each row is compared with the rest of its columns (cells already cleaned):
+
+    1. Every cell gets a kind (:func:`_cell_kind`) and every column a usual kind, learned from the first
+       KIND_SAMPLE_ROWS rows without the row being judged (:func:`_usual_kind`).
+    2. A row's *contrast* = its text cells sitting over a typed column (a label such as "Phone" over phone numbers);
+       its *consistency* = its phone/email/date cells matching their column (a customer's phone in the phone column).
+    3. Rows are read from the top (the first HEADER_SCAN_ROWS). The first row with more consistency than contrast,
+       filled in at least half the columns, is the first customer row. The header is the label row above it with
+       the most contrast (ties: the lower one): at least one label over a typed column, more contrast than
+       consistency, mostly text (60%+) and mostly distinct. No such row above the first customer row means the file
+       has no header row (None).
+    So a title, a "Generated 10/12/2026" line or a store name above the header is skipped, and a row holding a
+    customer's phone number, email or date in the matching column is never used as the header. Returns sure=True.
+
+    When no customer row is found in the scanned rows (e.g. no column holds phones, emails or dates, or the file
+    is tiny), the best label row found is used if there is one (sure=True); otherwise the older shape rule decides
+    and the answer is marked unsure (sure=False) so the reviewer is asked to check: the first row filled in at least
+    half the columns that is 70%+ text and has no phone/email/date is the header, a first row holding one is data
+    (None), and if nothing decides, row 0 is assumed.
+
+    Examples::
+
+        [["Customer export"], [], ["Name", "Phone"], ["Ana", "516-555-0100"], ["Ben", "917-555-1234"]] -> (2, True)
+        [["Ana Lee", "(516) 555-0100"], ["Ben Cruz", "(917) 555-1234"]]                               -> (None, True)
+        [["Store", "Kravit"], ["Name", "Phone", "Visit"], ["Ana", "516-555-0100", "10/01/2026"]]       -> (1, True)
+    """
+    rows = grid[:HEADER_SCAN_ROWS]
+    if not rows:
+        return 0, False
+    # Width = most filled cells in any scanned row; a "substantial" row fills at least half of it (and 2+ cells), so
+    # a one-cell title line never counts as the header or as the first customer row.
+    width = max((sum(1 for c in r if c) for r in rows), default=0)
+    if width == 0:
+        return 0, False
+    min_cells = max(2, -(-width // 2)) if width > 1 else 1
+    sample = grid[:KIND_SAMPLE_ROWS]
+    kinds = [[_cell_kind(c) for c in r] for r in sample]
+    counts: list[Counter] = [Counter() for _ in range(max(len(r) for r in sample))]
+    for kr in kinds:
+        for j, k in enumerate(kr):
+            if k:
+                counts[j][k] += 1
+
+    best: tuple[int, int] | None = None  # (contrast - consistency, row index) of the best label row so far
+    for i in range(len(rows)):
+        kr = kinds[i]
+        filled = [k for k in kr if k]
+        if len(filled) < min_cells:
+            continue
+        contrast = consistency = 0
+        for j, k in enumerate(kr):
+            usual = _usual_kind(counts[j], k) if k else None
+            if usual is None:
+                continue
+            if k == "text" and usual in _TYPED_KINDS:
+                contrast += 1
+            elif k in _STRONG_KINDS and k == usual:
+                consistency += 1
+        if consistency > contrast:
+            # The first customer row: the header, if any, is the best label row above it.
+            return (best[1] if best else None), True
+        cells = [c for c in rows[i] if c]
+        textlike = sum(1 for k in filled if k == "text") / len(filled)
+        unique = len({c.lower() for c in cells}) / len(cells)
+        if contrast > consistency and textlike >= 0.6 and unique >= 0.5:
+            score = contrast - consistency
+            if best is None or score >= best[0]:
+                best = (score, i)
+    if best is not None:
+        return best[1], True
+    # Fallback: no column holds phones, emails or dates in a way that separates labels from values.
+    for i, row in enumerate(rows):
+        cells = [c for c in row if c]
+        if len(cells) < min_cells:
+            continue
+        if any(k in _STRONG_KINDS for k in kinds[i] if k):
+            return None, False  # the first full row holds a phone, email or date: it's data
+        textlike = sum(1 for c in cells if not _looks_like_data(c) and len(c) <= 80) / len(cells)
+        unique = len({c.lower() for c in cells}) / len(cells)
+        has_following_data = any(any(c for c in r) for r in rows[i + 1 : i + 4]) or i == len(rows) - 1
+        if textlike >= 0.7 and unique >= 0.5 and has_following_data:
+            return i, False
+        if textlike < 0.5:
+            return None, False
+    return 0, False
+
+
 def detect_header_row(grid: list[list[str]]) -> int | None:
-    """Return the 0-based index of the header row, or None if the file has no header row.
-
-    Exports often start with a title ("Guest export"), a date line or blank rows. The rule, over the first
-    HEADER_SCAN_ROWS rows (cells already cleaned):
-
-    * Only "substantial" rows count: at least half as many filled cells as the widest row (and at least 2), so a
-      one-cell title line is skipped.
-    * The first substantial row where at least 70% of the filled cells are text labels (not numbers, dates or
-      emails, at most 80 characters), at least half of them distinct, and some data follows within 3 rows (or
-      it's the last row scanned) is the header.
-    * If the first substantial row that isn't a header is mostly data (under 50% text), the file has no header
-      row -> None.
-    * Rows in between (50-70% text) are skipped; if nothing qualifies, row 0 is assumed.
+    """The header row from :func:`detect_header` without the sure/unsure flag (0-based index, None = no header).
 
     Examples::
 
         [["Customer export"], [], ["Name", "Phone", "Email"], ["Ana", "2015550111", "a@x.com"]] -> 2
         [["Ana Lee", "2015550111", "a@x.com"], ["Ben Ode", "2015550112", "b@x.com"]]           -> None
     """
-    rows = grid[:HEADER_SCAN_ROWS]
-    if not rows:
-        return 0
-    # Width = most filled cells in any scanned row.
-    width = max((sum(1 for c in r if c) for r in rows), default=0)
-    if width == 0:
-        return 0
-    min_cells = max(2, -(-width // 2)) if width > 1 else 1  # at least half the columns (and 2+)
-    for i, row in enumerate(rows):
-        cells = [c for c in row if c]
-        if len(cells) < min_cells:
-            continue
-        # Share of label-like cells (long texts are more likely notes/data than column names).
-        textlike = sum(1 for c in cells if not _looks_like_data(c) and len(c) <= 80) / len(cells)
-        # Share of distinct cells (case-insensitive): a header rarely repeats itself; data such as "Y, Y, Y" can.
-        unique = len({c.lower() for c in cells}) / len(cells)
-        # A header must be followed by data (one of the next 3 rows non-empty), else it's e.g. a footer line.
-        has_following_data = any(any(c for c in r) for r in rows[i + 1 : i + 4]) or i == len(rows) - 1
-        if textlike >= 0.7 and unique >= 0.5 and has_following_data:
-            return i
-        if textlike < 0.5:
-            # First substantial row already looks like data → no header row.
-            return None
-    return 0
+    return detect_header(grid)[0]
 
 
 def _unique_headers(raw: list[str]) -> list[str]:
@@ -360,7 +480,8 @@ def read_file(
     warnings.
 
     Warnings (``ReadResult.warnings``): rows with more values than header columns (text files only - usually an
-    unquoted comma such as ``Smith, John``), header found below the first row, no header row, no data rows.
+    unquoted comma such as ``Smith, John``), header found below the first row, no header row, detection unsure,
+    a header row holding a phone number / email / date (likely a customer row, e.g. picked by hand), no data rows.
 
     Raises :class:`ReadError` for an unsupported extension, an empty file, a file or sheet without any values, a
     header row past the end of the file, or a spreadsheet that can't be opened.
@@ -394,7 +515,7 @@ def read_file(
 
     # Always detect (reported as detected_header_row); use it unless the caller chose a row (int) or "no header"
     # (None).
-    detected = detect_header_row(cleaned)
+    detected, sure = detect_header(cleaned)
     hr = detected if header_row == "auto" else header_row
     if isinstance(hr, int) and hr >= len(cleaned):
         raise ReadError(f"Header row {hr + 1} is past the end of the file ({len(cleaned)} rows).")
@@ -415,9 +536,22 @@ def read_file(
                 "inside a value (e.g. Smith, John). Check those rows in the rejects file."
             )
     if hr is None:
-        warnings.append("No header row detected — columns are named Column 1, Column 2, …")
+        warnings.append("No header row detected — columns are named Column 1, Column 2, … Choose where each one "
+                        "goes under Columns in your file.")
     elif hr > 0:
         warnings.append(f"Header found on row {hr + 1}; {hr} row(s) above it were skipped.")
+    if header_row == "auto" and not sure:
+        warnings.append("Couldn't tell for sure whether the file has a header row. Check the first rows under File "
+                        "options: if row " + ("1" if hr is None else str(hr + 1)) + " is not what you expect, set "
+                        "'Header is on row' and click Re-read file.")
+    if isinstance(hr, int):
+        # Safety net, also for a row picked by hand: a header row holding a phone number, email or date is usually
+        # a customer row, and its values would be lost as column names.
+        data_cells = [c for c in cleaned[hr] if _cell_kind(c) in _STRONG_KINDS]
+        if data_cells:
+            warnings.append(f"Row {hr + 1} is used as the header but holds customer-looking values "
+                            f"('{data_cells[0][:40]}'). If it is a customer, set 'Header is on row' to the real "
+                            "header row (0 = no header row) and click Re-read file.")
     if df.empty:
         warnings.append("The file has a header but no data rows.")
 
@@ -428,6 +562,7 @@ def read_file(
         sheet=chosen_sheet,
         header_row=hr,
         detected_header_row=detected,
+        header_sure=sure,
         raw_preview=cleaned[:15],
         warnings=warnings,
         **result_kwargs,
