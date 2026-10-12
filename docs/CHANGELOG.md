@@ -3,6 +3,14 @@
 What changed in each version. The running version is shown in the app's sidebar. Each version is tagged in git
 (`vX.Y.Z`).
 
+## 0.12.2 — logins switched off
+
+- No login for now: `AUTH_MODE` defaults to `none`, so the app opens straight away and everyone uses it as the local
+  administrator. The Users page, *Signed in as* and *My account* are hidden while logins are off.
+- Nothing was deleted: accounts and passwords stay in the database. `AUTH_MODE=password` in `.env` turns logins back
+  on, with the same accounts.
+- An existing `.env` that says `AUTH_MODE=password` keeps the login until that line is changed to `none`.
+
 ## 0.12.1 — header detection hardened; no templates for files without a header row
 
 - **No templates for files without a header row.** They are never matched to a template and never saved as one
