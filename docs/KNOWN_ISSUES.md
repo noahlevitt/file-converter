@@ -15,6 +15,7 @@ limits (landlines, browser refresh, restarts, speed) are in the README under "Kn
 | 5 | **A whole birthday column sharing one year** (50%+ of 10+ values, or 80%+ of 5+) is treated as a placeholder year. | A small file of genuinely same-year birthdays would get `1600`. Very unlikely for real customers. | `normalizers._placeholder_year` |
 | 6 | **Intersections in a one-line address** (`Main St & 1st Ave`) keep only the first street in address line 1. | Only relevant for formats with address fields (not the current import format). | `transforms._ADDRESS_TAGS` |
 | 7 | **The whole file is held in memory** while converting. | Very large files (millions of rows) need a server with more memory. About 150,000 rows took 25 seconds in testing. | `engine.convert` |
+| 23 | **Header detection needs a column of phone numbers, emails or dates** to tell labels from values. Files without one (names only), a file with a single row, or a header with no customers fall back to a guess and show an "unsure" warning. A report line directly above headerless customers (`Store, Kravit Bayside`) becomes the column names. | No customer is lost: only rows without a phone/email/date that fits its column can become column names. Check the warning and the raw preview. | `reader.detect_header` |
 
 ## Mapping
 
@@ -22,7 +23,7 @@ limits (landlines, browser refresh, restarts, speed) are in the README under "Kn
 |---|---|---|---|
 | 8 | **A column about a phone could still be matched in step 1** of the automatic mapping if its *values* look like phone numbers (e.g. a "Phone Verified" column that holds numbers). Step 2 never adds such columns. | Shows on the mapping page; fix with *Goes to* / *Skip*. | `heuristics.auto_map` |
 | 9 | **The full-name split doesn't check for consent-looking headers.** "Subscriber Name" can be split into first/last name. | Only relevant for formats with name fields. Consent itself can never be mapped. | `heuristics.auto_map` step 4 |
-| 10 | **Templates match on the set of column names**, ignoring order and capitalisation. | Two systems exporting identical column names with different meanings would share a template. Check the mapping page. | `mapping.header_fingerprint`, `storage.find_template` |
+| 10 | **Templates match on the set of column names**, ignoring order and capitalisation. Files without a header row are never matched (since 0.12.0); their templates are picked by hand and match columns by position. | Two systems exporting identical column names with different meanings would share a template. A hand-picked template for a headerless file assumes the same column order. Check the sample output on the mapping page. | `mapping.header_fingerprint`, `storage.find_template`, `mapping.has_generic_columns` |
 | 11 | **Old templates keep old choices.** A template saved before a rule changed (e.g. one that mapped `phone4MarketingPreference`) is applied as saved. | Fix the mapping once and save with *Remember this mapping*, or delete the template. Phone fields using *First non-empty* are upgraded automatically. | `services.initial_mapping` |
 
 ## Claude (optional features)
