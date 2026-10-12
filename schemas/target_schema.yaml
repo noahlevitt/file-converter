@@ -89,6 +89,8 @@ fields:
     description: When the consumer last called
     synonyms: [last call, last called, last call date, last call time, last phone call, last inbound call,
                call date, recent call, calls last]
+    # A date column named only "Date", "Start Time", "Timestamp"... goes here when the file looks like a call log.
+    generic_date: call_log
 
   - name: transactions_last
     header: transactions_last
@@ -98,12 +100,17 @@ fields:
     synonyms: [last transaction, last transaction date, last order, last order date, last ordered,
                last purchase, last purchase date, last visit, last visit date, last sale, recent order,
                last check, last receipt, transactions last]
+    # A date column named only "Date", "Start Time", "Timestamp"... goes here in any other file.
+    generic_date: default
 
+  # Always blank: it means the last time WE texted the consumer, which never comes from an imported file. To allow
+  # it again, remove the fixed_blank line (the synonyms then apply).
   - name: last_contacted
     header: last_contacted
     type: datetime
     format: "%m/%d/%Y %I:%M %p"
-    description: When the business last contacted (messaged) the consumer
+    fixed_blank: true
+    description: Always blank. It is when we last texted the consumer, which imported files don't contain.
     synonyms: [last contact, last contacted date, last message sent, last sms sent, last text sent,
                last outreach, last campaign, last campaign sent, last messaged, date last contacted]
 
