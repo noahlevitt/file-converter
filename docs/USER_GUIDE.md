@@ -34,7 +34,12 @@ here:
   Templates remember the zone.
 - **File options and raw preview.** If the column names look wrong, open this. You can pick another sheet, or
   say which row holds the headers (`0` = the file has no header row), then click **Re-read file**. The preview
-  shows the first rows exactly as they are in the file.
+  shows the first rows exactly as they are in the file, numbered like the box. It opens by itself when something
+  needs checking: no header row found, a header below title lines, an unsure guess, or a header row that holds a
+  phone number, email or date (usually a customer, not a header).
+- **Files without a header row** get columns named *Column 1*, *Column 2*, …. Only the phone column is
+  recognised (from its values); choose where the others go under **Columns in your file**. Saved templates are
+  not applied automatically to such files: pick one under **Use a saved template** (columns match by position).
 
 ### 2 · Review the column mapping
 
@@ -231,7 +236,10 @@ own row.
 **A column went to the wrong field.** Under **Columns in your file**, change **Goes to** or tick **Skip**, then
 start the import again. With **Remember this mapping** on, the template is updated for next time.
 
-**The header row is wrong / column names are numbers.** Open **File options and raw preview**, set the header
-row and click **Re-read file**.
+**The header row is wrong / column names are numbers or a customer's details.** Open **File options and raw
+preview**, set the header row (`0` = the file has no header row) and click **Re-read file**.
+
+**Use the mapping from another file.** Open **Use a saved template** above the field grid, pick the template and
+click **Apply template**. This is how files without a header row reuse a mapping.
 
 **An import says *interrupted*.** The app restarted while it ran. Open it and click **Re-run this import**.
