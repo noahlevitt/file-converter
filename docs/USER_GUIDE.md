@@ -7,7 +7,7 @@ target system expects:
 - 10-digit US phone numbers;
 - activity dates and times as `MM/DD/YYYY HH:MM AM/PM`;
 - birthdays and anniversaries as `MM/DD/YYYY`, with year `1600` when there's no real year;
-- `consent` always blank.
+- `consent` as `true` / `false` and `last_contacted`, only when you map a column to them yourself (blank otherwise).
 
 ## Opening the converter
 
@@ -51,7 +51,7 @@ two tables.
 
 | Column | Meaning |
 |---|---|
-| Field | The import field. `*` = required (rows without it are bad rows). 🔒 = always blank (consent). |
+| Field | The import field. `*` = required (rows without it are bad rows). 🔒 = always blank. ✋ = only filled when you map a column to it yourself (consent, last_contacted). |
 | How | How the value is built: *Copy column*, *One row per phone number*, *Combine columns*, *Leave blank*, … |
 | Source column(s) | Which column(s) of your file feed this field. Click to change. |
 | Option | Extra setting, e.g. date order `MDY` / `DMY` for dates (`auto` normally works). |
@@ -215,9 +215,14 @@ The numbers below it are:
 
 ### Always blank
 
-`consent` and `last_contacted` are always left blank, whatever the file says. Opt-in and marketing-preference
-columns are never imported, and neither are columns about when *we* last texted the customer (*Last Campaign
-Sent*, *Last Message Sent*): `last_contacted` only ever comes from our own system.
+`consent` and `last_contacted` (marked ✋) are left blank unless **you** map a column to them for this file, in
+the field grid or with **Goes to** under **Columns in your file**. Nothing automatic fills them: not the rules,
+not Claude, not a default and not a saved template (templates leave them out, so you choose again for each file).
+
+- **consent:** only map a column that really records the customer's consent. Values become `true` (subscribes the
+  customer) or `false` (opts them out); Y/N, yes/no, 1/0, opted in/out and subscribed/unsubscribed are understood.
+  Anything else is left blank, which changes nobody's consent.
+- **last_contacted:** when *we* last texted the customer (e.g. *Last Campaign Sent*). Files almost never have it.
 
 ## Templates, target format, users
 
