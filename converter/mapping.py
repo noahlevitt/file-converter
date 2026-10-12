@@ -194,7 +194,9 @@ class Mapping(BaseModel):
 
         Rules, per schema field:
 
-        1. Fixed-blank fields (e.g. consent) are always "not mapped", with a reason saying so.
+        1. Fixed-blank fields are always "not mapped", with a reason saying so. Manual-only fields (consent,
+           last_contacted) keep a mapping only when a person made it (``origin == "user"``): whatever the rules,
+           a template or Claude put there is removed, so they are never filled without a human choosing the column.
         2. Source columns are matched to the file case-insensitively and rewritten in the file's spelling
            (a template made on "PHONE" works on "Phone"); columns missing from the file or skipped by the reviewer
            are removed.
@@ -222,6 +224,9 @@ class Mapping(BaseModel):
                 continue
             # Deep copy: the input mapping (e.g. a cached template) must not be modified.
             fm = self.fields.get(f.name, FieldMapping()).model_copy(deep=True)
+            if f.manual_only and fm.transform != "none" and fm.origin != "user":
+                out[f.name] = FieldMapping(reason="mapped by hand only")
+                continue
             fm.sources = [lookup[s.lower()] for s in fm.sources if s.lower() in lookup and s.lower() not in skip]
             if fm.transform not in TRANSFORMS:
                 fm.transform = "none"
@@ -262,6 +267,18 @@ class Mapping(BaseModel):
             issues[name] = (f"only one field can use 'One row per phone number' ({schema.field(multi[0]).header} "
                             "already does)")
         return issues
+
+    def without_manual(self, schema: TargetSchema) -> "Mapping":
+        """A copy without the hand-mapped-only fields (consent, last_contacted): what a saved template may keep.
+
+        A template is applied automatically to the next file, and these fields must only ever be filled by a person
+        choosing the column for that file, so they are left out of templates.
+        """
+        out = self.model_copy(deep=True)
+        for f in schema.fields:
+            if f.manual_only:
+                out.fields[f.name] = FieldMapping()
+        return out
 
     def row_field(self, schema: TargetSchema) -> FieldSpec | None:
         """The field whose numbers each get their own output row, or None when no field does.
