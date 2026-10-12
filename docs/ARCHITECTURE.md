@@ -68,7 +68,7 @@ All business logic is in `converter/`. Only `app.py` and `converter/auth.py` imp
 | `converter/mapping.py` | `FieldMapping` / `Mapping` (target field → transform + source columns + params, plus reviewer notes and skipped columns), `normalized()` (makes a mapping fit a file), column profiling, header fingerprints for template matching. |
 | `converter/transforms.py` | Registry of the allowed transforms (copy, coalesce, one row per phone number, combine, name part, address part, split, translate values, fixed value) and `apply_transform`. Transforms only *extract* a raw value; they never validate. |
 | `converter/heuristics.py` | Rule-based automatic mapping: header synonyms + fuzzy matching + value evidence. Includes phone-column detection, phone-setting/consent column exclusion, full-name and full-address splitting, and split birthday columns. |
-| `converter/normalizers.py` | Per-type cleaning and validation: phone (US-only, typo repair), date/datetime (via `dateparse`), email, ZIP, state, boolean, enum, numbers, strings. `prepare()` builds a per-column context first (day/month order, placeholder year, the file's common area codes). |
+| `converter/normalizers.py` | Per-type cleaning and validation: phone (US-only, limited typo repair that never adds or changes digits), date/datetime (via `dateparse`), email, ZIP, state, boolean, enum, numbers, strings. `prepare()` builds a per-column context first (day/month order, placeholder year, the file's own numbers and area codes as evidence). |
 | `converter/dateparse.py` | The date/time parser: every common spelling, Excel serials, Unix timestamps, time zones, two-digit years, no-year dates (`NO_YEAR`). |
 | `converter/engine.py` | `convert()`: applies the mapping to every row, expands one row per phone number, normalizes, rejects bad rows, removes exact duplicates, builds output + rejects + summary + per-cell audit. Also `preview_values` and `source_rows`. |
 | `converter/output.py` | Writes the import file (CSV/XLSX per `OutputSpec`), the rejected-rows CSV and the text summary; builds download file names. |
@@ -150,7 +150,7 @@ The files are deleted after `FILE_RETENTION_DAYS`. The database record and its c
 | Behaviour | Where |
 |---|---|
 | US numbers only, `+1` assumed, 10-digit output | `normalizers._parse_phone`, schema `countries`, `format: digits10` |
-| Phone typo repair from the file's own area codes, each repair marked | `normalizers.prepare_phone`, `_repair_phone`; engine `CELL_REPAIRED` |
+| Phone typo repair (extra digit, foreign country code; never area codes), each repair marked | `normalizers.prepare_phone`, `_repair_phone`; engine `CELL_REPAIRED` |
 | One row per different phone number | `transforms` (`each_row`), `mapping.phone_rule`, `engine._expand_rows` |
 | Columns *about* a phone (marketing preference, type, opt-in) never used as numbers | `heuristics.is_phone_header`, `is_consent_column` |
 | Birthday/anniversary without a real year → year 1600 | `dateparse` (`NO_YEAR`), `normalizers.normalize_date`, `_placeholder_year`; schema `no_year_value` |
@@ -163,7 +163,8 @@ The files are deleted after `FILE_RETENTION_DAYS`. The database record and its c
 ## Why it is built this way
 
 - **Column-at-a-time normalization.** Some decisions need the whole column: whether `03/04/2026` is day-first,
-  which area codes the file uses, whether one year stands for "unknown". `normalizers.prepare()` looks at the
+  which numbers and area codes the file uses (evidence for the allowed phone repairs), whether one year stands for
+  "unknown". `normalizers.prepare()` looks at the
   column first; `normalize()` then handles each value with that context.
 - **Snapshots on every import.** The import row stores the schema, mapping and options used. Later edits to the
   schema file or templates never change what an old import means, and a re-run is reproducible.
