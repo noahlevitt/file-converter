@@ -371,14 +371,16 @@ def run_checks(schema: TargetSchema, mapping: Mapping, source: pd.DataFrame, aud
     # Columns that look useful but aren't imported.
     # Consent columns are mentioned only to explain that leaving them out is intended. Date-like columns are
     # suggested when a date field is still unmapped; phone-like columns can be added to the phone field.
-    unmapped_dates = [f.header for f in schema.mappable_fields
+    unmapped_dates = [f.header for f in schema.auto_fields
                       if f.type in ("date", "datetime") and mapping.get(f.name).transform == "none"]
     for p in profiles or []:
         if p.name in used or p.non_empty == 0:
             continue
         if is_consent_column(p.name):
             findings.append(Finding("info", "", p.name, f"'{p.name}' is not imported.",
-                                    "Consent is always left blank in the import file by design."))
+                                    "Consent is only imported when you map it yourself: if this column holds the "
+                                    "customers' consent, send it to consent under Columns in your file (true "
+                                    "subscribes, false opts out). Otherwise leaving it out is intended."))
             continue
         if p.shares.get("date", 0) >= 0.6 and unmapped_dates:
             findings.append(Finding("info", "", p.name, f"'{p.name}' contains dates but isn't imported.",
