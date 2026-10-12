@@ -45,7 +45,7 @@ from pathlib import Path
 import pandas as pd
 from charset_normalizer import from_bytes
 
-from .normalizers import looks_like_date, looks_like_email, looks_like_phone
+from .normalizers import clean_text, looks_like_date, looks_like_email, looks_like_phone
 
 # Delimited text files (the delimiter is sniffed, except .tsv/.tab which are always tab-separated).
 TEXT_EXTENSIONS = {".csv", ".tsv", ".txt", ".tab"}
@@ -250,6 +250,8 @@ KIND_SAMPLE_ROWS = 100
 _STRONG_KINDS = {"phone", "email", "date"}
 # Kinds a data column can have, as opposed to free text.
 _TYPED_KINDS = _STRONG_KINDS | {"number", "flag"}
+# Kinds no header label ever is: a row holding one of them is never a header candidate, whatever its column.
+_NEVER_IN_HEADER = {"phone", "email"}
 # Yes/no style values ("flag" kind).
 _FLAG_WORDS = {"y", "n", "yes", "no", "true", "false", "t", "f", "x"}
 
@@ -257,13 +259,14 @@ _FLAG_WORDS = {"y", "n", "yes", "no", "true", "false", "t", "f", "x"}
 def _cell_kind(cell: str) -> str | None:
     """What kind of value a cell holds, for header detection. None for an empty cell.
 
-    "email" (ana@x.com), "phone" (a valid number in any format, or 7+ digits outweighing the letters: typos and
-    7-digit numbers are still phone-shaped), "date" (any date the date parser reads, including "03/15"),
+    "email" (ana@x.com), "phone" (a valid number in any format, or 7-15 digits outweighing the letters: typos and
+    7-digit numbers are still phone-shaped, a date range's 16 digits are not), "date" (any date the date parser
+    reads, including "03/15"),
     "number" (amounts, counts, ZIPs, years), "flag" (Y/N, true/false) or "text" (everything else - names, labels).
         "516-555-0100", "(516) 555-0100", "555-1212" -> "phone";   "10/01/2026 3:15 PM", "Sep 12" -> "date"
         "Phone", "Last Visit", "Visits 2024", "Ana Lee" -> "text";  "$12.50", "2024" -> "number";  "Y" -> "flag"
     """
-    if not cell:
+    if not clean_text(cell):  # empty, or a stand-in for empty such as "N/A", "none", "-"
         return None
     if looks_like_email(cell):
         return "email"
@@ -273,7 +276,7 @@ def _cell_kind(cell: str) -> str | None:
         return "date"
     digits = sum(ch.isdigit() for ch in cell)
     letters = sum(ch.isalpha() for ch in cell)
-    if digits >= 7 and digits >= 2 * letters:
+    if 7 <= digits <= 15 and digits >= 2 * letters:
         return "phone"
     if digits and digits >= letters:
         return "number"
@@ -282,20 +285,34 @@ def _cell_kind(cell: str) -> str | None:
     return "text"
 
 
-def _usual_kind(counts: Counter, own: str | None) -> str | None:
-    """The kind most cells of a column hold, not counting one row's own cell (``own``); None if no kind has 60%.
+def _usual_kind(below: Counter, rows_below: int) -> str | None:
+    """The kind most of a column's cells BELOW a row hold, or None when no kind has 60% or there is too little to go on.
 
-    ``counts`` counts the kinds of the column's non-empty cells in the sample. Leaving the row's own cell out lets a
-    file with only one or two data rows still be judged.
+    ``below`` counts the kinds of the column's non-empty cells under the row (in the sample); ``rows_below`` is the
+    number of non-empty rows under it. At least two cells are needed (one when only one row follows, so a file
+    with a header and a single customer still works): a lone value in a column that only a report line uses
+    ("Kravit" next to "Store") says nothing about that column.
     """
-    c = Counter(counts)
-    if own:
-        c[own] -= 1
-    total = sum(n for n in c.values() if n > 0)
-    if not total:
+    total = sum(below.values())
+    if total < min(2, rows_below) or not total:
         return None
-    kind, n = max(c.items(), key=lambda kv: kv[1])
+    kind, n = max(below.items(), key=lambda kv: kv[1])
     return kind if n / total >= 0.6 else None
+
+
+def _mostly_typed(below: Counter, rows_below: int) -> bool:
+    """Whether at least half of a column's cells below a row are typed values (phone, email, date, number, flag).
+
+    Used for *contrast*: a label over such a column. Half (not the 60% of _usual_kind) so that a "Phone" label still
+    counts over a short column where one customer typed "no phone". Same minimum support as _usual_kind, and the
+    column must be filled in at least half the rows below.
+    """
+    total = sum(below.values())
+    # The column must also be filled in at least half the rows below: a column that only a few shifted rows reach
+    # ("Apt 2" pushed a phone one column right) says nothing about the label above it.
+    if not total or total < min(2, rows_below) or total < 0.5 * rows_below:
+        return False
+    return sum(n for k, n in below.items() if k in _TYPED_KINDS) / total >= 0.5
 
 
 def detect_header(grid: list[list[str]]) -> tuple[int | None, bool]:
@@ -305,17 +322,20 @@ def detect_header(grid: list[list[str]]) -> tuple[int | None, bool]:
     labels and customer values differ in a way cell shapes alone can't show ("516-555-0100" and "Name" are both
     "text" to a naive check), so each row is compared with the rest of its columns (cells already cleaned):
 
-    1. Every cell gets a kind (:func:`_cell_kind`) and every column a usual kind, learned from the first
-       KIND_SAMPLE_ROWS rows without the row being judged (:func:`_usual_kind`).
+    1. Every cell gets a kind (:func:`_cell_kind`), and for each row every column gets the usual kind of the cells
+       below that row (within the first KIND_SAMPLE_ROWS rows; :func:`_usual_kind`).
     2. A row's *contrast* = its text cells sitting over a typed column (a label such as "Phone" over phone numbers);
-       its *consistency* = its phone/email/date cells matching their column (a customer's phone in the phone column).
-    3. Rows are read from the top (the first HEADER_SCAN_ROWS). The first row with more consistency than contrast,
-       filled in at least half the columns, is the first customer row. The header is the label row above it with
+       its *consistency* = its phone/email/date cells matching the column below (a customer's phone over more
+       phone numbers).
+    3. Rows are read from the top (the first HEADER_SCAN_ROWS). The first customer row is the first row holding a
+       valid phone number or email (in any column), or the first row as full as the file's usual row with more
+       consistency than contrast. The header is the label row above it with
        the most contrast (ties: the lower one): at least one label over a typed column, more contrast than
-       consistency, mostly text (60%+) and mostly distinct. No such row above the first customer row means the file
-       has no header row (None).
+       consistency, mostly text (60%+), mostly distinct, and no phone number or email anywhere in it. No such row
+       above the first customer row means the file has no header row (None).
     So a title, a "Generated 10/12/2026" line or a store name above the header is skipped, and a row holding a
-    customer's phone number, email or date in the matching column is never used as the header. Returns sure=True.
+    phone number or email (in any column) or a date that fits its column is never used as the header. Returns
+    sure=True.
 
     When no customer row is found in the scanned rows (e.g. no column holds phones, emails or dates, or the file
     is tiny), the best label row found is used if there is one (sure=True); otherwise the older shape rule decides
@@ -332,54 +352,94 @@ def detect_header(grid: list[list[str]]) -> tuple[int | None, bool]:
     rows = grid[:HEADER_SCAN_ROWS]
     if not rows:
         return 0, False
-    # Width = most filled cells in any scanned row; a "substantial" row fills at least half of it (and 2+ cells), so
-    # a one-cell title line never counts as the header or as the first customer row.
-    width = max((sum(1 for c in r if c) for r in rows), default=0)
-    if width == 0:
-        return 0, False
-    min_cells = max(2, -(-width // 2)) if width > 1 else 1
     sample = grid[:KIND_SAMPLE_ROWS]
+    # Width = the usual number of filled cells per row (the upper median over the non-empty sample rows, so a wide
+    # report line above a one-column list doesn't count); a "substantial" row fills at least half of it (and 2+
+    # cells), so a one-cell title line never counts as the header or as the first customer row.
+    filled_counts = sorted(n for n in (sum(1 for c in r if c) for r in sample) if n)
+    if not filled_counts:
+        return 0, False
+    width = filled_counts[len(filled_counts) // 2]
+    min_cells = max(2, -(-width // 2)) if width > 1 else 1
     kinds = [[_cell_kind(c) for c in r] for r in sample]
-    counts: list[Counter] = [Counter() for _ in range(max(len(r) for r in sample))]
-    for kr in kinds:
-        for j, k in enumerate(kr):
+    # below[i][j] = kinds of column j's cells under row i; nonempty_below[i] = non-empty rows under row i. Built from
+    # the bottom of the sample up (only for the rows that are scanned).
+    ncols = max(len(r) for r in sample)
+    below: list[list[Counter]] = [[] for _ in range(len(rows))]
+    nonempty_below = [0] * len(rows)
+    running = [Counter() for _ in range(ncols)]
+    nonempty = 0
+    for i in range(len(sample) - 1, -1, -1):
+        if i < len(rows):
+            below[i] = [Counter(c) for c in running]
+            nonempty_below[i] = nonempty
+        for j, k in enumerate(kinds[i]):
             if k:
-                counts[j][k] += 1
+                running[j][k] += 1
+        nonempty += any(kinds[i])
 
-    best: tuple[int, int] | None = None  # (contrast - consistency, row index) of the best label row so far
+    # Rows holding a valid phone number or email anywhere (in any column, so also when an unquoted comma has shifted
+    # the row): customers or other data, never the header, and the header is never below them.
+    contact = [any(c and (looks_like_phone(c) or looks_like_email(c)) for c in r) for r in rows]
+    # The older width rule, for the shape-based fallback: half the widest row (and 2+ cells).
+    widest = max((sum(1 for c in r if c) for r in rows), default=0)
+    wide_min_cells = max(2, -(-widest // 2)) if widest > 1 else 1
+
+    # The best label row so far, as (contrast - consistency, familiar column words, row index): more contrast wins,
+    # then more words common in column names, then the lower row.
+    best: tuple[int, int, int] | None = None
+
+    def header_above(first_data: int) -> tuple[int | None, bool]:
+        """The header for a file whose first customer row is ``first_data``: the best label row above it; failing
+        that, the row above it that looks most like labels by shape (most familiar column words, then the lowest;
+        unsure); failing that, no header row."""
+        if best is not None:
+            return best[2], True
+        shaped = [i for i in range(first_data) if _labels_by_shape(rows[i], kinds[i], wide_min_cells)]
+        if not shaped:
+            return None, True
+        return max(shaped, key=lambda i: (_header_words(rows[i]), i)), False
+
     for i in range(len(rows)):
         kr = kinds[i]
         filled = [k for k in kr if k]
+        if not filled:
+            continue
+        if contact[i]:
+            return header_above(i)
         if len(filled) < min_cells:
             continue
         contrast = consistency = 0
         for j, k in enumerate(kr):
-            usual = _usual_kind(counts[j], k) if k else None
-            if usual is None:
+            if not k:
                 continue
-            if k == "text" and usual in _TYPED_KINDS:
+            if k == "text" and _mostly_typed(below[i][j], nonempty_below[i]):
                 contrast += 1
-            elif k in _STRONG_KINDS and k == usual:
+            elif k in _STRONG_KINDS and k == _usual_kind(below[i][j], nonempty_below[i]):
                 consistency += 1
-        if consistency > contrast:
-            # The first customer row: the header, if any, is the best label row above it.
-            return (best[1] if best else None), True
+        if consistency > contrast and len(filled) >= width:
+            # The first data row (dates matching their column, in a row as full as the file's usual row - a short
+            # report line such as "Generated, 10/12/2026" over a birthday column doesn't count): header above it.
+            return header_above(i)
         cells = [c for c in rows[i] if c]
         textlike = sum(1 for k in filled if k == "text") / len(filled)
         unique = len({c.lower() for c in cells}) / len(cells)
-        if contrast > consistency and textlike >= 0.6 and unique >= 0.5:
-            score = contrast - consistency
-            if best is None or score >= best[0]:
-                best = (score, i)
+        # Column labels never hold anything phone- or email-shaped (not even a typo'd number such as "516-555-01").
+        if contrast > consistency and textlike >= 0.6 and unique >= 0.5 and not _NEVER_IN_HEADER & set(filled):
+            score = (contrast - consistency, _header_words(rows[i]), i)
+            if best is None or score >= best:
+                best = score
     if best is not None:
-        return best[1], True
-    # Fallback: no column holds phones, emails or dates in a way that separates labels from values.
+        return best[2], True
+    # Fallback: no phone, email or matching date in the scanned rows (e.g. a file of names only). The older shape
+    # rule decides, unsure: the first full row that looks like labels is the header; a first full row that looks
+    # like data (a date, or under 50% text) means no header row; if nothing decides, row 0.
     for i, row in enumerate(rows):
         cells = [c for c in row if c]
-        if len(cells) < min_cells:
+        if len(cells) < wide_min_cells:
             continue
         if any(k in _STRONG_KINDS for k in kinds[i] if k):
-            return None, False  # the first full row holds a phone, email or date: it's data
+            return None, False
         textlike = sum(1 for c in cells if not _looks_like_data(c) and len(c) <= 80) / len(cells)
         unique = len({c.lower() for c in cells}) / len(cells)
         has_following_data = any(any(c for c in r) for r in rows[i + 1 : i + 4]) or i == len(rows) - 1
@@ -388,6 +448,40 @@ def detect_header(grid: list[list[str]]) -> tuple[int | None, bool]:
         if textlike < 0.5:
             return None, False
     return 0, False
+
+
+def _labels_by_shape(row: list[str], kinds: list[str | None], min_cells: int) -> bool:
+    """Whether a row looks like column labels by its cells alone (the older rule, used when columns can't be compared).
+
+    Filled in at least ``min_cells`` cells, no phone number, email or date, at least 70% short text labels (not
+    numbers, amounts or dates; 80 characters at most) and at least half of them distinct. ``kinds`` are the row's
+    cell kinds (:func:`_cell_kind`).
+        ["Name", "Phone"] → True;  ["Smith", "John", "5165550100"] → False;  ["Guest export"] with min_cells 2 → False
+    """
+    cells = [c for c in row if clean_text(c)]  # "N/A", "none" and the like don't count as labels
+    if len(cells) < min_cells or any(k in _STRONG_KINDS for k in kinds if k):
+        return False
+    textlike = sum(1 for c in cells if not _looks_like_data(c) and len(c) <= 80) / len(cells)
+    return textlike >= 0.7 and len({c.lower() for c in cells}) / len(cells) >= 0.5
+
+
+# Words common in the column names of customer exports (any system). Only used to choose between rows that both look
+# like labels when the columns can't be compared (see detect_header): the header has more of them than a report
+# line ("Store, Kravit Bayside") or a customer row without a phone ("271 Main St, no phone").
+_HEADER_WORDS = {
+    "name", "first", "last", "full", "phone", "mobile", "cell", "tel", "telephone", "email", "mail", "address",
+    "street", "city", "state", "zip", "postal", "country", "date", "visit", "visits", "birthday", "dob", "birth",
+    "anniversary", "created", "updated", "signup", "joined", "total", "spend", "orders", "order", "amount",
+    "points", "opt", "sms", "marketing", "consent", "notes", "tags", "id", "customer", "guest", "member", "gender",
+    "company", "type",
+}
+
+
+def _header_words(row: list[str]) -> int:
+    """How many cells of a row contain a word common in column names (see _HEADER_WORDS).
+        ["First Name", "Mobile #", "City"] → 3;  ["Store", "Kravit Bayside"] → 0;  ["271 Main St", "no phone"] → 1
+    """
+    return sum(1 for c in row if any(w in _HEADER_WORDS for w in re.findall(r"[a-z]+", c.lower())))
 
 
 def detect_header_row(grid: list[list[str]]) -> int | None:
