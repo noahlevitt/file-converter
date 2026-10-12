@@ -65,7 +65,7 @@ from typing import Any, Iterator
 
 import bcrypt
 
-from .mapping import Mapping, header_fingerprint, header_similarity
+from .mapping import Mapping, has_generic_columns, header_fingerprint, header_similarity
 
 # Database schema, applied idempotently by Store.__init__ (comments live here, not inside the SQL string, so the
 # executed SQL stays exactly as it is). All timestamps are UTC ISO-8601 strings with seconds precision written by
@@ -590,12 +590,16 @@ class Store:
         2. Fuzzy: otherwise the template with the highest ``header_similarity`` (Jaccard index: shared names /
            all names) is returned if it reaches ``min_similarity``. Callers use it as a starting point only.
 
-        Only templates for ``schema_name`` are considered.
+        Only templates for ``schema_name`` are considered. A file without a header row (columns named "Column 1",
+        "Column 2", ... by the reader) never matches: those names say nothing about its layout, so two clients'
+        headerless files with the same number of columns would share a template. Such templates are picked by hand.
 
         Returns:
             ``(template, similarity)``; ``(None, best_similarity_seen)`` when nothing qualifies, so the UI can
             still say how close the nearest template was.
         """
+        if has_generic_columns(headers):
+            return None, 0.0
         fp = header_fingerprint(headers)
         templates = self.list_templates(schema_name)
         exact = [t for t in templates if t.fingerprint == fp]
