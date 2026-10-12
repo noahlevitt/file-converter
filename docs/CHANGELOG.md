@@ -3,6 +3,21 @@
 What changed in each version. The running version is shown in the app's sidebar. Each version is tagged in git
 (`vX.Y.Z`).
 
+## 0.13.0 — every date gets imported; last_contacted always blank
+
+- **Dates with a generic name are imported.** A date column named only *Date*, *Start Time*, *Timestamp*,
+  *Updated*… used to stay unmapped. It now goes to `calls_last` in a call log (headers like *Caller ID*, *Duration*,
+  *Direction*, or *From* + *To*) and to `transactions_last` in any other file; a second one goes to the other
+  field. Separate *Date* and *Time* columns are combined. Marked *low* confidence for review.
+- Dates that aren't a last activity are never used: *Date Created*, *Created At*, *Sign Up Date*, *Joined*,
+  *Member Since*, *First Visit*, *Expiration Date*, *Opt-In Date*.
+- **`last_contacted` is always blank** (locked like consent): it means when we last texted the customer, which no
+  imported file contains. *Last Campaign Sent* and similar columns are no longer imported anywhere.
+- **Fix:** in a call log whose *To* column holds the same number on every row (the client's own line), the
+  mapping could take only that column and drop the *From* column with the customers' numbers. Every phone column
+  is now kept, so every number is imported.
+- New target-format setting `generic_date` (`call_log` / `default`) marks which fields receive generic dates.
+
 ## 0.12.2 — logins switched off
 
 - No login for now: `AUTH_MODE` defaults to `none`, so the app opens straight away and everyone uses it as the local
