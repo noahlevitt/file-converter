@@ -70,7 +70,7 @@ All business logic is in `converter/`. Only `app.py` and `converter/auth.py` imp
 | `converter/heuristics.py` | Rule-based automatic mapping: header synonyms + fuzzy matching + value evidence. Includes phone-column detection, phone-setting/consent column exclusion, full-name and full-address splitting, and split birthday columns. |
 | `converter/normalizers.py` | Per-type cleaning and validation: phone (US-only, limited typo repair that never adds or changes digits), date/datetime (via `dateparse`), email, ZIP, state, boolean, enum, numbers, strings. `prepare()` builds a per-column context first (day/month order, placeholder year, the file's own numbers and area codes as evidence). |
 | `converter/dateparse.py` | The date/time parser: every common spelling, Excel serials, Unix timestamps, time zones, two-digit years, no-year dates (`NO_YEAR`). |
-| `converter/engine.py` | `convert()`: applies the mapping to every row, expands one row per phone number, normalizes, rejects bad rows, removes exact duplicates, builds output + rejects + summary + per-cell audit. Also `preview_values` and `source_rows`. |
+| `converter/engine.py` | `convert()`: applies the mapping to every row, expands one row per phone number (several phone columns, or several numbers in one cell), normalizes, rejects bad rows, removes exact duplicates, builds output + rejects + summary + per-cell audit. Also `preview_values`, `source_rows` and `count_multi_number_cells`. |
 | `converter/output.py` | Writes the import file (CSV/XLSX per `OutputSpec`), the rejected-rows CSV and the text summary; builds download file names. |
 | `converter/checks.py` | Rule-based mistake checks (wrong column, future dates, birthdays that look like sign-up dates, mixed day/month order, 7-digit phones…), `column_warnings`, and the sample payload for Claude's review. |
 | `converter/ai.py` | `ClaudeAssistant`: `propose_mapping`, `apply_notes`, `review`, `repair_values`. Structured outputs, prompts built from the schema, strict validation of every answer (`parse_mapping_entries`, `accept_repair`). |
@@ -152,7 +152,7 @@ The files are deleted after `FILE_RETENTION_DAYS`. The database record and its c
 |---|---|
 | US numbers only, `+1` assumed, 10-digit output | `normalizers._parse_phone`, schema `countries`, `format: digits10` |
 | Phone typo repair (extra digit, foreign country code; never area codes), each repair marked | `normalizers.prepare_phone`, `_repair_phone`; engine `CELL_REPAIRED` |
-| One row per different phone number | `transforms` (`each_row`), `mapping.phone_rule`, `engine._expand_rows` |
+| One row per different phone number (several columns, or several numbers in one cell) | `transforms` (`each_row`), `mapping.phone_rule`, `Mapping.row_field`, `normalizers.split_phones`, `engine._expand_rows` |
 | Columns *about* a phone (marketing preference, type, opt-in) never used as numbers | `heuristics.is_phone_header`, `is_consent_column` |
 | Birthday/anniversary without a real year → year 1600 | `dateparse` (`NO_YEAR`), `normalizers.normalize_date`, `_placeholder_year`; schema `no_year_value` |
 | Times with a zone converted to the client's time zone | `dateparse._to_zone`; zone chosen per import on the New import page |
