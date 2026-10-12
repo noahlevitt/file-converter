@@ -127,7 +127,7 @@ def write_summary(result: ConversionResult, schema: TargetSchema, source_filenam
     result message, the row counts, then optional sections, each sorted by frequency:
 
     * "Why rows were rejected" — reason counts of bad rows;
-    * "Repaired from likely typos" — e.g. a phone area code one digit off, imported but worth checking;
+    * "Repaired from likely typos" — e.g. a phone number with one digit typed twice, imported but worth checking;
     * "Extra numbers skipped" — invalid 2nd/3rd phone numbers that didn't get their own row;
     * "Optional values left blank" — invalid optional values that were blanked.
 
