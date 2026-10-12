@@ -9,8 +9,9 @@ Overview
 --------
 Both tables are written by ``jobs.run_import`` into the import's folder and loaded by the web app
 (``app.load_import_tables``). Before they reach this module, ``engine.source_rows`` lines the source rows up with
-the audit rows, so row *i* of ``source`` is the file row that produced audit row *i* -- even when
-"One row per phone number" made several converted rows from one file row. Every function here relies on that
+the audit rows, so row *i* of ``source`` is the file row that produced audit row *i* -- even when one row per
+phone number made several converted rows from one file row (several phone columns, or several numbers in one
+cell). Every function here relies on that
 alignment and on both frames having a default ``RangeIndex`` (index labels == positions).
 
 Audit columns used here (see ``engine.ConversionResult.audit``):
@@ -48,6 +49,7 @@ import pandas as pd
 from .engine import (CELL_BLANKED, CELL_DEFAULT, CELL_DERIVED, CELL_FIXED, CELL_FORMAT, CELL_REJECT, CELL_REPAIRED,
                      CELL_SAME)
 from .mapping import Mapping
+from .normalizers import clean_text
 from .schema import TargetSchema
 
 # Cell statuses that count as "the converted value differs from (or doesn't simply copy) the original". Used by
@@ -100,7 +102,8 @@ class ColumnPlan:
         unused: source columns that feed no target field (greyed out, labelled "not imported").
         feeds: source column -> headers of the target fields it feeds (shown under the column header).
         origin: target field name -> short "where it comes from" text (shown under the converted header).
-        each_field: name of the field that uses 'One row per phone number' (``each_row`` transform), or "".
+        each_field: name of the field that can make several rows from one file row (``Mapping.row_field``: the
+            phone field using ``each_row``, or copied from one column whose cells may hold several numbers), or "".
         each_sources: that field's source columns; used to underline the exact source cell each extra row was
             made from.
     """
@@ -109,7 +112,7 @@ class ColumnPlan:
     unused: set[str]
     feeds: dict[str, list[str]]        # source column -> target headers it feeds
     origin: dict[str, str]             # target field name -> short "from …" description
-    each_field: str = ""               # field using 'One row per phone number' (one row per different number), if any
+    each_field: str = ""               # field that gets one row per different number (Mapping.row_field), if any
     each_sources: tuple[str, ...] = ()
 
 
@@ -144,8 +147,9 @@ def column_plan(schema: TargetSchema, mapping: Mapping, source_columns: list[str
                     ordered.append(s)
     unused = {c for c in source_columns if not feeds[c]}
     ordered += [c for c in source_columns if c in unused]
-    # At most one field can use 'One row per phone number' (each_row); remember it and its source columns.
-    each = next((f for f in schema.mappable_fields if mapping.get(f.name).transform == "each_row"), None)
+    # The field that can make several rows from one file row (each_row, or a phone field copied from one column whose
+    # cells may hold several numbers); remember it and its source columns.
+    each = mapping.row_field(schema)
     return ColumnPlan(ordered, unused, feeds, origin, each.name if each else "",
                       tuple(mapping.get(each.name).sources) if each else ())
 
@@ -244,7 +248,8 @@ def status_counts(audit: pd.DataFrame, schema: TargetSchema) -> dict[str, int]:
 #   .cmp-b.<kind>    row status badge: ok (green, imported), bad (red, rejected), dup (grey), empty (light grey)
 # Row classes (tr.r-<status>): rejected rows get a pink tint on the original side and diagonal hatching on the
 # converted cells that weren't themselves the cause; duplicate and empty rows are shown in grey text.
-# td.o.each underlines the source cell a 'One row per phone number' row was made from.
+# td.o.each underlines the source cell a phone row was made from (one row per phone number); td.o.eachp underlines
+# only the <u> part of a cell holding several numbers.
 # Cell status classes on converted cells are "c-" + the engine.CELL_* code, so they match automatically:
 #   c-fmt reformatted (blue)   c-drv built/derived (purple)   c-def default (grey, italic)   c-fix Claude fix (green)
 #   c-blk invalid, left blank (yellow)   c-rpr repaired typo (orange, bold)   c-rej rejected cause (red, bold)
@@ -276,6 +281,7 @@ table.cmp th.unused,table.cmp td.unused{color:#9aa1a9;background:#fafafb}
 .cmp-b.dup{background:#eef0f3;color:#57606a}.cmp-b.empty{background:#f6f7f9;color:#9aa1a9}
 tr.r-rejected td.o{background:#fff6f6}
 table.cmp td.o.each{font-weight:600;text-decoration:underline;text-decoration-color:#2563eb;text-underline-offset:3px}
+table.cmp td.o.eachp u{font-weight:600;text-decoration-color:#2563eb;text-underline-offset:3px}
 tr.r-rejected td.n:not(.c-rej){color:#9aa1a9;background-image:repeating-linear-gradient(135deg,transparent 0 6px,
   rgba(180,35,24,.05) 6px 12px)}
 tr.r-duplicate td{color:#8b949e}
@@ -318,6 +324,7 @@ table.cmp th.unused,table.cmp td.unused{color:#6b7280;background:#13161c}
 .cmp-b.dup{background:#262a33;color:#a3acb9}.cmp-b.empty{background:#1a1d24;color:#6b7280}
 tr.r-rejected td.o{background:#2a1515}
 table.cmp td.o.each{text-decoration-color:#60a5fa}
+table.cmp td.o.eachp u{text-decoration-color:#60a5fa}
 tr.r-rejected td.n:not(.c-rej){color:#6b7280;background-image:repeating-linear-gradient(135deg,transparent 0 6px,
   rgba(255,120,120,.08) 6px 12px)}
 tr.r-duplicate td{color:#7d8590}
@@ -348,8 +355,9 @@ def legend_html(each_row: bool = False, dark: bool = False) -> str:
     """Return the colour legend shown above the table: one swatch + label per changed-cell status.
 
     Args:
-        each_row: True when the mapping uses 'One row per phone number'; adds an explanation of the underlined
-            source cell and of the "N +" row labels used for the extra rows.
+        each_row: True when rows show the source cell their number came from (several phone columns, or a file
+            row with several numbers in one cell); adds an explanation of the underlined source cell and of the
+            "N +" row labels used for the extra rows.
         dark: use the dark-mode swatch colours (matching ``DARK_CSS``).
 
     The first tuple element of ``_LEGEND`` (CSS class) is informational only; the swatch uses the inline colour,
@@ -402,7 +410,15 @@ def build_compare_html(source: pd.DataFrame, audit: pd.DataFrame, rows: list[int
     """
     cols = plan.source_columns
     fields = schema.fields
-    parts = [CSS + (DARK_CSS if dark else ""), legend_html(bool(plan.each_field), dark),
+    # File rows that became several rows (their source position appears on an "extra" row). With several phone
+    # columns every row underlines the cell its number came from; with one phone column only these rows do, since
+    # elsewhere the phone cell is simply the number.
+    expanded: set = set()
+    if plan.each_field and {"_extra", "_src"} <= set(audit.columns):
+        expanded = set(audit.loc[audit["_extra"].astype(bool), "_src"].tolist())
+    several_columns = len(plan.each_sources) > 1
+    parts = [CSS + (DARK_CSS if dark else ""),
+             legend_html(bool(plan.each_field) and (several_columns or bool(expanded)), dark),
              '<div class="cmpw"><table class="cmp"><thead>']
     # Header row 1 (tr.g): group labels spanning the original and converted halves; the 2 meta columns are blank.
     parts.append(
@@ -437,7 +453,7 @@ def build_compare_html(source: pd.DataFrame, audit: pd.DataFrame, rows: list[int
         # Per-field problem reasons for this row: {field_name: reason}.
         issues = json.loads(arow["_issues"]) if arow.get("_issues") else {}
         row_label = _e(arow["_row"])
-        # Extra rows made by 'One row per phone number' repeat the file row number with a "+" suffix.
+        # Extra rows (a file row's 2nd, 3rd... phone number) repeat the file row number with a "+" suffix.
         if arow.get("_extra"):
             row_label = (f'<span title="Another number from the same file row — one row per different number">'
                          f'{row_label} +</span>')
@@ -446,19 +462,29 @@ def build_compare_html(source: pd.DataFrame, audit: pd.DataFrame, rows: list[int
                  f'<td><span class="cmp-b {cls}">{label}</span>'
                  + (f'<span class="why">{_e(arow["_reason"])}</span>' if arow["_reason"] else "") + "</td>"]
         # --- original (left) half -------------------------------------------------------------------------
-        # For 'One row per phone number', the raw value of that field is the number this row was made from; find
-        # and underline the first source cell holding it (only one cell is marked even if the value repeats).
-        used_value = str(arow.get(f"raw.{plan.each_field}", "")) if plan.each_field else ""
+        # For one row per phone number, the raw value of that field is the number this row was made from (a whole
+        # cell, or one number's piece of a cell holding several); find and underline the first source cell holding
+        # it (only one cell is marked even if the value repeats). For a piece, only that part of the cell is
+        # underlined, so the rows made from one cell can be told apart.
+        underline = plan.each_field and (several_columns or arow.get("_src") in expanded)
+        used_value = str(arow.get(f"raw.{plan.each_field}", "")) if underline else ""
         marked = False
         for c in cols:
             v = srow.get(c, "")
             klass = "o unused" if c in plan.unused else "o"
             title = f"{c}: {v}"
-            if used_value and not marked and c in plan.each_sources and str(v).strip() == used_value:
-                klass += " each"  # the number this row was made from
+            body = _e(v)
+            if used_value and not marked and c in plan.each_sources and used_value in clean_text(v):
+                s = "" if v is None else str(v)
+                at = s.find(used_value)
+                if s.strip() != used_value and at >= 0:
+                    klass += " eachp"  # one number of a cell holding several: underline just that number
+                    body = f"{_e(s[:at])}<u>{_e(used_value)}</u>{_e(s[at + len(used_value):])}"
+                else:
+                    klass += " each"  # the whole cell is this row's number (or its exact text can't be located)
                 title += " — this row's number"
                 marked = True
-            cells.append(f'<td class="{klass}" title="{_e(title)}">{_e(v)}</td>')
+            cells.append(f'<td class="{klass}" title="{_e(title)}">{body}</td>')
         cells.append('<td class="gap"></td>')
         # --- converted (right) half -----------------------------------------------------------------------
         for f in fields:
