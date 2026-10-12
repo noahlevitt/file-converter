@@ -1301,6 +1301,24 @@ def looks_like_phone(v: str) -> bool:
     return _parse_phone(v, "US", ("US", "CA"), "E164")[1] is None
 
 
+# A US phone field for the detectors below (split_phones needs one for the default region).
+_DETECT_PHONE_FIELD = FieldSpec(name="phone", type="phone")
+
+
+def looks_like_phones(v: str) -> bool:
+    """Detector: one valid phone number, or a cell holding several where every one is a valid phone number.
+
+    Cells with several numbers become one row per number (see split_phones), so for recognising a phone column by
+    its values they count as phone values too. Every piece must pass looks_like_phone on its own, so notes such as
+    "call 516-555-0100 or 917-555-1234" don't count.
+        "516-555-0100" → True;  "(917) 555-1234 / 516-555-0199" → True;  "call 516-555-0100 or 917-555-1234" → False
+    """
+    if looks_like_phone(v):
+        return True
+    pieces = split_phones(v, _DETECT_PHONE_FIELD, {})
+    return len(pieces) > 1 and all(looks_like_phone(p) for p, _ in pieces)
+
+
 def looks_like_email(v: str) -> bool:
     """Detector: something@something.tld with a 2+ letter TLD and no spaces. A fast regex, not full validation."""
     # Regex: non-"@"/space characters, "@", more of them, then "." and 2+ letters at the end: "a@b.com", not "a@b".
