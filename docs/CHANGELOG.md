@@ -3,6 +3,18 @@
 What changed in each version. The running version is shown in the app's sidebar. Each version is tagged in git
 (`vX.Y.Z`).
 
+## 0.14.0 — consent and last_contacted can be mapped by hand
+
+- **consent** and **last_contacted** are no longer locked blank. A person can map a column to them on the mapping
+  page (field grid or *Goes to*), for one file at a time. They are marked ✋.
+- Nothing automatic ever fills them: not the rules, not Claude (including *Apply notes*), not a default and not a
+  saved template. Templates leave them out when saved and drop them when applied (also older templates), so a
+  person chooses the column again for every file. Re-running an import keeps that import's choice.
+- Mapped consent values become `true` (subscribes) or `false` (opts out): Y/N, yes/no, 1/0, opted in/out,
+  subscribed/unsubscribed. Anything else is left blank, which changes nobody's consent.
+- New target-format setting `manual_only` (can't be combined with a default, `required` or `fixed_blank`). To lock
+  a field blank again, use `fixed_blank: true` instead.
+
 ## 0.13.1 — one last date per row; creation date as the fallback
 
 - **One last date per row.** A generic date (*Date*, *Start Time*, *Timestamp*…) is only used when no column names
