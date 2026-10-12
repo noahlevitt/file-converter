@@ -105,33 +105,43 @@ def test_consent_is_always_blank(real_schema):
     assert m.normalized(real_schema, list(df.columns)).get("consent").transform == "none"
 
 
-def test_consent_cannot_be_set_by_rules_editor_or_claude(real_schema):
-    """Every route to filling consent is closed: rules, the editor, and Claude's answer schema and parser.
+def test_consent_is_only_ever_set_by_a_person(real_schema):
+    """Consent is filled only when a person maps a column to it: never by rules, Claude, a template or a default.
 
-    Consent-like columns (including an opt-in date) aren't auto-mapped anywhere, the editor refuses consent, it is
-    left out of the fields Claude may answer with, and a Claude entry for it is dropped.
+    Consent-like columns (including an opt-in date) aren't auto-mapped anywhere, consent is left out of the fields
+    Claude may answer with, a Claude entry for it is dropped, and a mapping that didn't come from a person is
+    removed. A person's choice is converted to true / false; anything else stays blank (which changes nothing).
     """
     assert is_consent_column("Opt-In Status") and is_consent_column("SMS Consent") and is_consent_column("Subscribed")
     assert not is_consent_column("Last Text Received")
-    df = pd.DataFrame({"Mobile": ["2125551234"], "Consent": ["true"], "Opt In Date": ["10/01/2026"]})
+    df = pd.DataFrame({"Mobile": ["2125551234", "2125551235", "2125551236", "2125551237"],
+                       "Consent": ["Y", "no", "Opted Out", "maybe"], "Opt In Date": ["10/01/2026"] * 4})
     m = auto_map(real_schema, profile_columns(df)).normalized(real_schema, list(df.columns))
     assert m.get("consent").transform == "none"
     assert "Consent" not in m.used_sources() and "Opt In Date" not in m.used_sources()
-
-    m2, err = apply_row_edit(real_schema, m, "consent", {"Source column(s)": ["Consent"]}, "How", "Source column(s)",
-                             "Option")
-    assert err and m2.get("consent").transform == "none"
 
     out_schema = _output_schema(real_schema, list(df.columns))
     assert "consent" not in out_schema["properties"]["mappings"]["items"]["properties"]["target_field"]["enum"]
     parsed, dropped = parse_mapping_entries(
         [{"target_field": "consent", "transform": "copy", "sources": ["Consent"], "params": {},
           "confidence": "high", "reason": ""}], real_schema, list(df.columns))
-    assert "consent" not in parsed.fields and dropped
+    assert parsed.get("consent").transform == "none" and any("only a person" in d for d in dropped)
+
+    # Anything that isn't the reviewer's own choice is removed (e.g. a template or an old saved mapping).
+    for origin in ("rule", "ai", "template", ""):
+        auto = Mapping(fields={"consent": FieldMapping(sources=["Consent"], transform="copy", origin=origin)})
+        assert auto.normalized(real_schema, list(df.columns)).get("consent").transform == "none"
+
+    # The reviewer maps it in the grid: values become true / false, unknown values stay blank.
+    m2, err = apply_row_edit(real_schema, m, "consent", {"Source column(s)": ["Consent"]}, "How", "Source column(s)",
+                             "Option")
+    assert not err and m2.get("consent").origin == "user"
+    assert convert(df, real_schema, m2).output["consent"].tolist() == ["true", "false", "false", ""]
 
 
 def test_claude_prompt_marks_consent_fixed(real_schema):
-    """The system prompt tells Claude that consent is always blank and that 1600 means no year."""
+    """The system prompt tells Claude that consent and last_contacted are mapped by a person only, and that 1600
+    means no year."""
     captured = {}
 
     class Client:
@@ -150,7 +160,7 @@ def test_claude_prompt_marks_consent_fixed(real_schema):
     df = pd.DataFrame({"Mobile": ["2125551234"]})
     ClaudeAssistant("k", client=Client()).propose_mapping(real_schema, profile_columns(df))
     system = captured["system"][0]["text"]
-    assert "Always blank and not mappable" in system and "consent" in system
+    assert "Mapped by a person only" in system and "consent" in system and "last_contacted" in system
     assert "year 1600" in system
 
 
