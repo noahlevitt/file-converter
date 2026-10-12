@@ -3,7 +3,7 @@
 Overview
 --------
 This module is the only code that reads or writes the application database (``DATA_DIR/converter.db``) and the
-per-import file folders next to it. It owns three tables:
+per-import file folders next to it. It owns four tables:
 
 * ``users``     -- login accounts: bcrypt password hash, admin flag, created / last-login timestamps.
 * ``templates`` -- saved column mappings. Each is stored with a *fingerprint* of the file's header row so a file
@@ -11,6 +11,7 @@ per-import file folders next to it. It owns three tables:
 * ``imports``   -- one row per import job: who started it, a frozen snapshot of everything needed to run it
   (target schema, mapping, read options, approved value fixes), the live status / progress written by the
   background worker, and the final counts and summary.
+* ``user_prefs`` -- small per-user display preferences such as the light/dark ``theme`` (since 0.10.0).
 
 Main entry points
 -----------------
@@ -118,6 +119,14 @@ from .mapping import Mapping, header_fingerprint, header_similarity
 #   summary_json     the full summary dict (reasons, fill rates, failed values, warnings, ...)
 #   files_json       {kind: file name inside the import folder}, set on completion
 #   files_purged     1 once purge_files deleted the folder; file_path() then returns None for every kind
+#
+# user_prefs -- small per-user display preferences, one row per (username, key); added in 0.10.0 as a new table so
+#   existing databases need no ALTER TABLE (CREATE TABLE IF NOT EXISTS adds it on the next start)
+#   username       the user (lower-cased like users.username; not a foreign key, so it also works for the
+#                  AUTH_MODE=none user "local")
+#   key            preference name, e.g. "theme"
+#   value          preference value as text, e.g. "light" / "dark"
+#   updated_at     time of the last change
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS users (
     username      TEXT PRIMARY KEY,
@@ -174,6 +183,13 @@ CREATE TABLE IF NOT EXISTS imports (
     files_purged    INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_imports_status ON imports(status);
+CREATE TABLE IF NOT EXISTS user_prefs (
+    username      TEXT NOT NULL,
+    key           TEXT NOT NULL,
+    value         TEXT NOT NULL,
+    updated_at    TEXT NOT NULL,
+    PRIMARY KEY (username, key)
+);
 """
 
 
@@ -424,10 +440,31 @@ class Store:
     def delete_user(self, username: str) -> None:
         """Delete a user account (no-op if it doesn't exist).
 
-        Only the ``users`` row is removed; the user's imports and templates keep their username as plain text.
+        The ``users`` row and the user's display preferences (``user_prefs``) are removed; the user's imports and
+        templates keep their username as plain text.
         """
         with self._conn() as con:
             con.execute("DELETE FROM users WHERE username=?", (username.strip().lower(),))
+            con.execute("DELETE FROM user_prefs WHERE username=?", (username.strip().lower(),))
+
+    def get_user_pref(self, username: str, key: str) -> str | None:
+        """Return one stored display preference of a user (e.g. key "theme" -> "dark"), or ``None`` if never set.
+
+        Preferences follow the user across browsers and sessions (Streamlit sessions end on a page refresh).
+        """
+        with self._conn() as con:
+            row = con.execute("SELECT value FROM user_prefs WHERE username=? AND key=?",
+                              (username.strip().lower(), key)).fetchone()
+        return row["value"] if row else None
+
+    def set_user_pref(self, username: str, key: str, value: str) -> None:
+        """Store (insert or replace) one display preference of a user. Writes ``user_prefs``."""
+        with self._conn() as con:
+            con.execute(
+                "INSERT INTO user_prefs(username, key, value, updated_at) VALUES (?,?,?,?) "
+                "ON CONFLICT(username, key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                (username.strip().lower(), key, value, _now()),
+            )
 
     def verify_user(self, username: str, password: str) -> dict | None:
         """Check a login attempt.
