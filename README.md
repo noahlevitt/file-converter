@@ -88,7 +88,7 @@ Every value is reduced to the 10-digit US number:
   international dialling `001…` / `011 1…`.
 - Extensions removed: `x12`, `ext. 12`, `extension 9`, `#12`, `;ext=12`.
 - Labels and extra text: `Cell: …`, `tel:+1…`, `… (mobile)`, `Maria - …`.
-- Several numbers in one cell: a number labelled mobile/cell wins, then an unlabelled one, then home/work, and fax last.
+- Several numbers in one cell: each different number gets its own row (see below).
 - Spreadsheet artifacts: `5165550100.0`, `5.165550100E+09`, `="5165550100"`, a leading apostrophe.
 - Letters typed for digits (`516-555-O1OO`, `5l6…`) and vanity numbers (`1-800-FLOWERS`).
 - `+1` put in front of a number that already had a `+` (`+1 +15165550100`, `+1 +5165550100`,
@@ -126,18 +126,35 @@ would send texts to someone who never gave consent. Removed in 0.9.0.
   wrong guess is someone else's phone.
 - Real US numbers are never changed, even if their area code isn't common in the file.
 
-#### Several phone columns (e.g. Toast: phone, phone2, phone3, phone4)
+#### Several phone numbers per customer (several columns, or several in one cell)
 
 Every phone column feeds the phone field, and **each different number always gets its own row**, with all the
-other columns (visit dates, birthday…) copied from the original row it came from. There is no setting to turn this
-off; older templates that used *First non-empty* for the phone field are upgraded automatically.
+other columns (visit dates, birthday…) copied from the original row it came from. That holds for numbers in
+separate columns (Toast: `phone`, `phone2`, `phone3`, `phone4`) and for several numbers typed into one cell
+(`516-555-0100 / 917-555-1234`). There is no setting to turn this off; older templates that used *First non-empty*
+for the phone field are upgraded automatically.
 
-- The same number in two columns (`201-555-0111` and `(201) 555-0111`) counts once.
-- An invalid extra number (e.g. `123` in phone3) is skipped; the row still imports with the customer's other
-  number(s), and the summary lists what was skipped.
+- The same number twice (`201-555-0111` and `(201) 555-0111`, in two columns or in one cell) counts once.
+- An invalid extra number (e.g. `123` in phone3, or `555-1212` after a full number in the same cell) is skipped;
+  the row still imports with the customer's other number(s), and the summary lists what was skipped. A number
+  without an area code is never completed from the number next to it.
+- A number labelled fax (`Fax: 516-555-0199`, `516-555-0199 (fax)`) is skipped when the customer has another
+  number, because a fax line can't receive texts. When it is their only number it is imported.
 - A customer with no valid number at all is one bad row, as before.
 - The summary says how many extra rows were made ("5 rows ready to import from 4 file rows (2 extra rows…)"),
-  and the side-by-side view marks extra rows `N +` and underlines the number each row was made from.
+  and the side-by-side view marks extra rows `N +` and underlines the number each row was made from (just that
+  number when the cell holds several).
+
+How the numbers in one cell are told apart (no digit is ever added, removed or moved):
+
+| Cell | Rows |
+|---|---|
+| `516-555-0100 / 917-555-1234`, `…, …`, `…; …`, `… or …`, `… and …`, `… \| …`, one per line | one per number |
+| `5165550100 9175551234`, `(516)555-0100(917)555-1234`, `516 555 0100 917 555 1234` | one per number |
+| `H: 516-555-1212 C: 516-555-0100`, `516-555-0100 (cell) 516-555-0199 (home)` | one per number; each label stays with its own number |
+| `516-555-0100 x12, 917-555-1234` | one per number; the extension stays with the first |
+| `516-555-0100/0101` (shorthand for a second number) | one row, 516-555-0100; the shorthand is not expanded |
+| `51655501005165551212` (digits run together) | bad row, `too many digits (20)`: digits are never cut apart |
 - Columns that describe a phone (`phone4MarketingPreference`, `Phone Type`, `SMS Opt In`, `Phone Verified`) are
   never used as phone numbers. Marketing-preference columns are treated like consent columns: not imported.
 
