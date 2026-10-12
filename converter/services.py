@@ -22,6 +22,9 @@ Main entry points
            mapping is returned with a note. In the web app this step runs only with ``AI_AUTO_MAP=true``; in the
            CLI only with ``--ai``.
 
+      A file without a header row is never matched to a template (see ``Store.find_template``); the reviewer can
+      apply one by hand (:func:`template_mapping`).
+    * :func:`template_mapping` — a saved template's mapping fitted to the current file.
     * :func:`merge` — apply a partial mapping (e.g. Claude's suggested changes) on top of an existing one.
     * :func:`validate_repairs` — double-check Claude's "Suggest fixes" value repairs before they are offered.
     * :func:`check_for_mistakes` — rule checks plus an optional Claude review of a conversion.
@@ -43,7 +46,7 @@ from .checks import Finding, build_review_payload, run_checks
 from .config import Settings
 from .engine import source_rows
 from .heuristics import auto_map
-from .mapping import ColumnProfile, FieldMapping, Mapping
+from .mapping import ColumnProfile, FieldMapping, Mapping, has_generic_columns
 from .schema import TargetSchema
 from .storage import Store, Template
 
@@ -138,15 +141,16 @@ def initial_mapping(schema: TargetSchema, df: pd.DataFrame, profiles: list[Colum
     if store is not None:
         tpl, sim = store.find_template(columns, schema.name)
         if tpl is not None and sim == 1.0:
-            m = tpl.mapping.normalized(schema, columns)
-            for fm in m.fields.values():
-                if fm.transform != "none":
-                    fm.origin = "template"
-            return MappingSuggestion(m, "template", tpl, sim, [f"Matched saved template '{tpl.name}'."])
+            return MappingSuggestion(template_mapping(schema, tpl, columns), "template", tpl, sim,
+                                     [f"Matched saved template '{tpl.name}'."])
 
     # 2. Rules.
     rules = auto_map(schema, profiles).normalized(schema, columns)
     notes: list[str] = []
+    if has_generic_columns(columns):
+        notes.append("This file has no header row: saved templates aren't matched automatically, and columns can "
+                     "only be recognised from their values (phone numbers). Pick a template under Use a saved "
+                     "template, or choose where each column goes under Columns in your file.")
     near_tpl, near_sim = (None, 0.0)
     if store is not None:
         # Same lookup as step 1; here it can only return a *similar* template (>= the similarity threshold) or None.
@@ -188,6 +192,22 @@ def initial_mapping(schema: TargetSchema, df: pd.DataFrame, profiles: list[Colum
             # Claude is a nice-to-have: any API/validation failure falls back to the rule-based mapping.
             notes.append(f"AI mapping unavailable ({exc}); using rule-based mapping.")
     return MappingSuggestion(rules, "rules", near_tpl, near_sim, notes)
+
+
+def template_mapping(schema: TargetSchema, tpl: Template, columns: list[str]) -> Mapping:
+    """A saved template's mapping fitted to this file: ``Mapping.normalized``, every mapped field marked "template".
+
+    Used for an exact template match (:func:`initial_mapping`) and when the reviewer picks a template by hand on the
+    mapping page. Columns the template uses that the file lacks are dropped, current rules are enforced (phones
+    one row per number, consent never mapped), and the saved template itself is not changed. For a file without a
+    header row the columns match by position ("Column 1" is the first column), which is why such files only get a
+    template the reviewer chose.
+    """
+    m = tpl.mapping.normalized(schema, columns)
+    for fm in m.fields.values():
+        if fm.transform != "none":
+            fm.origin = "template"
+    return m
 
 
 def validate_repairs(schema: TargetSchema, mapping: Mapping, field_name: str, pairs: list[tuple[str, str]],
