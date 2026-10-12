@@ -15,6 +15,10 @@ Open the converter's address in a browser (on one computer: http://localhost:850
 username and password an administrator gave you. You can change your own password under **My account** in the
 sidebar. **Sign out** is just below it.
 
+**Light or dark mode:** click the small square at the top right of any page. A moon switches to dark mode, a sun
+switches back to light. Your choice is remembered for your account, so it follows you to other computers and
+after you sign in again. Until you choose, the converter follows your computer's light/dark setting.
+
 ## Converting a file
 
 ### 1 · Upload
