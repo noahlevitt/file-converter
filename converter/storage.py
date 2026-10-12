@@ -516,12 +516,18 @@ class Store:
         Returns:
             The stored template, re-read from the database.
 
+        Raises:
+            ValueError: an empty name, or ``headers`` of a file without a header row (all "Column N").
+
         On update, ``created_by/created_at`` and ``use_count`` are preserved; only the content and the
         ``updated_*`` columns change. Writes: one INSERT or UPDATE on ``templates``.
         """
         name = name.strip()
         if not name:
             raise ValueError("template name is required")
+        # Files without a header row don't use templates (see find_template). Callers check first; this is a backstop.
+        if has_generic_columns(headers):
+            raise ValueError("files without a header row are not saved as templates")
         fp = header_fingerprint(headers)
         now = _now()
         with self._conn() as con:
@@ -592,7 +598,8 @@ class Store:
 
         Only templates for ``schema_name`` are considered. A file without a header row (columns named "Column 1",
         "Column 2", ... by the reader) never matches: those names say nothing about its layout, so two clients'
-        headerless files with the same number of columns would share a template. Such templates are picked by hand.
+        headerless files with the same number of columns would share a template. (Such files aren't saved as
+        templates either, see save_template; this also keeps templates saved before 0.12.1 from matching.)
 
         Returns:
             ``(template, similarity)``; ``(None, best_similarity_seen)`` when nothing qualifies, so the UI can
