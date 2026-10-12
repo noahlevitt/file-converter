@@ -128,7 +128,7 @@ def write_summary(result: ConversionResult, schema: TargetSchema, source_filenam
 
     * "Why rows were rejected" — reason counts of bad rows;
     * "Repaired from likely typos" — e.g. a phone number with one digit typed twice, imported but worth checking;
-    * "Extra numbers skipped" — invalid 2nd/3rd phone numbers that didn't get their own row;
+    * "Extra numbers skipped" — invalid (or fax) 2nd/3rd phone numbers that didn't get their own row;
     * "Optional values left blank" — invalid optional values that were blanked.
 
     When 'One row per phone number' added rows, an indented "of which extra rows …" line is inserted right after
@@ -154,7 +154,7 @@ def write_summary(result: ConversionResult, schema: TargetSchema, source_filenam
         # Find the "Rows converted" line by its exact text and put the breakdown directly under it.
         lines.insert(lines.index(f"Rows converted:                      {result.imported:,}") + 1,
                      f"  of which extra rows for 2nd/3rd… phone numbers: {result.extra_rows:,}")
-        lines.append(f"Invalid extra phone numbers skipped: {result.skipped_values:,}")
+        lines.append(f"Extra phone numbers skipped:         {result.skipped_values:,}  (invalid, or labelled fax)")
     if result.repaired_values:
         lines.append(f"Phone numbers repaired from typos:   {result.repaired_values:,}  (check these)")
     if result.reason_counts:
