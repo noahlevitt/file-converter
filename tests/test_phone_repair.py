@@ -1,10 +1,11 @@
 """Only US numbers are expected, so a number that fails is treated as a likely typo and repaired when exactly one
 US number fits. Every repair is marked so a person can check it.
 
-A wrong guess texts a stranger, so a repair is only made from evidence in the same file: the area codes the file
-uses and numbers that appear elsewhere in it. When two numbers fit equally well, or nothing local fits, the row is
-rejected with a message that says why. Real US area codes are never "corrected". Repairs are counted and shown in
-the flag message, audit, comparison view, field summary and summary file.
+A wrong guess texts a stranger, so only repairs that keep the digits as typed are allowed (each approved one by
+one): a foreign country code in front of a US number is dropped, and one extra digit is removed. Area codes are
+never changed or filled in (removed in 0.9.0 for compliance). When two numbers fit equally well, the one that
+appears elsewhere in the file wins; otherwise the row is rejected with a message that says why. Repairs are counted
+and shown in the flag message, audit, comparison view, field summary and summary file.
 """
 
 import pandas as pd
@@ -15,7 +16,7 @@ from converter.engine import CELL_REPAIRED, convert
 from converter.mapping import FieldMapping, Mapping
 from converter.output import write_summary
 
-# A Long Island / NYC column (516, 631, 917): the local area codes that typos are measured against.
+# A Long Island / NYC column (516, 631, 917): the numbers and area codes the file itself provides as evidence.
 LONG_ISLAND = ["5165550100", "5165550111", "5165550122", "(516) 555-0133", "516-555-0144", "6315550155",
                "6315550166", "9175550177"]
 
@@ -31,20 +32,23 @@ def fix(real_schema, value, column=LONG_ISLAND):
     return out, err, ctx.get("repairs", {}).get(value)
 
 
-def test_area_code_typo_of_a_local_area_code(real_schema):
-    """An area code one keystroke from a local one is fixed (514 → 516, swapped 156 → 516); a real one (561) isn't."""
+def test_area_codes_are_never_changed(real_schema):
+    """Compliance: an area code is never "corrected", even one keystroke from the file's own (514 → 516 is NOT done).
+
+    The number stays a bad row with its real reason, so nobody texts a number that was partly invented.
+    """
     out, err, note = fix(real_schema, "5149689696")  # 514 (Montreal) one digit off 516, which the file uses
-    assert out == "5169689696" and err is None and "514 looks like a typo of 516" in note
-    out, _, note = fix(real_schema, "(561) 555-0199")  # 561 is a real US area code (Florida): left alone
+    assert (out, note) == ("", None) and err == "not a US number — Canada (area code 514, Quebec)"
+    out, err, note = fix(real_schema, "(156) 555-0199")  # swapped digits of 516
+    assert out == "" and note is None and "area code 156 isn't in use" in err
+    out, _, note = fix(real_schema, "(561) 555-0199")  # a real US area code (Florida) is kept as written
     assert out == "5615550199" and note is None
-    out, _, note = fix(real_schema, "(156) 555-0199")  # swapped digits
-    assert out == "5165550199" and "156 looks like a typo of 516" in note
 
 
-def test_area_code_not_near_any_local_one_is_rejected(real_schema):
-    """An unused area code that isn't close to a local one is rejected; the message lists the file's area codes."""
+def test_unused_area_code_is_rejected(real_schema):
+    """An area code that isn't in use is rejected with that reason (nothing about the file's area codes)."""
     out, err, _ = fix(real_schema, "+1 (433) 309-8420")
-    assert out == "" and "area code 433 isn't in use" in err and "516, 631" in err
+    assert out == "" and err == "not a real US number (area code 433 isn't in use)"
 
 
 def test_foreign_code_in_front_of_us_number(real_schema):
@@ -75,14 +79,12 @@ def test_tie_broken_by_a_number_elsewhere_in_the_file(real_schema):
     assert out == "5169461966" and "appears elsewhere in this file" in note
 
 
-def test_missing_area_code_only_with_one_dominant_area_code(real_schema):
-    """A 7-digit number gets an area code only when one area code dominates the file; a mixed file is rejected."""
-    # Ten 516 numbers and a single 631 number.
-    dominant = [f"516555{n:04d}" for n in range(100, 110)] + ["6315550155"]
-    out, _, note = fix(real_schema, "555-0177", dominant)
-    assert out == "5165550177" and "no area code" in note
-    out, err, _ = fix(real_schema, "555-0177")  # mixed 516 / 631 / 917: no single area code to assume
-    assert out == "" and "missing area code" in err
+def test_missing_area_code_is_never_filled_in(real_schema):
+    """Compliance: a 7-digit number never gets an area code, even when one area code makes up the whole file."""
+    all_516 = [f"516555{n:04d}" for n in range(100, 120)]
+    for column in (all_516, LONG_ISLAND):
+        out, err, note = fix(real_schema, "555-0177", column)
+        assert (out, note) == ("", None) and err == "missing area code (only 7 digits)"
 
 
 def test_repairs_are_marked_and_counted(real_schema):
@@ -91,31 +93,31 @@ def test_repairs_are_marked_and_counted(real_schema):
     It is counted, named in the flag message and summary file, marked in the audit, listed under 'problems' in the
     comparison and counted in the field summary.
     """
-    # Row 8 (514 → 516) is repaired; row 9 (unused 433) is rejected.
-    df = pd.DataFrame({"Phone": LONG_ISLAND + ["5149689696", "+1 (433) 309-8420"]})
+    # Row 8 (an extra digit: 212-728-1399 typed with its last digit twice) is repaired; row 9 (unused 433) is rejected.
+    df = pd.DataFrame({"Phone": LONG_ISLAND + ["21272813999", "+1 (433) 309-8420"]})
     m = Mapping(fields={"phone_number": FieldMapping(sources=["Phone"], transform="copy")})
     res = convert(df, real_schema, m)
     assert (res.imported, res.rejected, res.repaired_values) == (9, 1, 1)
     assert "1 phone number was repaired from likely typos" in res.flag_message()
-    assert res.audit.loc[8, "st.phone_number"] == CELL_REPAIRED and "typo of 516" in res.audit.loc[8, "_issues"]
+    assert res.audit.loc[8, "st.phone_number"] == CELL_REPAIRED and "one digit too many" in res.audit.loc[8, "_issues"]
     assert "Repaired from likely typos" in write_summary(res, real_schema, "f.csv", "noah", "x").decode()
 
     plan = column_plan(real_schema, m, list(df.columns))
     assert filter_rows(res.audit, df, real_schema, "problems") == [8, 9]
     assert status_counts(res.audit, real_schema)["problems"] == 2
     h = build_compare_html(df, res.audit, [8], real_schema, plan)
-    assert "c-rpr" in h and "repaired from a likely typo" in h and "5149689696" in h
+    assert "c-rpr" in h and "repaired from a likely typo" in h and "21272813999" in h
     summary = field_change_summary(res.audit, real_schema, m)
     assert summary.loc[summary["Field"] == "phone_number", "Repaired typo"].iloc[0] == 1
 
 
 def test_repairs_with_several_phone_columns(real_schema):
     """Repairs also apply to a second phone column; the repaired number becomes its own extra row."""
-    df = pd.DataFrame({"phone": LONG_ISLAND, "phone2": [""] * 7 + ["5149689696"]})
+    df = pd.DataFrame({"phone": LONG_ISLAND, "phone2": [""] * 7 + ["+44 516 555 0199"]})
     m = Mapping(fields={"phone_number": FieldMapping(sources=["phone", "phone2"], transform="each_row")})
     res = convert(df, real_schema, m)
     assert res.extra_rows == 1 and res.repaired_values == 1
-    assert res.output["phone_number"].tolist()[-1] == "5169689696"
+    assert res.output["phone_number"].tolist()[-1] == "5165550199"
 
 
 def test_odd_phone_values_never_crash_date_detection():
