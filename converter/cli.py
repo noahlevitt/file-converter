@@ -58,7 +58,7 @@ from .jobs import run_import
 from .mapping import has_generic_columns, profile_columns
 from .reader import ReadError, read_file
 from .schema import load_schema
-from .services import initial_mapping, make_assistant
+from .services import initial_mapping, make_assistant, template_mapping
 from .storage import Store
 
 
@@ -105,7 +105,7 @@ def _load(args):
         tpl = store.get_template(args.template)
         if tpl is None:
             sys.exit(f"Template '{args.template}' not found.")
-        mapping, source = tpl.mapping.normalized(schema, list(rr.df.columns)), f"template '{tpl.name}'"
+        mapping, source = template_mapping(schema, tpl, list(rr.df.columns)), f"template '{tpl.name}'"
         notes: list[str] = []
     else:
         assistant = make_assistant(settings) if args.ai else None
@@ -173,7 +173,7 @@ def cmd_convert(args) -> None:
     if args.save_template and has_generic_columns(list(rr.df.columns)):
         print("Template not saved: files without a header row are not saved as templates.")
     elif args.save_template:
-        store.save_template(args.save_template, list(rr.df.columns), mapping,
+        store.save_template(args.save_template, list(rr.df.columns), mapping.without_manual(schema),
                             {"sheet": rr.sheet, "header_row": rr.header_row}, schema.name, "cli")
         print(f"Saved template '{args.save_template}'.")
         saved = args.save_template
