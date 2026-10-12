@@ -102,15 +102,19 @@ Every value is reduced to the 10-digit US number:
 #### Repairing typos (US numbers only)
 
 Only US numbers are expected, so a number that isn't a valid US number is treated as a likely typo. It is repaired
-only when exactly **one** US number fits, using the file's own numbers as evidence:
+only when exactly **one** US number fits and **no digit is added or changed** (each repair below was approved one
+by one):
 
 | Typo | Example | Repaired to |
 |---|---|---|
 | Country code in front of a US number | `+44 516 555 0100` | 516-555-0100 (not done for a real foreign number whose area code isn't used in the file, e.g. a London number) |
 | `+1` added to a number that already had a `+` | `+1 +51 63 171059` | 516-317-1059 |
 | One digit too many (typed twice, extra at the end or start) | `51655501444` | 516-555-0144 |
-| Area code one digit off, or two digits swapped, from an area code the file uses (at least 5% of its numbers) | `514-968-9696` in a 516 file | 516-968-9696 |
-| No area code, when one area code makes up 80%+ of the file | `555-0177` | 516-555-0177 |
+
+**Never done (compliance):** area codes are never changed or filled in. A number whose area code looks like a typo
+(`514-968-9696` in a file of 516 numbers) or that has no area code (`555-0177`) stays a bad row with its reason
+(`not a US number — Canada (area code 514, Quebec)`, `missing area code (only 7 digits)`): an assumed area code
+would send texts to someone who never gave consent. Removed in 0.9.0.
 
 - When two or more numbers fit, the one that already appears elsewhere in the file wins; otherwise nothing is guessed
   and the reason lists the options ("could be (516) 946-1961 or (516) 946-1966").
