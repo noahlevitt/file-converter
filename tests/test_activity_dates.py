@@ -1,11 +1,11 @@
-"""Every file's last date reaches a last-activity field - one date per row; last_contacted is never filled.
+"""Every file's last date reaches a last-activity field - one date per row; last_contacted only by hand.
 
 Files often name their date column only "Date", "Start Time" or "Timestamp". Those dates must still be imported:
 in a call log as calls_last, otherwise as transactions_last (fields marked ``generic_date`` in the target format).
 A row has one last date: a column named for its activity ("Last Visit") wins, then the best generic date, and only
 when the file has neither, a creation date ("Date Created") - better than no date at all, never alongside a real
 last date. Birthday, expiry and opt-in dates are never used. last_contacted (when we last texted the customer) is
-always blank: no imported file contains it.
+only filled when a person maps a column to it.
 """
 
 import pandas as pd
@@ -123,14 +123,21 @@ def test_named_activity_columns_are_unchanged(real_schema):
     assert "Date" not in sum(m.values(), [])
 
 
-def test_last_contacted_is_never_filled(real_schema):
-    """last_contacted is when we last texted the customer: always blank, never mapped, not even by hand."""
+def test_last_contacted_only_by_hand(real_schema):
+    """last_contacted (when we last texted the customer) is never filled automatically, only when a person maps it.
+
+    The rules don't map it, a column naming it isn't reused as another date, a mapping a person didn't make is
+    dropped, a saved template leaves it out - and a person can still choose it.
+    """
     df = pd.DataFrame({"Phone": PHONES, "Last Campaign Sent": DATES, "Last Message Sent": DATES})
     m = auto_map(real_schema, profile_columns(df))
     assert m.get("last_contacted").transform == "none"
     assert not ({"Last Campaign Sent", "Last Message Sent"} & m.used_sources())  # not reused as another date
-    m2, msg = apply_column_edit(real_schema, m, "Last Campaign Sent", targets=["last_contacted"])
-    assert m2.get("last_contacted").transform == "none" and "always blank" in " ".join(msg)
-    forced = Mapping(fields={"phone_number": FieldMapping(sources=["Phone"], transform="copy"),
-                             "last_contacted": FieldMapping(sources=["Last Campaign Sent"], transform="copy")})
-    assert set(convert(df, real_schema, forced).output["last_contacted"]) == {""}
+    auto = Mapping(fields={"phone_number": FieldMapping(sources=["Phone"], transform="copy"),
+                           "last_contacted": FieldMapping(sources=["Last Campaign Sent"], transform="copy",
+                                                          origin="template")})
+    assert set(convert(df, real_schema, auto).output["last_contacted"]) == {""}
+    m2, _ = apply_column_edit(real_schema, m, "Last Campaign Sent", targets=["last_contacted"])
+    assert m2.get("last_contacted").origin == "user"
+    assert convert(df, real_schema, m2).output["last_contacted"].iloc[0] == "10/01/2026 03:15 PM"
+    assert m2.without_manual(real_schema).get("last_contacted").transform == "none"  # what a template keeps
