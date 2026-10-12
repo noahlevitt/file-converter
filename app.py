@@ -691,7 +691,7 @@ def page_new_import() -> None:
             COL_PREVIEW: preview.get(f.name, ""),
             COL_CHECK: ("⚠ " + p) if (p := row_problem(schema, mapping, f.name) or field_warn.get(f.name, "")) else "",
             COL_BY: "Fixed" if f.fixed_blank else origin_label(mapping.get(f.name)),
-            COL_WHY: "Always blank — required by the import format; can't be changed" if f.fixed_blank
+            COL_WHY: "Always blank (fixed in the target format); can't be changed" if f.fixed_blank
             else mapping.get(f.name).reason,
         }
         for f in schema.fields
