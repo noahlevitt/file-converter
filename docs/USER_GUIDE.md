@@ -9,15 +9,15 @@ target system expects:
 - birthdays and anniversaries as `MM/DD/YYYY`, with year `1600` when there's no real year;
 - `consent` always blank.
 
-## Signing in
+## Opening the converter
 
-Open the converter's address in a browser (on one computer: http://localhost:8501) and sign in with the
-username and password an administrator gave you. You can change your own password under **My account** in the
-sidebar. **Sign out** is just below it.
+Open the converter's address in a browser (on one computer: http://localhost:8501). There is no login for now.
+When logins are turned on (`AUTH_MODE=password`), sign in with the username and password an administrator gave
+you; you can then change your own password under **My account** in the sidebar, with **Sign out** just below it.
 
 **Light or dark mode:** click the small square at the top right of any page. A moon switches to dark mode, a sun
-switches back to light. Your choice is remembered for your account, so it follows you to other computers and
-after you sign in again. Until you choose, the converter follows your computer's light/dark setting.
+switches back to light. Your choice is remembered (for your account when logins are on, so it follows you to
+other computers and after you sign in again). Until you choose, the converter follows your computer's light/dark setting.
 
 ## Converting a file
 
@@ -220,7 +220,8 @@ imported.
   - a template is applied automatically to files with exactly the same columns, in any order or capitalisation;
   - a similar layout (75%+ of the same columns) starts from that template's rules.
 - **Target format:** a read-only description of every field of the import format and its rules.
-- **Users** (administrators only): add users, reset passwords, make or remove administrators, delete users.
+- **Users** (administrators only, and only while logins are on): add users, reset passwords, make or remove
+  administrators, delete users.
 
 ## Common questions
 
