@@ -162,10 +162,10 @@ def test_clear_goes_to_removes_column_from_coalesce(real_schema):
 def test_column_to_several_fields_and_last_source_removed(real_schema):
     """One column can feed several fields; removing a field's only source leaves that field unmapped ('none')."""
     m = Mapping(fields={"transactions_last": FieldMapping(sources=["Last Visit"], transform="copy")})
-    m2, _ = apply_column_edit(real_schema, m, "Last Visit", targets=["transactions_last", "last_contacted"])
-    assert m2.targets_of("Last Visit") == ["transactions_last", "last_contacted"]
-    m3, _ = apply_column_edit(real_schema, m2, "Last Visit", targets=["last_contacted"])
-    assert m3.get("transactions_last").transform == "none" and m3.targets_of("Last Visit") == ["last_contacted"]
+    m2, _ = apply_column_edit(real_schema, m, "Last Visit", targets=["transactions_last", "in_sms_last"])
+    assert m2.targets_of("Last Visit") == ["transactions_last", "in_sms_last"]
+    m3, _ = apply_column_edit(real_schema, m2, "Last Visit", targets=["in_sms_last"])
+    assert m3.get("transactions_last").transform == "none" and m3.targets_of("Last Visit") == ["in_sms_last"]
 
 
 def test_consent_cannot_be_picked(real_schema):
