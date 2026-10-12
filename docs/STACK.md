@@ -46,7 +46,7 @@ upload ─► reader.py (python-calamine, charset-normalizer, pandas)
 | **ThreadPoolExecutor** (Python standard library) | Runs imports in the background with progress, cancel and time-left estimates (`IMPORT_WORKERS`, default 2) | Background work without adding Redis, Celery or a separate worker service. **Trade-off:** if the app restarts mid-import, that import is marked *Interrupted* and you re-run it with one click. |
 | **bcrypt** | Hashes passwords for the per-user accounts | The standard for password storage; plain-text passwords never reach the database. |
 | **Docker + docker-compose** | Packages the app (Python, libraries, app code) for a server or a single computer | Same environment everywhere, one command to start or update. On a server, Caddy goes in front to provide HTTPS (see [OPERATIONS.md](OPERATIONS.md)). |
-| **pytest** | About 540 automated tests, including hundreds of phone and date spellings and every business rule | Each fix (phone typos, 1600 birthdays, one row per phone number…) is locked in so later changes can't quietly break it. |
+| **pytest** | About 570 automated tests, including hundreds of phone and date spellings and every business rule | Each fix (phone typos, 1600 birthdays, one row per phone number…) is locked in so later changes can't quietly break it. |
 | **Git + GitHub** | History (one commit per file change), version tags (`v0.1.0` … current) | You can see what changed and when, and roll back. |
 
 ## What we deliberately didn't use
