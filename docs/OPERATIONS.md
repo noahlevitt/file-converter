@@ -17,8 +17,9 @@ All three serve the app on port **8501** (http://localhost:8501 on the machine i
 
 1. Install Python 3.11+ (on a Mac: `brew install python@3.12`).
 2. Run `./run_local.sh` from the project folder. The first run creates `.venv`, installs the libraries and copies
-   `.env.example` to `.env`. Then edit `.env`: admin username and password, optional `ANTHROPIC_API_KEY`.
-3. Open http://localhost:8501 and sign in with the admin account.
+   `.env.example` to `.env`. Then edit `.env`: optional `ANTHROPIC_API_KEY` (and the admin account, if you turn
+   logins on).
+3. Open http://localhost:8501. There is no login for now (see [Users](#users)).
 
 **Other people on the same network:**
 - They can use `http://<this computer's IP>:8501`, or `http://<computer-name>.local:8501` on a Mac.
@@ -65,6 +66,12 @@ Tailscale.
 
 ## Users
 
+**Logins are off for now** (`AUTH_MODE=none`, the default since 0.12.2): no sign-in, everyone is the local
+administrator, and the Users page is hidden. Anyone who can reach the address can use the app and see past imports
+(customer phone numbers), so only run it like this on your own computer or a trusted network. Turn logins back on
+with `AUTH_MODE=password` in `.env` and a restart; existing accounts are kept and work again. The rest of this
+section applies when logins are on.
+
 **First admin:** when the user table is empty, the account from `ADMIN_USERNAME` / `ADMIN_PASSWORD` in `.env` is
 created at start-up. After the first sign-in, remove `ADMIN_PASSWORD` from `.env`.
 
@@ -80,7 +87,7 @@ docker compose exec app python scripts/manage_users.py delete jane
 .venv/bin/python scripts/manage_users.py add jane
 ```
 
-**Single user:** `AUTH_MODE=none` turns the login off. Only use it for one person on their own computer.
+**No login:** `AUTH_MODE=none` (the current default) turns the login off; see the top of this section.
 
 ## Settings
 
@@ -94,7 +101,7 @@ All settings are in `.env`; each one is explained in `.env.example`. The ones yo
 | `AI_MASK_PHONES` | `true` | Partly mask phone digits in the sample rows sent for Check for mistakes. |
 | `MAPPING_MODEL` / `REPAIR_MODEL` | `claude-sonnet-5-5` / `claude-haiku-5-5` | Models for mapping/notes/checks and for value fixes. |
 | `AI_SAMPLE_VALUES` | `15` | Sample values per column shown in the app and sent to Claude. |
-| `AUTH_MODE` | `password` | `none` = no login (single user only). |
+| `AUTH_MODE` | `none` | `none` = no login (current default); `password` = per-user logins and the Users page. |
 | `APP_TITLE` | Import File Converter | Browser tab title and login heading. |
 | `APP_TIMEZONE` | `America/New_York` | Times shown in the app; default client time zone for new imports. |
 | `DEFAULT_PAGE` | `new` | `imports` opens the Imports page first. |
