@@ -1743,9 +1743,12 @@ PAGE_TEMPLATES = st.Page(page_templates, title="Templates", icon="🧩", url_pat
 PAGE_SCHEMA = st.Page(page_schema, title="Target format", icon="🎯", url_path="target-format")
 PAGE_USERS = st.Page(page_users, title="Users", icon="👥", url_path="users")
 
-# The Users page is only registered for admins. That is the access control for it: a page that isn't passed to
-# st.navigation can't be opened, even by typing its URL.
-nav = st.navigation([PAGE_NEW, PAGE_IMPORTS, PAGE_TEMPLATES, PAGE_SCHEMA] + ([PAGE_USERS] if user["is_admin"] else []))
+# The Users page is only registered for admins, and only while logins are on (AUTH_MODE=password): without logins
+# accounts do nothing. That is the access control for it: a page that isn't passed to st.navigation can't be
+# opened, even by typing its URL.
+logins_on = settings.auth_mode != "none"
+nav = st.navigation([PAGE_NEW, PAGE_IMPORTS, PAGE_TEMPLATES, PAGE_SCHEMA]
+                    + ([PAGE_USERS] if user["is_admin"] and logins_on else []))
 
 # Sidebar, drawn on every page under the navigation menu.
 with st.sidebar:
@@ -1754,9 +1757,9 @@ with st.sidebar:
     if running:
         st.caption(f"🔵 {len(running)} import{'s' if len(running) != 1 else ''} in progress")
     st.divider()
-    st.caption(f"Signed in as **{user['username']}**" + (" (admin)" if user["is_admin"] else ""))
-    # With AUTH_MODE=none there are no accounts (everyone is the local admin), so no password or sign-out.
-    if settings.auth_mode != "none":
+    # With AUTH_MODE=none there are no accounts (everyone is the local admin): no name, password or sign-out.
+    if logins_on:
+        st.caption(f"Signed in as **{user['username']}**" + (" (admin)" if user["is_admin"] else ""))
         with st.expander("My account"):
             with st.form("pw_self", clear_on_submit=True):
                 p1 = st.text_input("New password", type="password")
