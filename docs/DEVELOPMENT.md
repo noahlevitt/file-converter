@@ -140,7 +140,8 @@ Add a test in `test_notes_checks.py`.
 
 ## Database changes
 
-`storage.py` creates tables with `CREATE TABLE IF NOT EXISTS` and has no migration framework. Adding a column to
+`storage.py` creates tables with `CREATE TABLE IF NOT EXISTS` and has no migration framework. New data is easiest
+to add as a new table (like `user_prefs` in 0.10.0), which existing databases get automatically on the next start. Adding a column to
 an existing table needs an explicit `ALTER TABLE` in `Store.__init__`, guarded so it runs once (check
 `PRAGMA table_info`). Import records store JSON snapshots (mapping, schema, summary), so new optional keys can be
 added there without a database change. Read them with `.get(...)` and a default, because old imports won't have
