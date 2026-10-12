@@ -160,8 +160,9 @@ def initial_mapping(schema: TargetSchema, df: pd.DataFrame, profiles: list[Colum
             # Template decisions beat rule guesses because a person reviewed them; fields the template left
             # unmapped (or whose columns are gone) keep the rule-based mapping.
             tm = near_tpl.mapping.normalized(schema, columns)
+            manual = {f.name for f in schema.fields if f.manual_only}
             for name, fm in tm.fields.items():
-                if fm.transform != "none":
+                if fm.transform != "none" and name not in manual:  # a person maps those for each file
                     fm.origin = "template"
                     rules.fields[name] = fm
             # Notes: rule notes win on a clash; the template's general note is used when the rules have none.
@@ -198,14 +199,16 @@ def template_mapping(schema: TargetSchema, tpl: Template, columns: list[str]) ->
     """A saved template's mapping fitted to this file: ``Mapping.normalized``, every mapped field marked "template".
 
     Used for an exact template match (:func:`initial_mapping`) and by the CLI's ``--template``. Columns the template
-    uses that the file lacks are dropped, current rules are enforced (phones one row per number, consent never
-    mapped), and the saved template itself is not changed.
+    uses that the file lacks are dropped, current rules are enforced (phones one row per number), hand-mapped-only
+    fields (consent, last_contacted) are never filled from a template, and the saved template itself is not
+    changed.
     """
     m = tpl.mapping.normalized(schema, columns)
     for fm in m.fields.values():
         if fm.transform != "none":
             fm.origin = "template"
-    return m
+    # Normalizing again drops hand-mapped-only fields (consent, last_contacted) now that they aren't "user" choices.
+    return m.normalized(schema, columns)
 
 
 def validate_repairs(schema: TargetSchema, mapping: Mapping, field_name: str, pairs: list[tuple[str, str]],
