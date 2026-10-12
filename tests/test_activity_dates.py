@@ -1,9 +1,11 @@
-"""Dates from any file reach a last-activity field; last_contacted is never filled.
+"""Every file's last date reaches a last-activity field - one date per row; last_contacted is never filled.
 
 Files often name their date column only "Date", "Start Time" or "Timestamp". Those dates must still be imported:
 in a call log as calls_last, otherwise as transactions_last (fields marked ``generic_date`` in the target format).
-Dates that aren't a customer's latest activity ("Date Created", sign-up, first visit, expiry) never are, and
-last_contacted (when we last texted the customer) is always blank: no imported file contains it.
+A row has one last date: a column named for its activity ("Last Visit") wins, then the best generic date, and only
+when the file has neither, a creation date ("Date Created") - better than no date at all, never alongside a real
+last date. Birthday, expiry and opt-in dates are never used. last_contacted (when we last texted the customer) is
+always blank: no imported file contains it.
 """
 
 import pandas as pd
@@ -63,21 +65,44 @@ def test_separate_date_and_time_columns_are_combined(real_schema):
     # an order date wins over a sign-up date; the sign-up date and DOB never become activity dates
     ({"Phone": PHONES, "Order Date": DATES, "Sign Up Date": OLD, "DOB": ["03/15/1985", "07/04/1990", "12/25/1979"]},
      {"transactions_last": ["Order Date"], "birthday": ["DOB"]}),
-    # two generic dates: the one that says "last" first, the other to the second field
-    ({"Phone": PHONES, "Date": OLD, "Last Updated": DATES}, {"transactions_last": ["Last Updated"],
-                                                             "calls_last": ["Date"]}),
+    # two generic dates: only one last date per row - the one that says "last"
+    ({"Phone": PHONES, "Date": OLD, "Last Updated": DATES}, {"transactions_last": ["Last Updated"]}),
 ])
 def test_other_files_date_goes_to_transactions_last(real_schema, columns, expected):
-    """Outside call logs a generic date is the latest visit/transaction; a second one fills calls_last."""
+    """Outside call logs a generic date is the latest visit/transaction; only one date is used per row."""
     m = mapped(real_schema, pd.DataFrame(columns))
     m.pop("phone_number")
     assert m == expected
 
 
-@pytest.mark.parametrize("header", ["Date Created", "Created At", "createdAt", "Sign Up Date", "Member Since",
-                                    "First Visit", "Expiration Date", "Opt-In Date", "Joined"])
-def test_dates_that_are_not_a_last_activity_stay_out(real_schema, header):
-    """Creation, sign-up, first-visit, expiry and opt-in dates are never used as a last activity."""
+CREATION_HEADERS = ["Date Created", "Created At", "createdAt", "Sign Up Date", "Member Since", "First Visit",
+                    "Joined"]
+
+
+@pytest.mark.parametrize("header", CREATION_HEADERS)
+def test_creation_date_is_the_fallback_when_there_is_no_other_date(real_schema, header):
+    """A file whose only date is a creation date imports it rather than no date at all."""
+    m = mapped(real_schema, pd.DataFrame({"Phone": PHONES, header: OLD}))
+    assert m["transactions_last"] == [header]
+
+
+@pytest.mark.parametrize("header", CREATION_HEADERS)
+@pytest.mark.parametrize("other", ["Last Visit", "Date", "Last Reward Redeemed"])
+def test_creation_date_never_alongside_a_last_date(real_schema, header, other):
+    """With a real last date (named or generic) the creation date is not imported: one last date per row."""
+    m = mapped(real_schema, pd.DataFrame({"Phone": PHONES, header: OLD, other: DATES}))
+    assert header not in sum(m.values(), []) and other in sum(m.values(), [])
+
+
+def test_call_log_with_only_a_creation_date(real_schema):
+    """A call log whose only date is 'Date Created' still gets it, as the last call."""
+    m = mapped(real_schema, pd.DataFrame({"Date Created": DATES, "From": PHONES, "To": ["5163000366"] * 3}))
+    assert m["calls_last"] == ["Date Created"]
+
+
+@pytest.mark.parametrize("header", ["Expiration Date", "Opt-In Date", "Due Date"])
+def test_dates_that_are_never_a_last_activity(real_schema, header):
+    """Expiry, due and opt-in dates are never used, not even as the only date."""
     m = mapped(real_schema, pd.DataFrame({"Phone": PHONES, header: DATES}))
     assert set(m) == {"phone_number"}
 
@@ -90,7 +115,8 @@ def test_end_time_is_not_used_as_a_second_activity(real_schema):
 
 
 def test_named_activity_columns_are_unchanged(real_schema):
-    """Columns that name their activity keep their own field; generic dates only fill what's left."""
+    """Columns that name their activity keep their own field (both, when a file names both); no generic date is
+    added on top."""
     df = pd.DataFrame({"Phone": PHONES, "Last Visit": DATES, "Last Call": DATES, "Date": OLD})
     m = mapped(real_schema, df)
     assert m["transactions_last"] == ["Last Visit"] and m["calls_last"] == ["Last Call"]
