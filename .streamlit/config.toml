@@ -14,9 +14,18 @@ enableXsrfProtection = true
 gatherUsageStats = false
 
 [theme]
-# Blue accent (buttons, links) on a light background.
+# Blue accent (buttons, links), shared by both modes unless a mode sets its own.
 primaryColor = "#2563EB"
+
+# A light and a dark theme. With both defined, Streamlit's automatic theme follows the browser's light/dark
+# setting, which the app's light/dark toggle (top right, see app.py "Light / dark mode") overrides per user.
+[theme.light]
 base = "light"
+
+[theme.dark]
+base = "dark"
+# A slightly lighter blue reads better on the dark background.
+primaryColor = "#3B82F6"
 
 [client]
 # Hide developer menu items from regular users.
