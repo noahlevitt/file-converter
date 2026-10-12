@@ -283,6 +283,21 @@ class Mapping(BaseModel):
 # Header fingerprints (used to recognise a file layout seen before)
 # ---------------------------------------------------------------------------
 
+# The stand-in names the reader gives the columns of a file without a header row ("Column 1", "Column 2", ...).
+_GENERIC_COLUMN_RE = re.compile(r"Column \d+")
+
+
+def has_generic_columns(columns: list[str]) -> bool:
+    """True when every column has the reader's stand-in name ("Column 1", "Column 2", ...): no header row.
+
+    Such names say nothing about what a file holds - every headerless file with 3 columns is "Column 1-3" - so
+    they can't identify a saved template; ``storage.Store.find_template`` never matches them and the mapping page
+    offers the templates to pick by hand instead.
+        ["Column 1", "Column 2"] → True;  ["Column 1", "Phone"] → False;  [] → False
+    """
+    return bool(columns) and all(_GENERIC_COLUMN_RE.fullmatch(str(c)) for c in columns)
+
+
 def norm_header(h: str) -> str:
     """Header reduced to lower-case letters and digits, for comparisons that ignore case, spaces and punctuation.
 
