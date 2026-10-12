@@ -27,6 +27,7 @@ Main entry points
 * :func:`preview_values` - convert the first 200 rows and return a few sample output values per field for the
   mapping review screen.
 * :func:`source_rows` - line source rows up with audit rows when one file row became several output rows.
+* :func:`count_multi_number_cells` - how many phone cells hold several numbers (for the mapping page).
 * ``CELL_*`` constants - per-cell status codes, shared with ``compare.py`` (colors, labels, filters) and
   ``checks.py`` (rule checks, choosing sample rows for Claude).
 
@@ -34,9 +35,11 @@ Data flow inside :func:`convert`
 --------------------------------
 1. Normalize the mapping against the file (unknown fields/columns dropped, every schema field present) and turn
    every cell into text. A row whose cells are all empty is an "empty" row: it is skipped, never rejected.
-2. If a field uses ``each_row`` ('One row per phone number'), expand the rows (:func:`_expand_rows`): a file row
-   with several *different* valid phone numbers becomes one working row per number, every other field copied.
-   From here on the engine works on "working rows"; ``src`` maps each working row back to its file row.
+2. Expand the rows for the phone field (:func:`_expand_rows`; the field comes from ``Mapping.row_field``: the one
+   using ``each_row`` / 'One row per phone number', else a phone field copied from one column): a file row with
+   several *different* valid phone numbers - in separate columns or several in one cell - becomes one working row
+   per number, every other field copied. From here on the engine works on "working rows"; ``src`` maps each
+   working row back to its file row.
 3. Field by field (column-at-a-time, so each normalizer can first look at the whole column via ``N.prepare`` -
    e.g. to detect day-first dates or the file's common area codes): run the transform to get the raw value, then
    normalize/validate it, and record the output value, the raw value and a cell status. Identical raw values are
@@ -53,8 +56,9 @@ Kinds of problem values (see :class:`RowIssue`)
   (the default for required fields). The whole row is NOT imported and appears in the rejects report.
 * **blanked** - an invalid value in a field with ``on_invalid: blank`` (the default for optional fields). The value
   is left empty but the row still imports.
-* **skipped** - an invalid *extra* phone number (e.g. in a 3rd phone column) on a file row that has at least one
-  valid number. It doesn't get its own row; it is only noted. The row itself still imports.
+* **skipped** - an invalid *extra* phone number (e.g. in a 3rd phone column, or the second number in a cell), or
+  a number labelled fax, on a file row that has at least one valid number. It doesn't get its own row; it is only
+  noted. The row itself still imports.
 * **repaired** - a value the normalizer fixed from a likely typo (e.g. a phone digit typed twice). It imports
   with the repaired value but is flagged so a person can check it (Side by side -> Problems only).
 
@@ -66,18 +70,19 @@ rows were expanded). Columns:
 =================  ============================================================================================
 ``_row``           file row number as the user sees it (Excel/CSV line number), repeated on expanded rows
 ``_src``           0-based position of the row in the source DataFrame (see :func:`source_rows`)
-``_extra``         True for the 2nd, 3rd... working row made from one file row by 'One row per phone number'
+``_extra``         True for the 2nd, 3rd... working row made from one file row (one row per phone number)
 ``_status``        "imported", "rejected", "duplicate" or "empty" (see ``ROW_STATUSES``)
 ``_reason``        why the row was rejected / which row it duplicates; empty otherwise
 ``_issues``        JSON ``{field_name: reason}`` of every issue on the row (rejected, blanked, skipped, repaired),
                    or "" when there are none. One entry per field: a later issue on the same field wins.
 ``out.<field>``    the converted value written to the import (also kept for rejected/duplicate rows)
 ``raw.<field>``    the value before normalizing: the transform's output after ``clean_text`` (not always the
-                   literal file cell, e.g. for a name part or combined columns)
+                   literal file cell, e.g. for a name part, combined columns, or one number of a phone cell
+                   holding several)
 ``st.<field>``     cell status, one of the ``CELL_*`` codes, or "" (empty row, empty optional value, fixed blank)
 =================  ============================================================================================
 
-Without 'One row per phone number' there is exactly one audit row per source row and ``_src`` is ``0..n-1``.
+When no file row has several numbers there is exactly one audit row per source row and ``_src`` is ``0..n-1``.
 """
 
 from __future__ import annotations
@@ -129,7 +134,8 @@ class RowIssue:
 
     * ``rejected=True``  - the row is not imported (missing required value, or invalid value with on_invalid=reject).
     * ``rejected=False`` and no other flag - the value was *blanked*: left empty, the row still imports.
-    * ``skipped=True``   - an invalid extra phone number that didn't get a row of its own (row still imports).
+    * ``skipped=True``   - an invalid (or fax) extra phone number that didn't get a row of its own (row still
+      imports).
     * ``repaired=True``  - the value was repaired from a likely typo and imported; ``reason`` starts with
       "repaired:" and says how.
     """
@@ -137,7 +143,7 @@ class RowIssue:
     value: str  # the cleaned raw value that caused the issue ("" for a missing required value)
     reason: str  # human-readable reason from the normalizer or the engine, e.g. "too few digits (5)"
     rejected: bool  # True = caused the row to be rejected; False = value was blanked
-    skipped: bool = False  # an extra value (e.g. a 3rd phone column) that was invalid and didn't get its own row
+    skipped: bool = False  # an extra value (e.g. a 3rd phone column) that was invalid or fax and got no row
     repaired: bool = False  # value was repaired from a likely typo; reason says how
 
 
@@ -175,7 +181,7 @@ class ConversionResult:
     # st.<name> (cell status). Without 'One row per phone number' there is exactly one audit row per source row.
     audit: pd.DataFrame = field(default_factory=pd.DataFrame)
     extra_rows: int = 0  # rows added because a file row had several different values (e.g. phone numbers)
-    skipped_values: int = 0  # invalid extra values that didn't get a row of their own
+    skipped_values: int = 0  # invalid (or fax) extra values that didn't get a row of their own
     skipped_counts: Counter = field(default_factory=Counter)  # why extra values were skipped: "Header: reason"
     repaired_values: int = 0  # values repaired from likely typos (each marked in the audit)
     repaired_counts: Counter = field(default_factory=Counter)  # how values were repaired: "Header: repaired: ..."
@@ -208,8 +214,8 @@ class ConversionResult:
             parts.append(f"{self.blanked_values:,} invalid optional value{'s' if self.blanked_values != 1 else ''} "
                          "left blank.")
         if self.skipped_values:
-            parts.append(f"{self.skipped_values:,} invalid extra number{'s' if self.skipped_values != 1 else ''} "
-                         "in other phone columns skipped.")
+            parts.append(f"{self.skipped_values:,} extra phone number{'s' if self.skipped_values != 1 else ''} "
+                         "skipped (invalid, or labelled fax).")
         if self.repaired_values:
             parts.append(f"{self.repaired_values:,} phone number{'s were' if self.repaired_values != 1 else ' was'} "
                          "repaired from likely typos — check them under Side by side → Problems only.")
@@ -284,11 +290,12 @@ def convert(
     # Empty rows get status "empty": no output, no reject, counted separately as blank_rows.
     src_blank = [not any(N.clean_text(r.get(c, "")) for c in all_cols) for r in src_records]
 
-    # 'One row per phone number': a file row with several different values (Phone, Phone 2, Phone 3…) becomes one
-    # row per value; every other field is copied onto each. `src` maps each working row to its file row.
+    # 'One row per phone number': a file row with several different numbers (in Phone, Phone 2, Phone 3… or several
+    # in one cell) becomes one row per number; every other field is copied onto each. `src` maps each working row to
+    # its file row. The field is the one using each_row, else a phone field copied from one column (Mapping.row_field).
     # Mapping.normalized only allows each_row on phone fields and Mapping.problems flags a second one. If two fields
     # used it anyway, only the first expands rows; apply_transform treats each_row on the other like coalesce.
-    each_field = next((f for f in schema.mappable_fields if mapping.get(f.name).transform == "each_row"), None)
+    each_field = mapping.row_field(schema)
     src = list(range(len(src_records)))
     each_raw: list[str] = []  # raw value of the each_row field per working row (only used when each_field is set)
     early_issues: dict[int, list[RowIssue]] = {}  # "extra value skipped" notes found while expanding, per work row
@@ -508,10 +515,14 @@ def convert(
         ],
         columns=["File Row", "Status", "Reason", *df.columns],
     )
-    if each_field is not None and not rejects.empty:  # show which value of the file row this was
+    # Show which value of the file row each entry is about, when file rows can hold several numbers.
+    if each_field is not None and not rejects.empty and (
+            mapping.get(each_field.name).transform == "each_row" or any(extra)):
         # An expanded file row can appear several times in the report (e.g. one number rejected, another a
-        # duplicate); this extra column (after Reason) says which phone value each entry is about.
-        rejects.insert(3, each_field.header, [each_raw[i] for i, _, _ in reject_entries])
+        # duplicate); this extra column (after Reason) says which phone value each entry is about. If the file
+        # already has a column with that name (e.g. a file in the import format itself), the extra one is renamed.
+        name = each_field.header if each_field.header not in rejects.columns else f"{each_field.header} (this row)"
+        rejects.insert(3, name, [each_raw[i] for i, _, _ in reject_entries])
 
     # Audit table: one row per working row (see the module docstring for the column layout).
     row_status = ["empty" if blank[i] else "imported" for i in range(n)]
@@ -574,13 +585,18 @@ def _expand_rows(records: list[dict[str, str]], blank: list[bool], f, mapping: M
     Returns (source index per working row, the raw value each working row uses, early issues per working row,
     the normalizer context) - details under "Returns" below.
     A file row gets one row per different valid value (different after formatting, so 516-555-0100 and
-    (516) 555-0100 count once). Invalid extra values are skipped and noted on the row. A file row with no valid
-    value keeps one row with its first value (or blank), which is then rejected the normal way.
+    (516) 555-0100 count once). For a phone field, a cell holding several numbers is first split into one value
+    per number (``normalizers.split_phones``), so "516-555-0100 / 917-555-1234" in one cell works exactly like two
+    phone columns. Invalid extra values are skipped and noted on the row. A number labelled fax is skipped the same
+    way when the row has another valid number (a fax line can't receive texts); when it is the row's only number it
+    is used. A file row with no valid value keeps one row with its first value (or blank), which is then rejected
+    the normal way.
 
     Inputs:
         records: every source row as {column: text}, in file order.
         blank: per source row, True when every cell is empty (such a row keeps exactly one working row).
-        f: the FieldSpec using ``each_row`` (the phone field); its source columns come from ``mapping``.
+        f: the FieldSpec that expands rows (``Mapping.row_field``: the phone field using ``each_row``, or copied from
+           one column); its source columns come from ``mapping``.
         overrides: user-approved repairs, applied the same way as in :func:`convert`.
         timezone: stored in the normalizer context as ``ctx["tz"]``, like in :func:`convert` (only the date/time
                   normalizers read it).
@@ -589,7 +605,8 @@ def _expand_rows(records: list[dict[str, str]], blank: list[bool], f, mapping: M
         src: the source row index of each working row. Rows from one file row are contiguous and in file order,
              which is what :func:`convert` relies on to compute ``_extra``.
         raw: the raw value of field f for each working row: the first spelling of each different number, in
-             column order (Phone before Phone 2 ...).
+             column order (Phone before Phone 2 ...) and, within a cell, in the order written. For a number that
+             came from a cell holding several, it is that number's piece of the cell ("C: 516-555-0100").
         early: {working row: [RowIssue]} - the "extra value skipped" notes. They are attached to the first working
                row of the file row, so they are reported once, not once per number.
         ctx: the normalizer context built from the values of ALL the source columns together, e.g. the area
@@ -602,10 +619,20 @@ def _expand_rows(records: list[dict[str, str]], blank: list[bool], f, mapping: M
     """
     fm = mapping.get(f.name)
     fixes = overrides.get(f.name, {})
-    # Non-empty cleaned values of each source column, per file row (empty list for blank rows).
-    per_row = [[] if blank[k] else [v for v in (N.clean_text(r.get(c, "")) for c in fm.sources) if v]
-               for k, r in enumerate(records)]
-    ctx = N.prepare(f, [v for vals in per_row for v in vals], fm.params)
+    # Per file row: the non-empty cleaned values of the source columns, each cell split into one value per number
+    # (phone fields only), as (value, labelled fax) pairs. Empty list for blank rows.
+    per_row: list[list[tuple[str, bool]]] = []
+    for k, r in enumerate(records):
+        vals: list[tuple[str, bool]] = []
+        if not blank[k]:
+            for c in fm.sources:
+                v = N.clean_text(r.get(c, ""))
+                if v:
+                    vals += N.split_phones(v, f, fm.params) if f.type == "phone" else [(v, False)]
+        per_row.append(vals)
+    # Evidence for phone repairs (the file's area codes and known numbers) comes from the split values, so numbers
+    # from cells holding several count too.
+    ctx = N.prepare(f, [v for vals in per_row for v, _ in vals], fm.params)
     if timezone:
         ctx["tz"] = timezone
     cache: dict[str, tuple[str, str | None]] = {}  # raw value -> (output, error), each value normalized once
@@ -621,28 +648,37 @@ def _expand_rows(records: list[dict[str, str]], blank: list[bool], f, mapping: M
     early: dict[int, list[RowIssue]] = {}
     for k, vals in enumerate(per_row):
         good: dict[str, str] = {}  # formatted output → first raw value that produced it
-        bad: list[tuple[str, str]] = []
-        for v in vals:
+        fax: dict[str, str] = {}  # the same, for valid numbers labelled fax
+        bad: list[tuple[str, str]] = []  # (raw value, why it was skipped)
+        for v, is_fax in vals:
             out, err = check(v)
             if err:
                 bad.append((v, err))
+            elif is_fax:
+                fax.setdefault(out.lower(), v)
             elif out.lower() not in good:
                 good[out.lower()] = v
+        # Fax numbers are the last choice: skipped when the row has another valid number (unless it is the same
+        # number), used when they are all the row has.
+        if good:
+            bad += [(v, "labelled as a fax number") for out, v in fax.items() if out not in good]
+        else:
+            good = fax
         # No valid number (or no number at all, or a blank row): keep a single working row with the first value so
         # that convert() rejects it with the normal reason ("too few digits", "required value is missing"…).
         if not good:
             src.append(k)
-            raw.append(vals[0] if vals else "")
+            raw.append(vals[0][0] if vals else "")
             continue
         first = len(src)
         for v in good.values():
             src.append(k)
             raw.append(v)
-        # Invalid values next to at least one valid number are skipped (not rejected): the row imports with its
-        # valid number(s) and the bad ones are counted as "skipped" in the summary.
+        # Invalid values (and fax numbers) next to at least one valid number are skipped, not rejected: the row
+        # imports with its valid number(s) and the skipped ones are counted as "skipped" in the summary.
         if bad:
-            early[first] = [RowIssue(f.name, v, f"extra value skipped — {err}", rejected=False, skipped=True)
-                            for v, err in bad]
+            early[first] = [RowIssue(f.name, v, f"extra value skipped — {why}", rejected=False, skipped=True)
+                            for v, why in bad]
     return src, raw, early, ctx
 
 
@@ -686,6 +722,24 @@ def _fmt_issue(schema: TargetSchema, x: RowIssue) -> str:
     """
     header = schema.field(x.field).header
     return f"{header}: {x.reason}" + (f" ('{x.value[:40]}')" if x.value else "")
+
+
+def count_multi_number_cells(df: pd.DataFrame, field, columns: list[str], params: dict | None = None) -> int:
+    """How many cells of these phone columns hold several numbers (each number later gets its own row).
+
+    For the mapping page's "one row per number" note. Only cells with 14 or more digits can hold two numbers, so
+    the split (``normalizers.split_phones``) only runs on those; a 100,000-row column takes well under a second.
+    Columns missing from ``df`` are ignored. Example: a "Phone" column with "516-555-0100 / 917-555-1234" in two
+    rows and single numbers elsewhere → 2.
+    """
+    n = 0
+    for c in columns:
+        if c not in df.columns:
+            continue
+        col = df[c].fillna("").astype(str)
+        candidates = col[col.str.count(r"\d") >= 14]
+        n += sum(1 for v in candidates if len(N.split_phones(N.clean_text(v), field, params or {})) > 1)
+    return n
 
 
 def preview_values(df: pd.DataFrame, schema: TargetSchema, mapping: Mapping, limit: int = 3,
