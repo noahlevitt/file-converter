@@ -20,7 +20,7 @@ session without a login, set `AUTH_MODE=none` in `.env`.
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest -q            # everything (about 440 tests, a few seconds)
+.venv/bin/python -m pytest -q            # everything (about 540 tests, a few seconds)
 .venv/bin/python -m pytest -q tests/test_formats.py -k phone     # one area
 ```
 
@@ -34,6 +34,7 @@ The suite needs no network and no API key. Claude is replaced by fake clients. T
 | `test_formats.py` | Hundreds of date, time and phone spellings against the real format, plus every rejection reason |
 | `test_phone_repair.py` | Phone typo repair (allowed repairs only; area codes never changed or filled in), ambiguity, tie-breaking, marking |
 | `test_multi_phone.py` | Several phone columns → one row per different number; phone-setting columns |
+| `test_multi_number_cells.py` | Several numbers in one cell → one row each; labels, fax, extensions, never splitting a single number |
 | `test_birthdays.py` | No-year birthdays/anniversaries → 1600 (placeholders, Excel-added years, split columns) |
 | `test_real_schema.py` | The real import format end to end: headers, consent blank, dedupe, sample exports |
 | `test_engine.py` | End-to-end conversion with the generic example schema |
