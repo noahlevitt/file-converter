@@ -3,6 +3,23 @@
 What changed in each version. The running version is shown in the app's sidebar. Each version is tagged in git
 (`vX.Y.Z`).
 
+## 0.12.0 — files without a header row
+
+- **Fix:** in most files without a header row, the first customer was taken as the header and silently left out
+  (e.g. `Ana Lee,(516) 555-0100` as the first line). The header row is now found by comparing each row with the rest
+  of its columns: a header is a row of labels over columns of phone numbers, emails or dates; a row whose phone
+  number, email or date fits its column is a customer and never becomes the header.
+- Title and report lines above the header (`Guest export`, `Store, Kravit Bayside`, `Generated, 10/12/2026`) are
+  still skipped, wherever the header is.
+- Unsure cases (names only, a single row, a header with no customers) show a warning asking to check the raw
+  preview, and a header row that holds a phone number, email or date shows a warning too (also when picked by hand).
+- Files without a header row are never matched to a template automatically: every headerless file with the same
+  number of columns has the same stand-in names (Column 1, Column 2…), so one client's template would be applied to
+  another's file. The mapping page explains this.
+- New **Use a saved template** on the mapping page: apply any saved template by hand (its time zone too). Files
+  without a header row reuse their mapping this way, matched by column position.
+- The raw preview numbers its rows like the "Header is on row" box.
+
 ## 0.11.0 — several numbers in one cell
 
 - A cell holding several phone numbers now gives **one row per different number**, exactly like separate phone
