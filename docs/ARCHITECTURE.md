@@ -10,14 +10,14 @@ development see [DEVELOPMENT.md](DEVELOPMENT.md).
    never calls Claude, the network or a random source. The only outside input is today's date, which is used to
    choose 19xx/20xx for two-digit years and to spot "no year" birthdays.
 2. **Schema-driven.** The output format (columns, order, types, formats, required fields, duplicate rule, US-only
-   phones, the 1600 no-year value, consent locked blank) lives in `schemas/target_schema.yaml`. The code knows no
+   phones, the 1600 no-year value, consent mapped by hand only) lives in `schemas/target_schema.yaml`. The code knows no
    column names of the real import format.
 3. **Nothing silent.** Every value that can't be read safely is either rejected (the row isn't imported) or left
    blank, always with a reason. Every value the converter repaired (phone typos) is imported and marked. The
    per-cell audit records what happened to every cell.
 4. **People decide, Claude advises.** Claude only proposes mapping changes or value fixes. Its output is validated
-   against the schema and the file's real columns, shown as a diff, and applied only after approval. `consent` can
-   never be mapped by anyone.
+   against the schema and the file's real columns, shown as a diff, and applied only after approval. `consent` and
+   `last_contacted` are only ever mapped by a person, for one file at a time.
 5. **One machine, few moving parts.** Streamlit, SQLite and an in-process thread pool. No separate API, queue or
    database server.
 
@@ -156,7 +156,7 @@ The files are deleted after `FILE_RETENTION_DAYS`. The database record and its c
 | Columns *about* a phone (marketing preference, type, opt-in) never used as numbers | `heuristics.is_phone_header`, `is_consent_column` |
 | Birthday/anniversary without a real year → year 1600 | `dateparse` (`NO_YEAR`), `normalizers.normalize_date`, `_placeholder_year`; schema `no_year_value` |
 | Times with a zone converted to the client's time zone | `dateparse._to_zone`; zone chosen per import on the New import page |
-| Consent always blank, can't be mapped | schema `fixed_blank`; enforced in `mapping.normalized`, `engine.convert`, `editor`, `ai` |
+| Consent and last_contacted only mapped by a person | schema `manual_only`; `Mapping.normalized` drops any mapping of them not made by a person (`origin="user"`); skipped by `heuristics.auto_map`, refused in `ai.parse_mapping_entries`, left out of templates (`Mapping.without_manual`, `services.template_mapping`) |
 | Duplicates only when every column matches | schema `dedupe: keys: ["*"]`; `engine.convert` |
 | Bad rows not imported, counted with reasons | `engine.convert` (`RowIssue.rejected`), `output.write_rejects`, summary |
 | Skipped columns stay out everywhere | `Mapping.excluded_columns`; `normalized`, `services.merge`, `ai._without_skipped` |
