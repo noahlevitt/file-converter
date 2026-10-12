@@ -79,7 +79,7 @@ from converter.jobs import ImportRunner
 from converter.mapping import Mapping, has_generic_columns, profile_columns
 from converter.reader import SUPPORTED_EXTENSIONS, ReadError, read_file
 from converter.schema import TargetSchema, load_schema
-from converter.services import (check_for_mistakes, initial_mapping, make_assistant, merge, template_mapping,
+from converter.services import (check_for_mistakes, initial_mapping, make_assistant, merge,
                                 validate_repairs)
 from converter.storage import ImportRecord, Store
 from converter.ui_format import fmt_dt, fmt_duration, fmt_eta, fmt_size, status_color, status_text
@@ -401,33 +401,6 @@ def multi_number_cells(df: pd.DataFrame, field, columns: list[str]) -> int:
     return cache[key]
 
 
-def apply_saved_template(key: str) -> None:
-    """Replace the mapping with the saved template picked under "Use a saved template" (on_click callback).
-
-    `key` is the session-state key of the template select box. The template is fitted to this file
-    (services.template_mapping); its client time zone is applied too, written straight into the time-zone widget's
-    state, which is allowed here because callbacks run before the widgets of the next run are drawn. The template
-    name box is pre-filled with the template's name, so "Remember this mapping" updates that template. Edits made so
-    far are discarded (the editors get fresh keys), as with "Re-read file".
-    """
-    tpl = store.get_template(ss.get(key) or "")
-    if tpl is None:
-        return
-    ss.mapping = template_mapping(schema, tpl, list(ss.read.df.columns))
-    ss.map_meta = {"source": "template", "notes": [], "template": tpl.name, "similarity": None}
-    ss.template_name = tpl.name
-    ss[template_key()] = tpl.name
-    tz = tpl.read_options.get("timezone")
-    if tz in ZONE_LABEL:
-        ss.timezone = tz
-        ss[f"tz_{ss.file_sig[1][:10]}"] = ZONE_LABEL[tz]
-    ss.ai_used = False
-    ss.notes_result = None
-    ss.check_result = None
-    ss.edit_errors = []
-    ss.editor_version += 1
-
-
 def template_key() -> str:
     """Return the session-state key of the "Template name" text box for the current file.
 
@@ -507,8 +480,8 @@ def start_import() -> int:
 
     Side effects:
     - When "Remember this mapping" is ticked and a name was typed, the mapping is saved as a template in the
-      database. save_template replaces a template that already has this name, and its use count goes up
-      (template matching prefers the most used template when several fit exactly).
+      database (never for a file without a header row). save_template replaces a template that already has this
+      name, and its use count goes up (template matching prefers the most used template when several fit exactly).
     - A new import row is created in the database with status "queued", and a copy of the uploaded file is
       written to data/imports/<id>/. The import stores a snapshot of the target schema (schema_json), so its
       results still make sense after someone edits the YAML.
@@ -518,12 +491,14 @@ def start_import() -> int:
     rr = ss.read
     tpl_name = None
     typed = (ss.get(template_key()) or "").strip()
-    if ss.get("remember_mapping", True) and typed:
+    # Never for a file without a header row (see the checkbox in page_new_import), whatever the widget state says.
+    remember = ss.get("remember_mapping", True) and not has_generic_columns(list(rr.df.columns))
+    if remember and typed:
         tpl_name = typed
     # How the file was read. Saved with the template and the import, so a template match or a re-run reads the
     # file the same way (header_row is 0-based; None means the file has no header row).
     read_options = {"sheet": rr.sheet, "header_row": rr.header_row, "timezone": ss.get("timezone")}
-    if ss.get("remember_mapping", True) and typed:
+    if remember and typed:
         store.save_template(tpl_name, list(rr.df.columns), ss.mapping, read_options, schema.name, user["username"])
         store.mark_template_used(tpl_name)
     import_id = store.create_import(
@@ -685,10 +660,7 @@ def page_new_import() -> None:
     # ---------------- Step 2: mapping
     st.subheader("2 · Review column mapping")
     meta = ss.map_meta
-    if meta["source"] == "template" and meta.get("similarity") is None:
-        st.success(f"Using saved template **{meta['template']}** (picked by hand). Check the sample output of each "
-                   "field before importing.")
-    elif meta["source"] == "template":
+    if meta["source"] == "template":
         st.success(f"Recognised this layout — using saved template **{meta['template']}**.")
     elif meta["source"] == "rules+ai":
         st.info("Columns matched by rules and Claude. Check the rows marked low/medium before importing.")
@@ -699,19 +671,6 @@ def page_new_import() -> None:
         # The success banner above already says which template matched; don't repeat it.
         if not n.startswith("Matched saved template"):
             st.caption("ℹ️ " + n)
-    # Saved templates can also be applied by hand. For a file without a header row it is the only way: its stand-in
-    # column names (Column 1, Column 2, …) can't identify a layout, so templates are never matched automatically.
-    tpl_names = [t.name for t in store.list_templates(schema.name)]
-    if tpl_names:
-        headerless = has_generic_columns(list(df.columns))
-        with st.expander("Use a saved template", expanded=headerless and meta["source"] != "template"):
-            t1, t2 = st.columns([3, 1], vertical_alignment="bottom")
-            pick_key = f"tpl_pick_{ss.file_sig[1][:10]}"
-            t1.selectbox("Saved template", tpl_names, key=pick_key,
-                         help="Replaces the current mapping with the template's. Fields whose columns this file "
-                              "doesn't have are left unmapped. In a file without a header row, columns are matched "
-                              "by position: Column 1 is the first column.")
-            t2.button("Apply template", on_click=apply_saved_template, args=(pick_key,), width="stretch")
 
     mapping: Mapping = ss.mapping
     # Converts only the first few rows, so the grid can show real sample output for every field on each rerun.
@@ -790,12 +749,17 @@ def page_new_import() -> None:
         st.warning("Fix before importing: " + "; ".join(f"**{schema.field(k).header}** — {v}"
                                                         for k, v in problems.items()))
     c1, c2, c3 = st.columns([1.2, 2.5, 1.3], vertical_alignment="bottom")
-    c1.checkbox("Remember this mapping", value=True, key="remember_mapping",
-                help="Saves the mapping as a template; the next file with the same columns maps instantly. A file "
-                     "without a header row is never matched automatically: pick its template under Use a saved "
-                     "template.")
+    # Files without a header row don't use templates at all: their stand-in column names (Column 1, Column 2…) say
+    # nothing about the layout, so a template could only be matched to another client's file with as many columns.
+    headerless = has_generic_columns(list(df.columns))
+    if headerless:
+        c1.checkbox("Remember this mapping", value=False, disabled=True, key="remember_mapping_headerless",
+                    help="Files without a header row are not saved as templates.")
+    else:
+        c1.checkbox("Remember this mapping", value=True, key="remember_mapping",
+                    help="Saves the mapping as a template; the next file with the same columns maps instantly.")
     c2.text_input("Template name", value=ss.get("template_name") or "", key=template_key(),
-                  disabled=not ss.get("remember_mapping", True))
+                  disabled=headerless or not ss.get("remember_mapping", True))
     if c3.button("Start import", type="primary", disabled=bool(problems), width="stretch"):
         import_id = start_import()
         # Clear the page *before* switching: open_import ends this run, and coming back to New import should
