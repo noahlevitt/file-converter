@@ -62,7 +62,7 @@ All business logic is in `converter/`. Only `app.py` and `converter/auth.py` imp
 
 | Module | Responsibility |
 |---|---|
-| `app.py` | Streamlit UI: login, navigation and the five pages (New import, Imports, Templates, Target format, Users). Holds no conversion logic; it calls the package. |
+| `app.py` | Streamlit UI: login, navigation, the light/dark toggle and the five pages (New import, Imports, Templates, Target format, Users). Holds no conversion logic; it calls the package. |
 | `converter/reader.py` | Turns uploaded bytes into a DataFrame of text: encoding detection, delimiter sniffing, sheet choice, header-row detection (skipping title rows), unique names for blank/duplicate headers (`Column 3`, `Phone (2)`…), stray spaces and byte-order marks. Excel artifacts in values (`="…"`, `5.16E+09`, serial dates) are handled later by the normalizers. |
 | `converter/schema.py` | Pydantic models of the target format (`FieldSpec`, `OutputSpec`, `DedupeSpec`, `TargetSchema`) and `load_schema`. Validates the YAML and fills derived defaults. |
 | `converter/mapping.py` | `FieldMapping` / `Mapping` (target field → transform + source columns + params, plus reviewer notes and skipped columns), `normalized()` (makes a mapping fit a file), column profiling, header fingerprints for template matching. |
@@ -77,7 +77,7 @@ All business logic is in `converter/`. Only `app.py` and `converter/auth.py` imp
 | `converter/services.py` | Glue used by the UI and CLI: `make_assistant`, `initial_mapping`, `merge`, `check_for_mistakes`, `validate_repairs`. |
 | `converter/editor.py` | Mapping editing for the two grids: field-side (`apply_row_edit`) and column-side (`apply_column_edit`: Goes to / Skip), plus the "Option" cell text. |
 | `converter/compare.py` | Side-by-side HTML table, filters and counts, the "What changed" per-field summary, and the colour-coded comparison workbook. |
-| `converter/storage.py` | SQLite store (users, templates, imports) and the per-import file folders; retention purge. |
+| `converter/storage.py` | SQLite store (users, templates, imports, user preferences) and the per-import file folders; retention purge. |
 | `converter/jobs.py` | `run_import` (one import, start to finish, with progress and cancel) and `ImportRunner` (thread pool, purge loop). |
 | `converter/auth.py` | Login gate (password mode with bcrypt accounts, or `AUTH_MODE=none` for one person on their own computer). |
 | `converter/config.py` | `Settings` from environment variables / `.env`. |
@@ -133,6 +133,7 @@ documented at the top of `engine.py`.
 | Table | Holds |
 |---|---|
 | `users` | username, bcrypt hash, admin flag, created / last login |
+| `user_prefs` | per-user display preferences, e.g. `theme` = `light` / `dark` (one row per user and key) |
 | `templates` | name, header fingerprint and headers, mapping JSON, read options (sheet, header row, time zone), creator/updater, use count |
 | `imports` | who, file name and size, status (queued / running / completed / failed / cancelled / interrupted), progress and stage, timestamps, cancel flag, **snapshots** of the schema, mapping, read options and approved fixes, counts and summary JSON, file names, parent import |
 
