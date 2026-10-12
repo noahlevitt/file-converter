@@ -20,7 +20,7 @@ session without a login, set `AUTH_MODE=none` in `.env`.
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest -q            # everything (about 540 tests, a few seconds)
+.venv/bin/python -m pytest -q            # everything (about 570 tests, a few seconds)
 .venv/bin/python -m pytest -q tests/test_formats.py -k phone     # one area
 ```
 
@@ -40,6 +40,7 @@ The suite needs no network and no API key. Claude is replaced by fake clients. T
 | `test_engine.py` | End-to-end conversion with the generic example schema |
 | `test_normalizers.py` | Normalizers in isolation |
 | `test_reader.py` | Encodings, delimiters, header detection, Excel files |
+| `test_headers.py` | Header row below titles/report lines, files without a header row, unsure cases, templates for headerless files |
 | `test_column_edits.py` | Goes to / Skip edits, wrong-column warnings |
 | `test_mapping_ai_storage.py` | Auto-mapping, the Claude layer (faked), the grid editor, SQLite store, output |
 | `test_notes_checks.py` | Notes applied by Claude, rule checks, review payload, phone masking |
