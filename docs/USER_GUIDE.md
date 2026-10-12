@@ -177,10 +177,14 @@ The numbers below it are:
   "could be (516) 946-1961 or (516) 946-1966".
 - **Bad rows with a reason:** missing area code, too few or too many digits, an area code that isn't in use,
   non-US numbers (with the country), and Excel scientific notation that already lost digits.
-- **Several phone columns** (Phone, Phone 2, Mobile, Home…):
+- **Several phone numbers per customer**, in several phone columns (Phone, Phone 2, Mobile, Home…) or typed into
+  one cell (`516-555-0100 / 917-555-1234`, `H: 516-555-1212 C: 516-555-0100`):
   - each **different** number becomes its own row, with the other columns copied from the same file row;
-  - the same number in two columns counts once;
-  - an invalid extra number is skipped, and the row still imports with the customer's other number(s).
+  - the same number twice counts once;
+  - an invalid extra number is skipped, and the row still imports with the customer's other number(s);
+  - a number labelled fax is skipped when the customer has another number (a fax can't receive texts);
+  - the mapping page says how many cells hold several numbers, and in *Side by side* the number each row came
+    from is underlined.
 - **Columns about a phone** (`phone4MarketingPreference`, Phone Type, SMS Opt In) are never treated as numbers.
 
 ### Dates and times
