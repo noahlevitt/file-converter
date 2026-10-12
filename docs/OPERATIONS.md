@@ -109,7 +109,8 @@ format (`schemas/target_schema.yaml`) is reloaded automatically when the file ch
 Everything lives in `data/`:
 
 ```
-data/converter.db            users, templates, import history (SQLite, WAL mode: also -wal and -shm files)
+data/converter.db            users, templates, import history, display preferences (SQLite, WAL mode: also -wal
+                             and -shm files)
 data/imports/<id>/           source.<ext> (uploaded file), converted file, rejected.csv, summary.txt,
                              source.parquet + audit.parquet (for the side-by-side view)
 ```
