@@ -499,7 +499,10 @@ def start_import() -> int:
     # file the same way (header_row is 0-based; None means the file has no header row).
     read_options = {"sheet": rr.sheet, "header_row": rr.header_row, "timezone": ss.get("timezone")}
     if remember and typed:
-        store.save_template(tpl_name, list(rr.df.columns), ss.mapping, read_options, schema.name, user["username"])
+        # Consent and last_contacted are left out: a template is applied automatically, and those fields must only
+        # be filled by a person choosing the column for each file.
+        store.save_template(tpl_name, list(rr.df.columns), ss.mapping.without_manual(schema), read_options,
+                            schema.name, user["username"])
         store.mark_template_used(tpl_name)
     import_id = store.create_import(
         username=user["username"], filename=ss.file_name, data=ss.file_bytes, schema_label=schema.label,
@@ -683,7 +686,8 @@ def page_new_import() -> None:
     # column (field_warn) only when the mapping itself is fine.
     grid = pd.DataFrame([
         {
-            COL_FIELD: f.header + (" *" if f.required else "") + (" 🔒" if f.fixed_blank else ""),
+            COL_FIELD: f.header + (" *" if f.required else "") + (" 🔒" if f.fixed_blank else "")
+            + (" ✋" if f.manual_only else ""),
             COL_TYPE: f.type,
             COL_HOW: LABELS[mapping.get(f.name).transform],
             COL_SRC: mapping.get(f.name).sources,
@@ -692,7 +696,8 @@ def page_new_import() -> None:
             COL_CHECK: ("⚠ " + p) if (p := row_problem(schema, mapping, f.name) or field_warn.get(f.name, "")) else "",
             COL_BY: "Fixed" if f.fixed_blank else origin_label(mapping.get(f.name)),
             COL_WHY: "Always blank (fixed in the target format); can't be changed" if f.fixed_blank
-            else mapping.get(f.name).reason,
+            else ("Mapped by hand only: pick its column here or under Columns in your file"
+                  if f.manual_only and mapping.get(f.name).transform == "none" else mapping.get(f.name).reason),
         }
         for f in schema.fields
     ])
@@ -704,7 +709,8 @@ def page_new_import() -> None:
         grid, key=key, on_change=on_map_edit, args=(key,), hide_index=True, num_rows="fixed", width="stretch",
         disabled=[COL_FIELD, COL_TYPE, COL_PREVIEW, COL_CHECK, COL_BY, COL_WHY],
         column_config={
-            COL_FIELD: st.column_config.TextColumn(help="Target field. * = required. 🔒 = always blank (locked).",
+            COL_FIELD: st.column_config.TextColumn(help="Target field. * = required. 🔒 = always blank (locked). "
+                                                        "✋ = only filled when you map a column to it yourself.",
                                                    pinned=True),
             COL_HOW: st.column_config.SelectboxColumn(options=list(FROM_LABEL), required=True,
                                                       help="How the value is built from the source column(s)."),
@@ -1640,7 +1646,8 @@ def page_schema() -> None:
         """
         if f.fixed_blank:
             return "🔒 always blank on every row — can't be mapped or edited"
-        bits = []
+        bits = ["✋ mapped by hand only (never by rules, templates or Claude); blank unless you map it"] \
+            if f.manual_only else []
         if f.no_year_value is not None:
             bits.append(f"month/day with no year → year {f.no_year_value}")
         if f.type == "datetime" and f.format:
