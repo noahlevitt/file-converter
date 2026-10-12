@@ -157,12 +157,13 @@ def _schema_docs(schema: TargetSchema) -> str:
 
     One line per *mappable* field: internal name, output header, type, required/optional, output format, allowed
     values, default, description, the no-year rule (month/day without a year is output with e.g. year 1600) and
-    synonyms. Fixed-blank fields (consent) are listed separately as never mappable, with an explicit rule that
-    consent/opt-in/subscription columns must not be mapped anywhere. The dedupe keys are mentioned so Claude
+    synonyms. Manual-only fields (consent, last_contacted: a person maps them) and fixed-blank fields are listed
+    separately as never to be returned, with an explicit rule that consent/opt-in/subscription columns must not
+    be mapped anywhere by Claude. The dedupe keys are mentioned so Claude
     understands which fields decide duplicates.
     """
     lines = []
-    for f in schema.mappable_fields:
+    for f in schema.auto_fields:
         bits = [f"type={f.type} ({TYPE_DESCRIPTIONS[f.type]})", "REQUIRED" if f.required else "optional"]
         if f.format:
             bits.append(f"output format={f.format}")
@@ -184,11 +185,16 @@ def _schema_docs(schema: TargetSchema) -> str:
         if f.synonyms:
             line += f". Also called: {', '.join(f.synonyms)}"
         lines.append(line)
+    manual = [f.name for f in schema.fields if f.manual_only]
+    if manual:
+        lines.append(f"\nMapped by a person only (never return entries for them, even when a note asks): "
+                     f"{', '.join(manual)}.")
     fixed = [f.name for f in schema.fields if f.fixed_blank]
     if fixed:
         lines.append(f"\nAlways blank and not mappable (the engine forces them empty; do not return entries for them): "
-                     f"{', '.join(fixed)}. Source columns about consent, opt-in, subscription or opt-out status must "
-                     "NOT be mapped to any field.")
+                     f"{', '.join(fixed)}.")
+    lines.append("\nSource columns about consent, opt-in, subscription or opt-out status must NOT be mapped to any "
+                 "field by you.")
     if schema.dedupe.keys:
         lines.append(f"\nRows are de-duplicated when all of these fields match: {', '.join(schema.dedupe.keys)}.")
     return "\n".join(lines)
@@ -390,7 +396,7 @@ def _mapping_item_schema(schema: TargetSchema, columns: list[str]) -> dict[str, 
     item = {
         "type": "object",
         "properties": {
-            "target_field": {"type": "string", "enum": [f.name for f in schema.mappable_fields]},
+            "target_field": {"type": "string", "enum": [f.name for f in schema.auto_fields]},
             "transform": {"type": "string", "enum": list(TRANSFORMS)},
             "sources": {"type": "array", "items": {"type": "string", "enum": columns}},
             "params": {"type": "object", "properties": params_props, "additionalProperties": False},
@@ -710,7 +716,8 @@ def parse_mapping_entries(entries: list[dict], schema: TargetSchema, columns: li
     misbehaving model or client and enforces rules the JSON Schema can't express). Per entry:
 
     * target field and column names are matched case-insensitively and replaced by their real spelling;
-    * unknown fields, fixed-blank fields (consent) and unknown transforms are dropped;
+    * unknown fields, fixed-blank and hand-mapped-only fields (consent, last_contacted) and unknown transforms are
+      dropped;
     * unknown source columns are dropped (and reported); repeated sources are kept once;
     * empty parameters are removed; "none" and "constant" never have sources;
     * a multi-column transform given a single column becomes a plain copy (as ``Mapping.normalized`` does);
@@ -731,6 +738,9 @@ def parse_mapping_entries(entries: list[dict], schema: TargetSchema, columns: li
             continue
         if schema.field(target).fixed_blank:
             dropped.append(f"{target}: always blank, can't be mapped")
+            continue
+        if schema.field(target).manual_only:
+            dropped.append(f"{target}: only a person maps this field")
             continue
         if transform not in TRANSFORMS:
             dropped.append(f"{target}: unknown transform '{transform}'")
