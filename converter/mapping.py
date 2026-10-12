@@ -12,6 +12,8 @@ Responsibilities
       columns removed, transforms fixed up (:func:`phone_rule`), invalid combinations reset to "not mapped".
     * **Problems** - :meth:`Mapping.problems` lists what blocks a conversion (missing required fields,
       wrong number of source columns, two "one row per phone number" fields).
+    * **Row field** - :meth:`Mapping.row_field` names the phone field whose different numbers each get their own
+      output row (from several columns, or several numbers in one cell).
     * **Header fingerprints** - :func:`header_fingerprint` / :func:`header_similarity` recognise a file layout
       seen before, so a saved template can be reused (``storage.Store.find_template``).
     * **Column profiling** - :func:`profile_columns` summarises each source column (fill counts, samples, share
@@ -39,7 +41,7 @@ import pandas as pd
 from pydantic import BaseModel, Field
 
 from . import normalizers as N
-from .schema import TargetSchema
+from .schema import FieldSpec, TargetSchema
 from .transforms import TRANSFORMS, check_transform
 
 # Who set a field's mapping: a saved template, the rule-based matcher (heuristics.py), Claude ("ai"), the reviewer
@@ -260,6 +262,21 @@ class Mapping(BaseModel):
             issues[name] = (f"only one field can use 'One row per phone number' ({schema.field(multi[0]).header} "
                             "already does)")
         return issues
+
+    def row_field(self, schema: TargetSchema) -> FieldSpec | None:
+        """The field whose numbers each get their own output row, or None when no field does.
+
+        That is the field using 'One row per phone number' (several phone columns), otherwise the first phone field
+        copied from a single column: one cell can hold several numbers too ("516-555-0100 / 917-555-1234"), and each
+        different number gets its own row either way. Phone fields built any other way (combined columns, a fixed
+        value) never expand rows.
+
+        Used by the engine (which rows to expand), the side-by-side view (which cells to underline) and the mapping
+        page (the "one row per number" note). Call it on a normalized mapping, as those callers do.
+        """
+        fields = schema.mappable_fields
+        return (next((f for f in fields if self.get(f.name).transform == "each_row"), None)
+                or next((f for f in fields if f.type == "phone" and self.get(f.name).transform == "copy"), None))
 
 
 # ---------------------------------------------------------------------------
