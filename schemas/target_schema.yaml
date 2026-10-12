@@ -6,7 +6,8 @@
 #   - Headers exactly as below: lowercase, in this order, no extra columns.
 #   - Keep every header even when the whole column is blank.
 #   - Blank cell when there is no value.
-#   - consent is ALWAYS blank (true subscribes unknown consumers, false opts people out).
+#   - consent: true subscribes the consumer, false opts them out, blank changes nothing. Only filled when a person
+#     maps a column to it by hand (manual_only); otherwise blank.
 #   - phone_number: 10 digits only (area code + number), no +1, spaces, dashes or parentheses.
 #     A row without a phone number fails → rejected (bad row).
 #   - Activity columns: MM/DD/YYYY HH:MM AM/PM (12-hour, no seconds, no time zone).
@@ -72,12 +73,16 @@ fields:
                telephone, tel, contact number, sms number, primary phone, customer phone, guest phone,
                "phone #", "cell #", "mobile #", phone1, msisdn]
 
-  # Locked blank: consent can only come from the consumer, never from a file, a rule or Claude.
+  # Mapped by hand only: the rules, templates and Claude never fill it. Values become true / false (Y/N, yes/no,
+  # opted in/out, subscribed/unsubscribed...); anything else is left blank, and a blank never changes anyone's
+  # consent. To lock it blank again, replace manual_only with fixed_blank: true.
   - name: consent
     header: consent
-    type: string
-    fixed_blank: true
-    description: Always blank. A blank consent never changes anyone's consent.
+    type: boolean
+    true_value: "true"
+    false_value: "false"
+    manual_only: true
+    description: true subscribes the consumer, false opts them out, blank changes nothing. Only mapped by hand.
 
   # Activity times: MM/DD/YYYY HH:MM AM/PM. Times that include a zone (Z, UTC, EST, +00:00) or Unix timestamps
   # are converted to the client time zone chosen on the New import page; times without a zone are kept as written.
@@ -103,14 +108,14 @@ fields:
     # A date column named only "Date", "Start Time", "Timestamp"... goes here in any other file.
     generic_date: default
 
-  # Always blank: it means the last time WE texted the consumer, which never comes from an imported file. To allow
-  # it again, remove the fixed_blank line (the synonyms then apply).
+  # Mapped by hand only: it means the last time WE texted the consumer, which imported files almost never contain,
+  # so the rules, templates and Claude never fill it.
   - name: last_contacted
     header: last_contacted
     type: datetime
     format: "%m/%d/%Y %I:%M %p"
-    fixed_blank: true
-    description: Always blank. It is when we last texted the consumer, which imported files don't contain.
+    manual_only: true
+    description: When we last texted the consumer. Only mapped by hand.
     synonyms: [last contact, last contacted date, last message sent, last sms sent, last text sent,
                last outreach, last campaign, last campaign sent, last messaged, date last contacted]
 
