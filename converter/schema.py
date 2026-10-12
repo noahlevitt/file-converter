@@ -131,6 +131,13 @@ class FieldSpec(BaseModel):
         description="Always output blank on every row. The field can't be mapped, defaulted, set by Claude or "
         "edited by users (e.g. a consent column where any value would change subscription status).",
     )
+    # Filled only when a person maps a column to it on the mapping page: never by the rules, a template, Claude or a
+    # default (e.g. consent: a value changes subscriptions, so a human must choose the column every time).
+    manual_only: bool = Field(
+        False,
+        description="Only filled when a person maps a column to it by hand on the mapping page; never by the "
+        "automatic rules, a saved template, Claude or a default.",
+    )
     # date/datetime fields: takes a date column whose header names no particular activity ("Date", "Start Time",
     # "Timestamp"; see heuristics.auto_map step 7). "call_log" = first choice in files that look like call logs,
     # "default" = first choice in other files; each is the other's second choice. None = only by its own name.
@@ -151,6 +158,8 @@ class FieldSpec(BaseModel):
 
         * ``header`` defaults to ``name``.
         * A ``fixed_blank`` field can't be required or have a default - both would put a value in it.
+        * A ``manual_only`` field can't be required, have a default or be fixed_blank: a default would fill it
+          without a person choosing a column, and a required one would block every file nobody mapped by hand.
         * ``no_year_value`` only makes sense for ``date`` fields, ``generic_date`` for date/datetime fields.
         * ``on_invalid`` defaults to "reject" for required fields and "blank" for optional ones: a bad value in
           a required field makes the row unusable, a bad optional value is just dropped.
@@ -162,6 +171,8 @@ class FieldSpec(BaseModel):
             self.header = self.name
         if self.fixed_blank and (self.required or self.default not in (None, "")):
             raise ValueError(f"fixed_blank field '{self.name}' can't be required or have a default")
+        if self.manual_only and (self.required or self.default not in (None, "") or self.fixed_blank):
+            raise ValueError(f"manual_only field '{self.name}' can't be required, have a default or be fixed_blank")
         if self.no_year_value is not None and self.type != "date":
             raise ValueError(f"no_year_value only applies to date fields ('{self.name}' is {self.type})")
         if self.generic_date and self.type not in ("date", "datetime"):
@@ -182,7 +193,8 @@ class FieldSpec(BaseModel):
         """
         if self.fixed_blank:
             return f"{self.name} — always blank (fixed)"
-        bits = [f"{self.name} ({self.type}{', required' if self.required else ''})"]
+        bits = [f"{self.name} ({self.type}{', required' if self.required else ''}"
+                f"{', mapped by hand only' if self.manual_only else ''})"]
         if self.format:
             bits.append(f"format {self.format}")
         if self.allowed_values:
@@ -304,6 +316,11 @@ class TargetSchema(BaseModel):
         Used wherever a mapping is built or checked, so a fixed-blank field (e.g. consent) can never get a source.
         """
         return [f for f in self.fields if not f.fixed_blank]
+
+    @property
+    def auto_fields(self) -> list[FieldSpec]:
+        """Mappable fields the rules, templates and Claude may fill (excludes ``manual_only`` ones, e.g. consent)."""
+        return [f for f in self.mappable_fields if not f.manual_only]
 
     @property
     def label(self) -> str:
