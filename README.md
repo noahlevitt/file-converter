@@ -67,9 +67,9 @@ The output follows `generic-import-format.md`, encoded in [`schemas/target_schem
 | # | Header | Required | Output | How the tool handles it |
 |---|---|---|---|---|
 | 1 | `phone_number` | Yes | `2125551234` | US numbers only. No country code → +1 assumed. See *Phone numbers* below. Missing or invalid → row rejected as a bad row. |
-| 2 | `consent` | No | always blank | **Locked.** Blank on every row. It can't be mapped by the rules, set by Claude, given a default, or edited in the mapping grid, and columns about opt-in / consent / subscription are never auto-mapped to anything. |
+| 2 | `consent` | No | `true` / `false` / blank | **Mapped by hand only** (✋). Blank unless a person maps a column to it on the mapping page for that file: the rules, Claude, saved templates and defaults never fill it. Mapped values become `true` (subscribes) or `false` (opts out): Y/N, yes/no, 1/0, opted in/out, subscribed/unsubscribed; anything else stays blank, which changes nobody's consent. |
 | 3–4, 6–8 | `calls_last`, `transactions_last`, `in_sms_last`, `redemptions_last`, `spin_last` | No | `03/07/2026 09:05 AM` | Any date/time format in (see *Dates and times*) → `MM/DD/YYYY HH:MM AM/PM`. Seconds dropped; a date with no time gets `12:00 AM`. Placeholders like `0000-00-00`, `Never`, `N/A` → blank. Which column feeds which field: see [Which date goes where](#which-date-goes-where). |
-| 5 | `last_contacted` | No | always blank | **Locked**, like consent: it means the last time *we* texted the customer, which imported files never contain. Columns such as *Last Campaign Sent* are not imported. To allow it again, remove `fixed_blank: true` from it in the schema. |
+| 5 | `last_contacted` | No | `03/07/2026 09:05 AM` / blank | **Mapped by hand only** (✋), like consent: it means the last time *we* texted the customer, which imported files almost never contain. Columns such as *Last Campaign Sent* are not imported unless a person maps them. |
 | 9–10 | `birthday`, `anniversary` | No | `09/12/1985` | Any date format in → `MM/DD/YYYY`. Month and day with no year (`09/12`, `Sep 12`, `12-Sep`, `September 12th`, `0912`, `--09-12`, `Birthday: 9/12`), placeholder years (`0000`, `XXXX`, `YYYY`, `1900` and earlier), a year shared by most of the column (all `1970`, all `2000`, or the year Excel added to dates typed without one), and years in the last two years or the future → year `1600`. Month and day in separate columns (`Birth Month` + `Birth Day` [+ `Birth Year`]) are combined automatically. |
 
 - Headers are written exactly as above: lowercase, in order, no extra columns, all kept even when empty.
@@ -222,7 +222,8 @@ fields:
     required: true         # missing/invalid → row rejected (bad row)
     format: digits10       # phone: E164|digits10|digits11|national|dashed   date/datetime: strftime pattern
     synonyms: [mobile, cell, phone number]   # other names seen in source files (improves auto-mapping)
-    # also: on_invalid (reject|blank), fixed_blank (always empty, locked), no_year_value (dates, e.g. 1600),
+    # also: on_invalid (reject|blank), fixed_blank (always empty, locked), manual_only (filled only when a person
+    #       maps a column to it; never by rules, templates, Claude or a default), no_year_value (dates, e.g. 1600),
     #       generic_date (call_log|default: receives date columns with a generic name, see Which date goes where),
     #       countries (phone), max_length, truncate, case, allowed_values (enum), default, description
 dedupe:
@@ -346,8 +347,9 @@ Notes are useful without Claude too: they're saved with the template and the imp
     `AI_MASK_PHONES=false`). The up-to-15 sample values per column (notes, checks, automatic mapping) and the
     failed values sent by *Suggest fixes* are not masked.
   - The full file is never sent.
-- **Safety:** structured outputs restrict Claude to real field, transform and column names. `consent` can't be
-  touched. Every suggestion is shown for approval before anything changes.
+- **Safety:** structured outputs restrict Claude to real field, transform and column names. Claude can't fill
+  `consent` or `last_contacted` (hand-mapped only). Every suggestion is shown for approval before anything
+  changes.
 - **Models:** `claude-sonnet-5-5` for notes and checks, `claude-haiku-5-5` for fixes (`MAPPING_MODEL` /
   `REPAIR_MODEL`).
 - **Cost:** a notes or check call is a few thousand tokens, so a few cents per click; see current model prices at
@@ -372,7 +374,7 @@ Notes are useful without Claude too: they're saved with the template and the imp
 - A high bad-row rate and its top reason, including 7-digit phones (area code in another column?).
 - Many exact duplicates.
 - Unused columns that contain dates or phone numbers.
-- Consent-type columns, noted as intentionally not imported.
+- Consent-type columns, noted as not imported unless you map them to consent yourself.
 
 ## Data stored
 
