@@ -183,9 +183,9 @@ def restaurant_crm_csv(OUT: Path) -> None:
     Written as UTF-8 with LF line endings and a single header row. Shaped for the real import format
     (``schemas/target_schema.yaml``); the expected mapping (``tests/test_real_schema.py``) is:
     Mobile -> phone_number, Last Visit -> transactions_last, Last Call -> calls_last, Last Text Received ->
-    in_sms_last, Last Campaign Sent -> last_contacted, Last Reward Redeemed -> redemptions_last, Birthday ->
-    birthday, Anniversary -> anniversary. ``Opt-In Status`` and ``Created`` must stay unused (consent is always
-    blank in this format), and nothing feeds spin_last.
+    in_sms_last, Last Reward Redeemed -> redemptions_last, Birthday -> birthday, Anniversary -> anniversary.
+    ``Opt-In Status``, ``Created`` and ``Last Campaign Sent`` must stay unused (consent and last_contacted are always
+    blank in this format; "Created" is not a last-activity date), and nothing feeds spin_last.
 
     Edge cases by value:
         * Activity date-times in several styles: "10/05/2026 7:42 PM", "2026-10-03 18:15:00", "Oct 2 2026 1:05pm"
