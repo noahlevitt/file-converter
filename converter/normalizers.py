@@ -473,6 +473,12 @@ def _parse_phone(value: str, region: str, countries: tuple[str, ...], fmt: str) 
     return "", "not a real US number (area code or exchange doesn't exist)"
 
 
+def _phone_region(field: FieldSpec, params: dict) -> str:
+    """Default country for numbers written without a country code: params["region"], else the field's first allowed
+    country, else "US". Upper-case ISO code, e.g. "US"."""
+    return (params.get("region") or (field.countries[0] if field.countries else "US")).upper()
+
+
 def normalize_phone(value: str, field: FieldSpec, params: dict, ctx: dict) -> tuple[str, str | None]:
     """Normalizer for "phone" fields: parse, and for US imports try to repair likely typos.
 
@@ -487,7 +493,7 @@ def normalize_phone(value: str, field: FieldSpec, params: dict, ctx: dict) -> tu
         "+1 (433) 309-8420" → ("", "not a real US number (area code 433 isn't in use)")
     The repair evidence (phone_local, phone_known) comes from prepare_phone through ctx.
     """
-    region = (params.get("region") or (field.countries[0] if field.countries else "US")).upper()
+    region = _phone_region(field, params)
     countries = tuple(c.upper() for c in field.countries)
     fmt = field.format or "E164"
     out, err = _parse_phone(value, region, countries, fmt)
@@ -641,6 +647,172 @@ def _repair_phone(value: str, countries: tuple[str, ...], fmt: str, local: tuple
         options = " or ".join(_fmt_us(d) for d in list(found)[:3])
         return "", f"could be {options}, so it wasn't guessed"
     return "", ""
+
+
+# ---------------------------------------------------------------------------
+# Several phone numbers in one cell
+# ---------------------------------------------------------------------------
+
+# What people type BETWEEN two numbers in one cell: comma, semicolon, slash, backslash, pipe, ampersand, line break,
+# tab, or the word "or"/"and". Only searched in the text between two numbers already found, never inside a number,
+# so "516/555/0100" is never split.
+_PHONE_SEP_RE = re.compile(r"[,;/\\|&\n\t]|\b(?:or|and)\b", re.I)
+# An extension written right after a number ("516-555-0100 x12 917-555-1234"): it belongs to the number before it.
+# Used with .match(text, pos, endpos), which anchors at pos (so no "^").
+_EXT_AFTER_RE = re.compile(r"\s*[;,]?\s*(?:ext\.?|extension|ex\.?|x|#)\s*\d{1,6}\b", re.I)
+# Any word that says what kind of number it is (mobile, home, fax, a single-letter M/C/F/H/W/O...). Only used to
+# tell whether a cell writes its labels AFTER the numbers ("516-555-0100 (cell) 516-555-0199 (fax)") rather than
+# before them ("C: 516-555-0100 F: 516-555-0199").
+_ANY_LABEL_RE = re.compile(r"\b(?:mobile|cell|cel|wireless|sms|text|fax|home|work|office|business|land\s*line|main|"
+                           r"[mcfhwo])\b", re.I)
+# Characters trimmed from both ends of each piece: spaces and the separators themselves. Parentheses are kept
+# because "(516) 555-0100" starts with one and "(cell)" ends with one.
+_PIECE_TRIM = " \t\n,;/\\|&-"
+
+
+def _is_fax_label(text: str) -> bool:
+    """Whether a phone value is labelled as a fax line: the word "fax" or "facsimile", or a lone "F".
+
+    Only the words of the text count, so the digits of the number don't matter:
+        "Fax: 516-555-0199" → True, "516-555-0199 (F)" → True, "516-555-0199" → False,
+        "Cell 516-555-0100" → False, "1-800-FAXNOW" → False (one word, not "fax").
+    """
+    words = [w.lower() for w in re.findall(r"[A-Za-z]+", text)]
+    return any(w in ("fax", "facsimile") for w in words) or words == ["f"]
+
+
+def _digit_group_spans(text: str) -> list[tuple[int, int]]:
+    """Positions of the numbers in a cell like "516 555 0100 516 555 1212" (numbers separated by spaces only).
+
+    The runs of digits are grouped, left to right, into numbers of exactly 10 digits (or 11 starting with 1). The
+    positions are returned only when there is exactly ONE way to do that and it gives at least two numbers; a run of
+    digits is never cut, so "51655501005165551212" stays one value (and is rejected as "too many digits"). Returns
+    [] otherwise. Only called when the phonenumbers matcher found fewer than two numbers.
+        "516 555 0100 516 555 1212"     → [(0, 12), (13, 25)]
+        "1 516 555 0100 1 917 555 1234" → [(0, 14), (15, 29)]
+        "516 555 0100 x 12"             → []      (12 digits can't be split into whole numbers)
+    """
+    groups = [(m.start(), m.end(), len(m.group()), m.group()[0]) for m in re.finditer(r"\d+", text)]
+    # A cell with this many separate digit runs isn't a short list of numbers; don't search it.
+    if len(groups) > 12:
+        return []
+    ways: list[list[tuple[int, int]]] = []
+
+    def walk(i: int, acc: list[tuple[int, int]]) -> None:
+        """Depth-first search for groupings of digit runs i.. into whole numbers; stops after finding two."""
+        if len(ways) > 1:
+            return
+        if i == len(groups):
+            ways.append(list(acc))
+            return
+        total = 0
+        for j in range(i, len(groups)):
+            total += groups[j][2]
+            if total == 10 or (total == 11 and groups[i][3] == "1"):
+                acc.append((groups[i][0], groups[j][1]))
+                walk(j + 1, acc)
+                acc.pop()
+            if total >= 11:
+                break
+
+    walk(0, [])
+    return ways[0] if len(ways) == 1 and len(ways[0]) >= 2 else []
+
+
+def _separator_pieces(text: str) -> list[str]:
+    """Split a cell at its separators (see _PHONE_SEP_RE) when every part holds a whole number's worth of digits.
+
+    Each part with digits must have at least 7 (an extension at its end not counted), so a separator inside a
+    number ("516/555/0100") or before a short fragment ("516-555-0100/0101", ", ext 12") prevents the split. Parts
+    without digits (a stray "/" or a lone label) are dropped. Returns the parts, or [] when fewer than two qualify.
+    Unlike the phonenumbers matcher, this also finds numbers that aren't valid ("51655501444 / 917-555-1234"), so they
+    are reported instead of silently dropped.
+        "51655501444 / 917-555-1234" → ["51655501444", "917-555-1234"]
+        "516/555/0100"               → []
+    """
+    parts = [p.strip(_PIECE_TRIM) for p in _PHONE_SEP_RE.split(text)]
+    parts = [p for p in parts if any(c.isdigit() for c in p)]
+    if len(parts) < 2 or any(sum(c.isdigit() for c in _EXT_RE.sub("", p)) < 7 for p in parts):
+        return []
+    return parts
+
+
+def split_phones(value: str, field: FieldSpec, params: dict) -> list[tuple[str, bool]]:
+    """Split a cell holding several phone numbers into one piece per number: [(piece, is_fax), ...].
+
+    Used by the engine for the field that gets one row per phone number (engine._expand_rows): each piece is then
+    converted on its own, exactly like a value from a separate phone column, so every different valid number gets
+    its own row. A cell with one number comes back unchanged as a single piece.
+
+    How the numbers are told apart (nothing is guessed: no digit is added, removed or moved):
+      1. A cell with fewer than 14 digits can't hold two numbers (7 + 7) and is never split.
+      2. The phonenumbers matcher finds the numbers in the text ("516-555-0100 / 917-555-1234",
+         "H: 516-555-1212 C: 516-555-0100", "(516)555-0100(917)555-1234"). Matches with fewer than 7 digits don't
+         count as numbers.
+      3. Splitting at the separators (see _separator_pieces) wins when it gives at least as many numbers: it also
+         catches numbers the matcher doesn't recognise because they are invalid ("51655501444 / 917-555-1234"),
+         so they are reported as skipped instead of disappearing.
+      4. If neither finds two numbers, numbers separated only by spaces are found from the digit groups
+         ("516 555 0100 516 555 1212"; see _digit_group_spans).
+    The text around the numbers is shared out so each piece keeps its own label:
+      - an extension right after a number stays with it ("516-555-0100 x12, 917-555-1234");
+      - between two numbers, a separator (, ; / | & "or" "and" line break) splits the text: what is before it belongs
+        to the first number, what is after it to the second;
+      - with no separator, labels written after the numbers ("516-555-0100 (cell) 516-555-0199 (fax)": the cell
+        ends with a label) go to the number before them; otherwise labels go to the number after them.
+    is_fax is True for a piece labelled fax ("Fax: 516-555-0199"); the engine imports such a number only when the
+    file row has no other valid number, because a fax line can't receive texts.
+
+    Examples (field = the real schema's phone_number):
+        "516-555-0100"                          → [("516-555-0100", False)]
+        "516-555-0100 / 917-555-1234"           → [("516-555-0100", False), ("917-555-1234", False)]
+        "H: 516-555-1212 C: 516-555-0100"       → [("H: 516-555-1212", False), ("C: 516-555-0100", False)]
+        "516-555-0100 (cell), 516-555-0199 fax" → [("516-555-0100 (cell)", False), ("516-555-0199 fax", True)]
+        "516-555-0100/0101"                     → [("516-555-0100/0101", False)]   the shorthand isn't expanded
+        "51655501005165551212"                  → [("51655501005165551212", False)]   digits are never cut
+    Pieces are taken from the cleaned-up text (see _prep_phone), so letters typed for digits are already fixed.
+    """
+    if sum(c.isdigit() for c in value) < 14:
+        return [(value, _is_fax_label(value))]
+    text, err = _fix_numeric_artifacts(_prep_phone(value))
+    if err:
+        return [(value, _is_fax_label(value))]
+    spans: list[list[int]] = []
+    try:
+        for m in phonenumbers.PhoneNumberMatcher(text, _phone_region(field, params),
+                                                 leniency=phonenumbers.Leniency.POSSIBLE):
+            if sum(c.isdigit() for c in m.raw_string) >= 7:
+                spans.append([m.start, m.end])
+    # The matcher can raise on unusual input; that counts as "no numbers found" and the digit groups are tried.
+    except Exception:
+        spans = []
+    parts = _separator_pieces(text)
+    if len(parts) >= max(2, len(spans)):
+        return [(p, _is_fax_label(p)) for p in parts]
+    if len(spans) < 2:
+        spans = [list(s) for s in _digit_group_spans(text)]
+    if len(spans) < 2:
+        return [(value, _is_fax_label(value))]
+    # An extension right after a number belongs to that number.
+    for k in range(len(spans) - 1):
+        ext = _EXT_AFTER_RE.match(text, spans[k][1], spans[k + 1][0])
+        if ext:
+            spans[k][1] = ext.end()
+    # Labels after the numbers? The text after the last number tells.
+    labels_after = bool(_ANY_LABEL_RE.search(text[spans[-1][1]:]))
+    starts = [0] + [0] * (len(spans) - 1)
+    ends = [0] * (len(spans) - 1) + [len(text)]
+    for k in range(len(spans) - 1):
+        gap_start, gap_end = spans[k][1], spans[k + 1][0]
+        sep = _PHONE_SEP_RE.search(text, gap_start, gap_end)
+        if sep:
+            ends[k], starts[k + 1] = sep.start(), sep.end()
+        elif labels_after:
+            ends[k] = starts[k + 1] = gap_end
+        else:
+            ends[k] = starts[k + 1] = gap_start
+    pieces = [text[starts[k]:ends[k]].strip(_PIECE_TRIM) for k in range(len(spans))]
+    return [(p, _is_fax_label(p)) for p in pieces if p]
 
 
 # ---------------------------------------------------------------------------
