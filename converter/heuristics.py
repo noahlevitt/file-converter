@@ -96,13 +96,16 @@ NOT_PHONE_WORDS = {"order", "account", "acct", "id", "member", "card", "invoice"
                    "location", "receipt", "check", "transaction", "customer", "loyalty", "reference", "ref", "employee",
                    "table", "party", "guest", "visit", "visits", "points", "count", "fax"}
 
-# Generic date columns (step 7 of auto_map): header words that make a date something other than a customer's last
-# activity - when the account was created or signed up, a first visit, a birthday, an expiry, an opt-in. Such a
-# date is never used as a last-activity date ("Date Created" is not when the customer last called or ordered).
-NOT_ACTIVITY_DATE_WORDS = {"created", "creation", "create", "signup", "signed", "sign", "joined", "join", "registered",
-                           "registration", "enrolled", "enrollment", "since", "first", "birth", "birthday", "bday",
-                           "dob", "born", "anniversary", "anniv", "wedding", "expires", "expire", "expiration",
-                           "expiry", "exp", "due", "opt", "optin", "consent", "subscribed", "unsubscribed"}
+# Generic date columns (step 7 of auto_map). Header words of a creation-type date: when the customer or record was
+# created, signed up, joined or first visited. Not a last activity, so only used when the file has no other date
+# ("better a creation date than no date at all"), and never together with a real last date.
+CREATION_DATE_WORDS = {"created", "creation", "create", "signup", "signed", "sign", "joined", "join", "registered",
+                       "registration", "enrolled", "enrollment", "since", "first"}
+# Header words of dates that are never a last activity, not even as a fallback: birthdays and anniversaries (their
+# own fields), expiry and due dates, opt-in / consent dates.
+NEVER_ACTIVITY_DATE_WORDS = {"birth", "birthday", "bday", "dob", "born", "anniversary", "anniv", "wedding", "expires",
+                             "expire", "expiration", "expiry", "exp", "due", "opt", "optin", "consent", "subscribed",
+                             "unsubscribed"}
 # Header words that show a file is a call log (calls / phone-system export): its date column is the call's date.
 CALL_LOG_WORDS = {"call", "calls", "caller", "callerid", "dialed", "dialled", "duration", "direction", "inbound",
                   "outbound", "incoming", "outgoing", "missed", "voicemail", "answered", "ringing", "extension"}
@@ -349,12 +352,12 @@ def auto_map(schema: TargetSchema, profiles: list[ColumnProfile]) -> Mapping:
     5. Full address - a one-line address column is parsed into address1 / address2 / city / state / zip.
     6. Birthday / anniversary - a date split over "Birth Month" + "Birth Day" (+ "Birth Year") columns is
        combined (this step overrides earlier matches of those columns).
-    7. Generic dates - a column of dates whose header names no particular activity ("Date", "Start Time",
-       "Timestamp", "Updated") still gets imported: it goes to the field marked ``generic_date: call_log``
-       (calls_last) in a call log, or ``generic_date: default`` (transactions_last) in any other file, and a second
-       such column to the other one. Dates that aren't a last activity ("Date Created", "Sign Up Date", "First
-       Visit", "DOB", "Expiration") never do (:data:`NOT_ACTIVITY_DATE_WORDS`). A separate Time column is combined
-       with its Date column. Low confidence: the reviewer checks it.
+    7. One last date - when no last-activity column was found by name, ONE date column still gets imported: the
+       best generically named one ("Date", "Start Time", "Timestamp", "Updated"), or, failing that, a creation-type
+       date ("Date Created", "Sign Up Date", "First Visit"). It goes to the field marked ``generic_date: call_log``
+       (calls_last) in a call log, or ``generic_date: default`` (transactions_last) in any other file. Birthday,
+       expiry and opt-in dates never do. A separate Time column is combined with its Date column. Low confidence:
+       the reviewer checks it.
 
     Steps 1-3 never use consent columns (score 0 / explicit skip); steps 4-6 don't check for them (e.g. a
     "Subscriber Name" column, also a consent-looking header, can still be split into first/last name).
@@ -606,47 +609,62 @@ def _time_partner(date_col: str, profiles: list[ColumnProfile], used: set[str]) 
 
 def _map_generic_dates(schema: TargetSchema, profiles: list[ColumnProfile], fields: dict[str, FieldMapping],
                        used: set[str]) -> None:
-    """Step 7 of :func:`auto_map`: give unused date columns to the fields marked ``generic_date`` (in place).
+    """Step 7 of :func:`auto_map`: make sure a file's last date is imported - one date per row (in place).
 
-    Candidates: unused, non-consent columns whose values are clearly dates (80%+, see :func:`enough_evidence`),
-    whose header doesn't name a date that isn't a last activity (:data:`NOT_ACTIVITY_DATE_WORDS`) and doesn't name
-    an always-blank field ("Last Campaign Sent" is last_contacted, which stays blank). The best
-    candidate (:func:`_activity_rank`, then file order) goes to the first-choice field: ``generic_date: call_log``
-    in a call log (:func:`_looks_like_call_log`), ``generic_date: default`` otherwise. The next candidate goes to the
-    other field, unless it is only an end/edit time. Fields already mapped by name are left alone.
+    Nothing happens when a last-activity field (any datetime field) already has a column by name ("Last Visit",
+    "Last Call", "Last Reward Redeemed"): a row has one last date, so a generic or creation date isn't added on top.
+    (A file that names both a last call and a last transaction keeps both from step 1.)
 
-    Example (real schema): a call log with "Date", "Direction", "From", "To" -> calls_last <- "Date"; an order
-    export with "Order Date" and "Date Created" -> transactions_last <- "Order Date" ("Date Created" stays out).
+    Otherwise one column goes to the first-choice field - ``generic_date: call_log`` in a call log
+    (:func:`_looks_like_call_log`), ``generic_date: default`` otherwise - chosen in this order:
+
+    1. a generically named date (best :func:`_activity_rank`, then file order): "Last Updated", "Visit Date",
+       "Date", "Start Time", "Timestamp", "Updated", "End Time";
+    2. only if there is none: a creation-type date (:data:`CREATION_DATE_WORDS`): "Date Created", "Sign Up Date",
+       "Joined", "First Visit" - better than no date at all.
+
+    Candidates are unused, non-consent columns whose values are clearly dates (80%+, see :func:`enough_evidence`),
+    never birthday / expiry / opt-in dates (:data:`NEVER_ACTIVITY_DATE_WORDS`) and never a column that names an
+    always-blank field ("Last Campaign Sent" is last_contacted, which stays blank).
+
+    Examples (real schema): a call log with "Date", "Direction", "From", "To" -> calls_last <- "Date"; a customer
+    list with "Date Created" and "Updated" -> transactions_last <- "Updated"; a list whose only date is "Date
+    Created" -> transactions_last <- "Date Created"; "Last Visit" + "Date Created" -> only "Last Visit".
     """
     targets = {f.generic_date: f.name for f in schema.mappable_fields if f.generic_date}
     if not targets:
         return
-    order = ["call_log", "default"] if _looks_like_call_log(profiles) else ["default", "call_log"]
-    free = [targets[k] for k in order if k in targets and fields[targets[k]].transform == "none"]
+    if any(f.type == "datetime" and fields[f.name].transform != "none" for f in schema.mappable_fields):
+        return  # the file already gives a last date by name
+    call_log = _looks_like_call_log(profiles)
+    target = targets.get("call_log" if call_log else "default") or next(iter(targets.values()))
     # Columns that name an always-blank field (e.g. "Last Campaign Sent" = last_contacted, when we last texted the
     # customer) are about that field and stay out, like consent columns.
     fixed = [f for f in schema.fields if f.fixed_blank]
-    candidates = [p for p in profiles
-                  if p.name not in used and not is_consent_column(p.name)
-                  and not set(_words(p.name)) & NOT_ACTIVITY_DATE_WORDS
-                  and not any(header_score(p.name, f) >= 80 for f in fixed)
-                  and enough_evidence(p, p.shares.get("date", 0.0), minimum=0.8)]
-    candidates.sort(key=lambda p: -_activity_rank(p.name))  # stable: equal ranks keep file order
-    for i, (target, p) in enumerate(zip(free, candidates)):
-        if i > 0 and _activity_rank(p.name) == 0:
-            break  # a second field doesn't get just an end/edit time
-        time_col = _time_partner(p.name, profiles, used)
-        kind = "this looks like a call log" if target == targets.get("call_log") and order[0] == "call_log" else \
-            "used as the latest activity"
-        if time_col:
-            fields[target] = FieldMapping(sources=[p.name, time_col], transform="concat", params={"separator": " "},
-                                          origin="rule", confidence="low",
-                                          reason=f"dates in '{p.name}' with times in '{time_col}' ({kind}) - check")
-            used.update([p.name, time_col])
-        else:
-            fields[target] = FieldMapping(sources=[p.name], transform="copy", origin="rule", confidence="low",
-                                          reason=f"dates in '{p.name}' ({kind}) - check")
-            used.add(p.name)
+    dates = [p for p in profiles
+             if p.name not in used and not is_consent_column(p.name)
+             and not set(_words(p.name)) & NEVER_ACTIVITY_DATE_WORDS
+             and not any(header_score(p.name, f) >= 80 for f in fixed)
+             and enough_evidence(p, p.shares.get("date", 0.0), minimum=0.8)]
+    generic = sorted((p for p in dates if not set(_words(p.name)) & CREATION_DATE_WORDS),
+                     key=lambda p: -_activity_rank(p.name))  # stable: equal ranks keep file order
+    creation = [p for p in dates if set(_words(p.name)) & CREATION_DATE_WORDS]
+    if generic:
+        col, why = generic[0], "this looks like a call log" if call_log else "used as the latest activity"
+    elif creation:
+        col, why = creation[0], "the file has no last-activity date, so the creation date is used"
+    else:
+        return
+    time_col = _time_partner(col.name, profiles, used)
+    if time_col:
+        fields[target] = FieldMapping(sources=[col.name, time_col], transform="concat", params={"separator": " "},
+                                      origin="rule", confidence="low",
+                                      reason=f"dates in '{col.name}' with times in '{time_col}' ({why}) - check")
+        used.update([col.name, time_col])
+    else:
+        fields[target] = FieldMapping(sources=[col.name], transform="copy", origin="rule", confidence="low",
+                                      reason=f"dates in '{col.name}' ({why}) - check")
+        used.add(col.name)
 
 
 def _date_part_columns(profiles: list[ColumnProfile], keys: set[str]) -> list[str]:
