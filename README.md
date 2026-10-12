@@ -4,7 +4,7 @@ Internal web app that converts any customer/contact file (CSV, TSV, TAB, TXT, XL
 the exact import format of the target system. Built for 5–20 internal users; each upload is one file.
 
 **Quick start (one computer):** `./run_local.sh` (Mac/Linux) or `run_local.bat` (Windows), then open
-http://localhost:8501 and sign in with the admin account from `.env`. **Tests:** `python -m pytest -q`.
+http://localhost:8501. There is no login for now (see [Logins](#logins)). **Tests:** `python -m pytest -q`.
 
 ## Documentation
 
@@ -40,7 +40,7 @@ Every page has a **light/dark mode toggle** at the top right: a small square wit
 | **Import detail** | Status and timing, the bad-row flag and counts, downloads (converted file, rejected rows, summary, original file, side-by-side Excel), and tabs: **Side by side**, **What changed**, **Converted file**, **Bad & duplicate rows**, **Mapping used** (incl. notes). **Check this import for mistakes**; Re-run and Claude fixes start a new linked import. |
 | **Templates** | Saved column mappings per file layout; rename, delete, export. |
 | **Target format** | The current target schema, output file settings, dedupe rule and file retention. |
-| **Users** | (admins) add users, reset passwords, grant or remove admin, delete users. |
+| **Users** | Only while logins are on: (admins) add users, reset passwords, grant or remove admin, delete users. |
 
 **Side by side** shows the original file (left, exactly as uploaded) and the converted output (right) row by
 row. Column headers show where each original column went and where each output field came from. Cells are
@@ -262,8 +262,9 @@ mkdir -p data && sudo chown 1000 data
 docker compose up -d --build
 ```
 
-Open `http://SERVER:8501` and sign in with the admin account from `.env` (then remove `ADMIN_PASSWORD`
-from `.env`). Add teammates under **Users**.
+Open `http://SERVER:8501`. With logins on (`AUTH_MODE=password`, see [Logins](#logins)), sign in with the admin
+account from `.env` (then remove `ADMIN_PASSWORD` from `.env`) and add teammates under **Users**. A shared server
+should have logins on.
 
 **HTTPS / access:** don't expose port 8501 directly to the internet. Either keep it on the office network /
 VPN (e.g. Tailscale), or put [Caddy](https://caddyserver.com) in front for automatic HTTPS:
@@ -278,7 +279,17 @@ convert.yourcompany.com {
 ### On one computer (no Docker)
 
 Install Python 3.11+, then double-click `run_local.bat` (Windows) or run `./run_local.sh` (Mac/Linux).
-It opens at `http://localhost:8501`. Set `AUTH_MODE=none` in `.env` for single-person use.
+It opens at `http://localhost:8501`.
+
+### Logins
+
+**Logins are switched off for now** (`AUTH_MODE=none`, the default since 0.12.2): there is no sign-in page, everyone
+uses the app as the local administrator, and the Users page and *My account* are hidden. Anyone who can open the
+address can use the app and see past imports, so keep it on your own computer or a trusted network.
+
+To turn logins back on, set `AUTH_MODE=password` in `.env` and restart. Accounts created earlier are still in the
+database and work again; on a fresh install the account from `ADMIN_USERNAME` / `ADMIN_PASSWORD` is created, or the
+first visitor creates the administrator.
 
 ### Users from the command line
 
@@ -364,7 +375,7 @@ Notes are useful without Claude too: they're saved with the template and the imp
 | `FILE_RETENTION_DAYS` | 30 | days to keep each import's files (0 = forever) |
 | `APP_TIMEZONE` | America/New_York | time zone for displayed times |
 | `DEFAULT_PAGE` | new | first page: `new` or `imports` |
-| `AUTH_MODE` | password | `password` or `none` (single user on own computer) |
+| `AUTH_MODE` | none | `none` = no login (current default); `password` = per-user logins |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | — | first admin, created on first start |
 | `SCHEMA_PATH`, `DATA_DIR`, `APP_TITLE` | | paths and title |
 
