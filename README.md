@@ -68,7 +68,8 @@ The output follows `generic-import-format.md`, encoded in [`schemas/target_schem
 |---|---|---|---|---|
 | 1 | `phone_number` | Yes | `2125551234` | US numbers only. No country code → +1 assumed. See *Phone numbers* below. Missing or invalid → row rejected as a bad row. |
 | 2 | `consent` | No | always blank | **Locked.** Blank on every row. It can't be mapped by the rules, set by Claude, given a default, or edited in the mapping grid, and columns about opt-in / consent / subscription are never auto-mapped to anything. |
-| 3–8 | `calls_last`, `transactions_last`, `last_contacted`, `in_sms_last`, `redemptions_last`, `spin_last` | No | `03/07/2026 09:05 AM` | Any date/time format in (see *Dates and times*) → `MM/DD/YYYY HH:MM AM/PM`. Seconds dropped; a date with no time gets `12:00 AM`. Placeholders like `0000-00-00`, `Never`, `N/A` → blank. |
+| 3–4, 6–8 | `calls_last`, `transactions_last`, `in_sms_last`, `redemptions_last`, `spin_last` | No | `03/07/2026 09:05 AM` | Any date/time format in (see *Dates and times*) → `MM/DD/YYYY HH:MM AM/PM`. Seconds dropped; a date with no time gets `12:00 AM`. Placeholders like `0000-00-00`, `Never`, `N/A` → blank. Which column feeds which field: see [Which date goes where](#which-date-goes-where). |
+| 5 | `last_contacted` | No | always blank | **Locked**, like consent: it means the last time *we* texted the customer, which imported files never contain. Columns such as *Last Campaign Sent* are not imported. To allow it again, remove `fixed_blank: true` from it in the schema. |
 | 9–10 | `birthday`, `anniversary` | No | `09/12/1985` | Any date format in → `MM/DD/YYYY`. Month and day with no year (`09/12`, `Sep 12`, `12-Sep`, `September 12th`, `0912`, `--09-12`, `Birthday: 9/12`), placeholder years (`0000`, `XXXX`, `YYYY`, `1900` and earlier), a year shared by most of the column (all `1970`, all `2000`, or the year Excel added to dates typed without one), and years in the last two years or the future → year `1600`. Month and day in separate columns (`Birth Month` + `Birth Day` [+ `Birth Year`]) are combined automatically. |
 
 - Headers are written exactly as above: lowercase, in order, no extra columns, all kept even when empty.
@@ -158,6 +159,22 @@ How the numbers in one cell are told apart (no digit is ever added, removed or m
 - Columns that describe a phone (`phone4MarketingPreference`, `Phone Type`, `SMS Opt In`, `Phone Verified`) are
   never used as phone numbers. Marketing-preference columns are treated like consent columns: not imported.
 
+### Which date goes where
+
+- A column that names its activity goes to that field: *Last Visit* / *Last Order* → `transactions_last`,
+  *Last Call* / *Call Time* → `calls_last`, *Last Text Received* → `in_sms_last`, *Last Reward Redeemed* →
+  `redemptions_last`, *Last Spin* → `spin_last`, *Birthday* / *DOB* → `birthday`.
+- **A date column with a generic name** (*Date*, *Start Time*, *Timestamp*, *Updated*…) is still imported:
+  - in a **call log** (a header like *Caller ID*, *Duration*, *Direction*, *Missed*, or both a *From* and a *To*
+    column) it goes to `calls_last`;
+  - in any other file it goes to `transactions_last`;
+  - a second generic date goes to the other of the two, unless it's only an end or edit time (*End Time*);
+  - separate *Date* and *Time* columns are combined into one date-time.
+- **Never used as a last activity:** dates that aren't one — *Date Created*, *Created At*, *Sign Up Date*,
+  *Joined*, *Member Since*, *First Visit*, *Expiration Date*, *Opt-In Date*.
+- Generic dates are marked *low* confidence on the mapping page so a person checks them. Every phone number of a
+  call log is imported, the client's own line included (cell-phone validation happens later).
+
 ### Dates and times
 
 Read in any mix within one column:
@@ -202,6 +219,7 @@ fields:
     format: digits10       # phone: E164|digits10|digits11|national|dashed   date/datetime: strftime pattern
     synonyms: [mobile, cell, phone number]   # other names seen in source files (improves auto-mapping)
     # also: on_invalid (reject|blank), fixed_blank (always empty, locked), no_year_value (dates, e.g. 1600),
+    #       generic_date (call_log|default: receives date columns with a generic name, see Which date goes where),
     #       countries (phone), max_length, truncate, case, allowed_values (enum), default, description
 dedupe:
   keys: ["*"]              # "*" = every field; or list specific fields
