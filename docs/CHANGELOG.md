@@ -3,6 +3,15 @@
 What changed in each version. The running version is shown in the app's sidebar. Each version is tagged in git
 (`vX.Y.Z`).
 
+## 0.13.1 — one last date per row; creation date as the fallback
+
+- **One last date per row.** A generic date (*Date*, *Start Time*, *Timestamp*…) is only used when no column names
+  a last activity, and only one is used (0.13.0 put a second one in the other field). A file that names both a
+  last call and a last transaction still keeps both.
+- **Creation date as the last resort.** When a file has no other date, *Date Created*, *Created At*, *Sign Up
+  Date*, *Joined*, *Member Since* or *First Visit* is imported (to `calls_last` in a call log, `transactions_last`
+  otherwise) - never alongside a real last date. Expiry, due and opt-in dates are still never used.
+
 ## 0.13.0 — every date gets imported; last_contacted always blank
 
 - **Dates with a generic name are imported.** A date column named only *Date*, *Start Time*, *Timestamp*,
