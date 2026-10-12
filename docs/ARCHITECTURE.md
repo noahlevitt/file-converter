@@ -79,7 +79,7 @@ All business logic is in `converter/`. Only `app.py` and `converter/auth.py` imp
 | `converter/compare.py` | Side-by-side HTML table, filters and counts, the "What changed" per-field summary, and the colour-coded comparison workbook. |
 | `converter/storage.py` | SQLite store (users, templates, imports, user preferences) and the per-import file folders; retention purge. |
 | `converter/jobs.py` | `run_import` (one import, start to finish, with progress and cancel) and `ImportRunner` (thread pool, purge loop). |
-| `converter/auth.py` | Login gate (password mode with bcrypt accounts, or `AUTH_MODE=none` for one person on their own computer). |
+| `converter/auth.py` | Login gate: `AUTH_MODE=none` (the default for now: no login, everyone is the local admin) or password mode with bcrypt accounts. |
 | `converter/config.py` | `Settings` from environment variables / `.env`. |
 | `converter/cli.py` | Command line: `inspect` (show detected columns and mapping) and `convert` (run a conversion, exit code 2 when there were bad rows). |
 | `converter/ui_format.py` | Small display helpers (sizes, durations, time left, status colours). |
