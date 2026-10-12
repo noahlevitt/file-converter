@@ -191,7 +191,7 @@ def apply_row_edit(schema: TargetSchema, mapping: Mapping, field_name: str, chan
     """
     f = schema.field(field_name)
     if f.fixed_blank:
-        return mapping, "always blank — the import format requires this column to stay empty"
+        return mapping, "always blank — the target format keeps this column empty"
     fm = mapping.get(field_name).model_copy(deep=True)
     error = None
 
