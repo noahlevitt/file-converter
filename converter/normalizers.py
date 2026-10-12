@@ -35,7 +35,7 @@ How the engine uses it (engine.convert, simplified):
     ctx["tz"] = timezone                       # the import's IANA zone, read by the date normalizer
     out, err = N.normalize(v, field, params, ctx)
     if v in ctx.get("repairs", {}): ...        # phone typo repairs are marked so a person can check them
-Fields with `fixed_blank` (consent) never reach this module: the engine writes them blank on every row.
+Fields with `fixed_blank` never reach this module: the engine writes them blank on every row.
 
 Phone rules (real target: 10 US digits, "(516) 555-0100" → "5165550100"), in the order they apply:
   1. Clean-up (_prep_phone): full-width digits and invisible characters (NFKC), the Excel ="…" wrapper and
@@ -1191,8 +1191,8 @@ def normalize_boolean(value: str, field: FieldSpec, params: dict, ctx: dict) -> 
     """Normalizer for "boolean" fields: yes/no words → field.true_value / field.false_value.
 
     "yes", "Y", "1", "x", "Subscribed" → true_value; "no", "0", "Unsubscribed", "opted out" → false_value;
-    anything else → ("", "not a yes/no value"). The real schema's consent column never gets here: it is
-    fixed_blank and always written empty.
+    anything else → ("", "not a yes/no value"). The real schema's consent column uses this when a person maps a
+    column to it (true / false; any other value is left blank, which changes nobody's consent).
     """
     v = value.strip().lower()
     if v in TRUE_TOKENS:
