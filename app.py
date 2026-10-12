@@ -9,9 +9,9 @@ Run on server: docker compose up -d   (see README.md)
 What it does
 ------------
 A user uploads a customer/contact file (CSV, TSV, TAB, TXT, XLSX, XLSM, XLSB, XLS, ODS) and the app converts it
-into the fixed import format described in schemas/target_schema.yaml: 10-digit US phone numbers (one row per different number),
-activity timestamps as MM/DD/YYYY HH:MM AM/PM, birthday/anniversary as MM/DD/YYYY with year 1600 when the file
-has no real year, and the consent column always blank. All of those rules live in the `converter` package; this
+into the fixed import format described in schemas/target_schema.yaml: 10-digit US phone numbers (one row per
+different number), activity timestamps as MM/DD/YYYY HH:MM AM/PM, birthday/anniversary as MM/DD/YYYY with year
+1600 when the file has no real year, and the consent column always blank. All of those rules live in the `converter` package; this
 file is only the web UI on top of it. Claude is optional and only called when someone clicks a Claude button
 (or when AI_AUTO_MAP is on).
 
@@ -96,6 +96,97 @@ TZ = settings.timezone
 # login form and before any page.
 st.set_page_config(page_title=APP_TITLE, page_icon="🔄", layout="wide")
 
+
+# ---------------------------------------------------------------------------
+# Light / dark mode
+# ---------------------------------------------------------------------------
+# .streamlit/config.toml defines a light and a dark theme ([theme.light] / [theme.dark]), so Streamlit's own
+# "Custom Theme Auto" follows the browser's light/dark setting. Streamlit has no per-user API to switch theme, and a
+# page reload would end the session (signing the user out and losing a mapping in progress). So the toggle makes
+# this browser tab *report* the chosen mode: the script below wraps window.matchMedia so
+# "(prefers-color-scheme: dark)" answers with the user's choice, then fires the "afterprint" event, on which
+# Streamlit re-evaluates its automatic theme. The switch is instant, keeps the session, and uses Streamlit's real
+# dark theme for every element (including the data grids). The choice is saved per user (users' preferences
+# table) and in the browser's localStorage ("fcTheme"), so it also applies on the login page and after a refresh.
+# If a future Streamlit version stops re-evaluating on "afterprint", the toggle simply has no effect; nothing breaks.
+_THEME_SCRIPT = r"""<script>
+(function () {
+  var W = window, want = "__WANT__";
+  try {
+    if (want) { W.localStorage.setItem("fcTheme", want); } else { want = W.localStorage.getItem("fcTheme") || ""; }
+  } catch (e) {}
+  if (want !== "light" && want !== "dark") { return; }
+  if (!W.__fcOrigMatchMedia) { W.__fcOrigMatchMedia = W.matchMedia.bind(W); }
+  W.__fcTheme = want;
+  W.matchMedia = function (query) {
+    var real = W.__fcOrigMatchMedia(query), key = String(query).replace(/\s/g, "");
+    if (key !== "(prefers-color-scheme:dark)" && key !== "(prefers-color-scheme:light)") { return real; }
+    var isDark = W.__fcTheme === "dark";
+    return {matches: key.indexOf("dark") >= 0 ? isDark : !isDark, media: query, onchange: null,
+            addEventListener: real.addEventListener.bind(real),
+            removeEventListener: real.removeEventListener.bind(real),
+            addListener: real.addListener.bind(real), removeListener: real.removeListener.bind(real),
+            dispatchEvent: real.dispatchEvent.bind(real)};
+  };
+  W.dispatchEvent(new Event("afterprint"));
+})();
+</script>"""
+# The script's container is taken out of the page flow so it adds no blank space; the toggle is a small square
+# button fixed at the top right of the page, beside Streamlit's own toolbar.
+_THEME_CSS = """<style>
+[class*="st-key-fc_theme_assets"]{position:fixed;width:0;height:0;overflow:hidden}
+.st-key-fc_theme_toggle{position:fixed;top:0.6rem;right:1rem;z-index:999990;width:auto}
+.st-key-fc_theme_toggle button{width:2.25rem;height:2.25rem;min-height:2.25rem;padding:0;border-radius:0.5rem}
+.st-key-fc_theme_toggle button span[role="img"]{font-size:1.25rem}
+</style>"""
+
+
+def apply_theme(want: str | None, slot: str = "app") -> None:
+    """Make this browser tab show light or dark mode: "light", "dark", or ""/None = the choice saved in the browser.
+
+    Draws an invisible element holding _THEME_SCRIPT (see the comment above it). Streamlit re-runs the script only
+    when the element's content changes, i.e. when the choice changes or the element is drawn anew (page change),
+    so calling this on every rerun is cheap. `slot` keeps the two calls of one run (before sign-in and with the
+    toggle) apart, because Streamlit needs a unique key per element.
+    """
+    with st.container(key=f"fc_theme_assets_{slot}"):
+        st.html(_THEME_CSS + _THEME_SCRIPT.replace("__WANT__", want if want in ("light", "dark") else ""),
+                unsafe_allow_javascript=True)
+
+
+def current_theme() -> str:
+    """"dark" or "light": the signed-in user's choice, else what the browser currently shows (its own setting)."""
+    pref = st.session_state.get("theme_pref")
+    if pref in ("light", "dark"):
+        return pref
+    return "dark" if st.context.theme.type == "dark" else "light"
+
+
+def _toggle_theme() -> None:
+    """Button callback: switch to the other mode and remember it for this user (a failed save never blocks)."""
+    new = "light" if current_theme() == "dark" else "dark"
+    st.session_state.theme_pref = new
+    try:
+        store.set_user_pref(user["username"], "theme", new)
+    except Exception:  # the preference is a convenience; the switch still works for this session
+        pass
+
+
+def theme_toggle() -> None:
+    """Draw the light/dark toggle: a small square with a moon (go dark) or a sun (go light), top right.
+
+    The user's saved choice is loaded once per session; then the current choice is applied (apply_theme).
+    """
+    ss_ = st.session_state
+    if "theme_pref" not in ss_:
+        ss_.theme_pref = store.get_user_pref(user["username"], "theme")
+    dark = current_theme() == "dark"
+    with st.container(key="fc_theme_toggle"):
+        st.button(":material/light_mode:" if dark else ":material/dark_mode:", on_click=_toggle_theme,
+                  key="fc_theme_button", help="Switch to light mode" if dark else "Switch to dark mode")
+    apply_theme(ss_.theme_pref)
+
+
 # Choices for the "Client time zone" box: label shown to the user → IANA name stored in ss.timezone and in each
 # import's read_options. US zones only, because the target system only takes US customers.
 US_ZONES = {"Eastern": "America/New_York", "Central": "America/Chicago", "Mountain": "America/Denver",
@@ -120,7 +211,7 @@ COL_PREVIEW, COL_CHECK, COL_BY, COL_WHY = "Sample output", "Check", "Mapped by",
 
 @st.cache_resource
 def get_store() -> Store:
-    """Return the one SQLite Store (users, templates, imports) shared by all sessions.
+    """Return the one SQLite Store (users, templates, imports, preferences) shared by all sessions.
 
     The database file is settings.db_path (converter.db in the data folder); import files are stored next to it
     under imports/<id>/. Sharing one object is safe because the Store opens a short-lived connection per call.
@@ -198,6 +289,9 @@ except Exception as exc:  # bad YAML should be obvious, not a stack trace
     st.error(f"The target schema file could not be loaded ({settings.schema_path}): {exc}")
     st.stop()
 assistant = get_assistant()
+# Before sign-in there is no user preference yet: apply the mode last chosen in this browser (if any), so the login
+# page already matches.
+apply_theme(st.session_state.get("theme_pref"), slot="login")
 # Draws the login form (or the first-run "create admin" form) and stops the run until someone is signed in.
 # With AUTH_MODE=none it returns a local admin user straight away. `user` is a dict: username, is_admin.
 user = require_login(store, settings, APP_TITLE)
@@ -1374,7 +1468,8 @@ def _side_by_side(rec: ImportRecord, rec_schema: TargetSchema, src_df: pd.DataFr
                "Left: the original file exactly as uploaded. Right: what was produced for the import. "
                "Headers show where each column went.")
     st.html(build_compare_html(src_df, audit, page_rows, rec_schema, plan, file_label=f"Original · {rec.filename}",
-                               target_label=f"Converted · {rec.schema_label}", show_was=show_was))
+                               target_label=f"Converted · {rec.schema_label}", show_was=show_was,
+                               dark=current_theme() == "dark"))
 
 
 def _repair_section(rec: ImportRecord, rec_schema: TargetSchema, audit: pd.DataFrame) -> None:
@@ -1645,6 +1740,9 @@ with st.sidebar:
                 st.rerun()
     st.caption("Claude: " + (f"connected ({settings.mapping_model})" if assistant else "not configured"))
     st.caption(f"Target: {schema.label} · v{__version__}")
+
+# Light/dark toggle, fixed at the top right of every page (drawn before the page so it's there while it loads).
+theme_toggle()
 
 # Run the page function for the current URL (or the default page). This is where the page content is drawn.
 nav.run()
