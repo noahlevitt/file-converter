@@ -74,7 +74,7 @@ from converter.config import get_settings
 from converter.checks import column_warnings
 from converter.editor import (FROM_LABEL, LABELS, OPTION_HELP, apply_column_edit, apply_row_edit, option_text,
                               row_problem)
-from converter.engine import convert, preview_values, source_rows
+from converter.engine import convert, count_multi_number_cells, preview_values, source_rows
 from converter.jobs import ImportRunner
 from converter.mapping import Mapping, profile_columns
 from converter.reader import SUPPORTED_EXTENSIONS, ReadError, read_file
@@ -322,8 +322,10 @@ ss.setdefault("uploader_version", 0)
 #   template_name suggested template name; timezone  the client time zone (IANA name)
 #   notes_result / check_result   Claude's notes result and the last mistake check, kept so Accept works later
 #   pending       set to None by load_and_map but not read anywhere in this file (left over; harmless)
+#   multi_cells   {phone source columns: number of cells holding several numbers} (see multi_number_cells)
 FILE_KEYS = ["file_sig", "file_name", "file_bytes", "read", "profiles", "mapping", "map_meta", "pending",
-             "edit_errors", "ai_used", "template_name", "read_error", "timezone", "notes_result", "check_result"]
+             "edit_errors", "ai_used", "template_name", "read_error", "timezone", "notes_result", "check_result",
+             "multi_cells"]
 
 
 def reset_file_state() -> None:
@@ -344,8 +346,8 @@ def load_and_map(sheet: str | None = None, header_row: int | None | str = "auto"
     only actually used when an assistant exists and AI_AUTO_MAP is on).
 
     Reads ss.file_name / ss.file_bytes. Writes ss.read and ss.read_error; on success also ss.profiles,
-    ss.mapping, ss.map_meta, ss.template_name, ss.timezone, ss.ai_used, and clears ss.pending, ss.notes_result,
-    ss.check_result and ss.edit_errors. Bumps ss.editor_version so both data editors start fresh. Any edits the
+    ss.mapping, ss.map_meta, ss.template_name, ss.timezone, ss.ai_used, and clears ss.multi_cells, ss.pending,
+    ss.notes_result, ss.check_result and ss.edit_errors. Bumps ss.editor_version so both data editors start fresh. Any edits the
     reviewer made to the old mapping are discarded, which is what "Re-read file" should do.
 
     A ReadError (unsupported type, empty or unreadable file) is stored for the page to show rather than raised.
@@ -378,11 +380,25 @@ def load_and_map(sheet: str | None = None, header_row: int | None | str = "auto"
     ss.timezone = tpl_tz if tpl_tz in ZONE_LABEL else (settings.timezone if settings.timezone in ZONE_LABEL
                                                        else "America/New_York")
     ss.ai_used = sug.source == "rules+ai"
+    ss.multi_cells = {}  # a re-read (other sheet or header row) can change the cells behind the same column names
     ss.pending = None
     ss.notes_result = None
     ss.check_result = None
     ss.edit_errors = []
     ss.editor_version += 1
+
+
+def multi_number_cells(df: pd.DataFrame, field, columns: list[str]) -> int:
+    """Cells of these phone columns that hold several numbers, counted once per file and column set.
+
+    Cached in ss.multi_cells (a FILE_KEYS entry, so a new file starts empty) because the mapping page reruns on
+    every edit and the count reads the whole column. See engine.count_multi_number_cells.
+    """
+    cache = ss.setdefault("multi_cells", {})
+    key = tuple(columns)
+    if key not in cache:
+        cache[key] = count_multi_number_cells(df, field, columns)
+    return cache[key]
 
 
 def template_key() -> str:
@@ -699,12 +715,19 @@ def page_new_import() -> None:
     )
     for e in ss.get("edit_errors") or []:
         st.error(e)
-    # Several phone columns feeding the phone field always mean "one row per different number" (each_row); say
-    # so, because the converted file will then have more rows than the original.
-    each = next((f for f in schema.mappable_fields if mapping.get(f.name).transform == "each_row"), None)
+    # Several phone columns feeding the phone field, or cells holding several numbers, mean "one row per different
+    # number"; say so, because the converted file will then have more rows than the original.
+    each = mapping.row_field(schema)
     if each is not None:
-        st.caption(f"ℹ️ A customer with different numbers in {', '.join(mapping.get(each.name).sources)} gets "
-                   f"one row per number in **{each.header}**, with the other columns copied from their original row.")
+        each_fm = mapping.get(each.name)
+        multi = multi_number_cells(df, each, each_fm.sources)
+        if each_fm.transform == "each_row" or multi:
+            note = (f"ℹ️ A customer with different numbers in {', '.join(each_fm.sources)} gets one row per number in "
+                    f"**{each.header}**, with the other columns copied from their original row.")
+            if multi:
+                note += (f" {multi:,} cell{'s hold' if multi != 1 else ' holds'} several numbers; each different "
+                         "number counts (numbers labelled fax only when there is no other).")
+            st.caption(note)
     # Source columns that feed no field. "(skipped)" marks the ones the reviewer excluded on purpose, as opposed
     # to columns that simply didn't match anything.
     unused = [c for c in df.columns if c not in mapping.used_sources()]
