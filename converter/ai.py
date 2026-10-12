@@ -175,6 +175,12 @@ def _schema_docs(schema: TargetSchema) -> str:
             line += f". {f.description}"
         if f.no_year_value is not None:
             line += f". Month and day without a year are output with year {f.no_year_value} automatically"
+        if f.generic_date == "call_log":
+            line += (". Also takes a date column whose header names no activity (Date, Start Time, Timestamp) when "
+                     "the file is a call log")
+        elif f.generic_date == "default":
+            line += (". Also takes a date column whose header names no activity (Date, Start Time, Timestamp) in "
+                     "files that are not call logs")
         if f.synonyms:
             line += f". Also called: {', '.join(f.synonyms)}"
         lines.append(line)
@@ -231,6 +237,8 @@ RULES:
   SMS Opt In) are not phone numbers — never map them to the phone field.
 - A phone cell holding several numbers ("516-555-0100 / 917-555-1234") is split by the engine into one row per
   number automatically; map that column normally and don't report it as a problem.
+- Import every date that records a customer's latest activity. A date that is not a last activity - when the
+  record was created, a sign-up or join date, a first visit, an expiry - must not be mapped to an activity field.
 - Never invent data. Use constant only when the user explicitly asks for a fixed value. Never use constant
   or a guessed column for consent, opt-in or subscription fields.
 - confidence: high = header and values clearly match; medium = probable; low = a guess the reviewer must check.
