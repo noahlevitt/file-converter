@@ -30,6 +30,9 @@ Imports:     every import with live progress, elapsed time and time left → ope
 
 ## Pages
 
+Every page has a **light/dark mode toggle** at the top right: a small square with a moon (switch to dark) or a sun
+(switch to light). The choice is saved per user; until someone chooses, the app follows the computer's setting.
+
 | Page | What it's for |
 |---|---|
 | **New import** | Upload a file, check the detected header/sheet and client time zone, review the column mapping (edit the field grid, or under *Columns in your file* pick where each column goes, skip a column, or write notes and apply them with Claude), optionally **Check for mistakes**, then **Start import**. |
