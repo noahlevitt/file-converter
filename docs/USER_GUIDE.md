@@ -199,11 +199,12 @@ The numbers below it are:
 - **Ambiguous order:** `03/04` is read month-first unless the column is clearly day-first. You can force it with
   **Option** = `DMY`.
 - **Activity fields:** a date with no time becomes `12:00 AM`. Seconds are dropped.
-- **Which field a date goes to:** a column that names its activity goes to that field (*Last Visit* →
-  transactions_last, *Last Call* → calls_last). A column named only *Date*, *Start Time* or *Timestamp* is still
-  imported: as **calls_last** in a call log (*From*/*To*, *Caller ID*, *Duration*…), otherwise as
-  **transactions_last**. *Date Created*, sign-up, first-visit and expiry dates are never used. These are marked
-  *low*: check them, and change them under **Columns in your file** if needed.
+- **Which field a date goes to (one last date per row):** a column that names its activity goes to that field
+  (*Last Visit* → transactions_last, *Last Call* → calls_last). If there is none, a column named only *Date*,
+  *Start Time* or *Timestamp* is used; if there is none of those either, a creation date (*Date Created*, *Sign Up
+  Date*, *First Visit*) - better than no date. That one date goes to **calls_last** in a call log (*From*/*To*,
+  *Caller ID*, *Duration*…), otherwise to **transactions_last**. Expiry and opt-in dates are never used. These are
+  marked *low*: check them, and change them under **Columns in your file** if needed.
 - **Birthday / anniversary** become `MM/DD/1600` when there is no real year. That includes:
   - month and day only: `09/12`, `Sep 12`, `12-Sep`, `--09-12`;
   - placeholder years: `0000`, `XXXX`, `1900`;
