@@ -19,13 +19,15 @@ The CLI uses the same settings (``.env`` / environment), database, templates and
 Options shared by ``inspect`` and ``convert``:
     --sheet NAME          Excel sheet to read (default, or a name not in the workbook: the first sheet).
     --header-row N        1-based header row number, "none" (file has no header row) or "auto" (default: detect).
-    --template NAME       use this saved template instead of auto-mapping (no rules, no Claude).
+    --template NAME       use this saved template instead of auto-mapping (no rules, no Claude). Not for files
+                          without a header row (templates aren't used for those).
     --ai                  let Claude refine the auto-mapping (needs ANTHROPIC_API_KEY and AI_ENABLED).
     --schema PATH         target schema YAML (default: SCHEMA_PATH).
     --timezone ZONE       client time zone, e.g. America/Denver (default: APP_TIMEZONE); used by ``convert``.
 ``convert`` only:
     --out DIR             folder for the result files (created if missing; default: current folder).
-    --save-template NAME  save the mapping that was used as a template (overwrites one with the same name).
+    --save-template NAME  save the mapping that was used as a template (overwrites one with the same name); skipped,
+                          with a message, for a file without a header row.
 
 Examples::
 
@@ -36,7 +38,8 @@ Examples::
 
 Exit codes:
     0   success (for ``convert``: every row converted, or only duplicates removed)
-    1   error, with the message on stderr: unreadable/unsupported file, unknown ``--template``, incomplete mapping
+    1   error, with the message on stderr: unreadable/unsupported file, unknown ``--template`` (or ``--template``
+        with a file that has no header row), incomplete mapping
         ("Mapping is incomplete; ..."), or the import failed/was cancelled
     2   ``convert`` finished and wrote its files, but some rows were rejected (see the REJECTED csv) — non-zero so
         scripts notice bad rows. argparse also uses 2 for invalid command-line usage.
@@ -85,7 +88,8 @@ def _load(args):
         the mapping came from ("template", "rules", "rules+ai" or "template '<name>'") and ``notes`` are the
         messages from ``initial_mapping``.
 
-    Exits with status 1 if ``--template`` names a template that doesn't exist. ``ReadError`` from the reader is
+    Exits with status 1 if ``--template`` names a template that doesn't exist, or is given for a file without a
+    header row. ``ReadError`` from the reader is
     handled by :func:`main`. Side effects: opens (and if needed creates) the SQLite database; one Claude call
     with ``--ai``.
     """
@@ -96,6 +100,8 @@ def _load(args):
     rr = read_file(path.name, path.read_bytes(), sheet=args.sheet, header_row=_header_arg(args.header_row))
     profiles = profile_columns(rr.df, n_samples=settings.ai_sample_values)
     if args.template:
+        if has_generic_columns(list(rr.df.columns)):
+            sys.exit("This file has no header row; templates aren't used for such files. Leave out --template.")
         tpl = store.get_template(args.template)
         if tpl is None:
             sys.exit(f"Template '{args.template}' not found.")
@@ -163,21 +169,21 @@ def cmd_convert(args) -> None:
         for k, v in problems.items():
             print(f"PROBLEM {schema.field(k).header}: {v}", file=sys.stderr)
         sys.exit("Mapping is incomplete; fix it in the web app or pass --template.")
-    if args.save_template:
+    saved = None
+    if args.save_template and has_generic_columns(list(rr.df.columns)):
+        print("Template not saved: files without a header row are not saved as templates.")
+    elif args.save_template:
         store.save_template(args.save_template, list(rr.df.columns), mapping,
                             {"sheet": rr.sheet, "header_row": rr.header_row}, schema.name, "cli")
         print(f"Saved template '{args.save_template}'.")
-        if has_generic_columns(list(rr.df.columns)):
-            # Never matched automatically (see Store.find_template): it must be named again with --template.
-            print("  This file has no header row, so the template is only used when you pass "
-                  f"--template \"{args.save_template}\".")
+        saved = args.save_template
     # Store the header row that was actually used (detected or given), so the import re-reads the file the same
     # way. ai_used records whether --ai was passed.
     import_id = store.create_import(
         username="cli", filename=path.name, data=path.read_bytes(), schema_label=schema.label,
         schema_json=schema.model_dump_json(), mapping=mapping,
         read_options={"sheet": rr.sheet, "header_row": rr.header_row, "timezone": args.timezone or settings.timezone},
-        template_name=args.template or args.save_template, ai_used=args.ai)
+        template_name=args.template or saved, ai_used=args.ai)
     rec = run_import(store, import_id)
     if rec.status != "completed":
         sys.exit(f"Import #{rec.id} {rec.status}: {rec.error or ''}")
