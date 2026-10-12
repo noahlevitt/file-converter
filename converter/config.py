@@ -24,8 +24,8 @@ SCHEMA_PATH            <project>/schemas/              Target import format (YAM
                        target_schema.yaml
 DATA_DIR               <project>/data                  SQLite database (converter.db) and import files
                                                        (imports/<id>/).
-AUTH_MODE              password                        "password" = per-user logins; "none" = no login (single
-                                                       person on their own computer).
+AUTH_MODE              none                            "none" = no login (everyone is the local admin);
+                                                       "password" = per-user logins (accounts on the Users page).
 ADMIN_USERNAME         ""                              First admin, created on start when there are no users.
 ADMIN_PASSWORD         ""                              Password for that first admin (8+ characters).
 IMPORT_WORKERS         2 (minimum 1)                   Imports that run at the same time; more wait queued.
@@ -121,9 +121,10 @@ class Settings:
     # DATA_DIR (default <project>/data): holds converter.db (users, templates, imports) and imports/<id>/ folders.
     # docker-compose.yml mounts ./data here so data survives container rebuilds.
     data_dir: Path = field(default_factory=lambda: Path(os.getenv("DATA_DIR", str(PROJECT_ROOT / "data"))))
-    # AUTH_MODE (default "password"; trimmed, lower-cased): "none" skips the login entirely and everyone acts as
-    # admin user "local" — only for one person running the app on their own computer.
-    auth_mode: str = field(default_factory=lambda: os.getenv("AUTH_MODE", "password").strip().lower())
+    # AUTH_MODE (default "none" since 0.12.2, while logins are switched off; trimmed, lower-cased): "none" skips the
+    # login entirely and everyone acts as admin user "local"; "password" turns per-user logins back on (accounts
+    # and passwords are kept in the database either way).
+    auth_mode: str = field(default_factory=lambda: os.getenv("AUTH_MODE", "none").strip().lower())
     # ADMIN_USERNAME / ADMIN_PASSWORD (default ""): first admin account, created automatically on start when the
     # user table is empty (auth.ensure_bootstrap_admin). Remove the password from .env after the first sign-in.
     admin_username: str = field(default_factory=lambda: os.getenv("ADMIN_USERNAME", ""))
