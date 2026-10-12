@@ -168,7 +168,9 @@ def test_dedupe_across_all_fields(real_schema):
 
 
 def test_restaurant_crm_export(samples, real_schema):
-    """The CRM sample maps each activity column by its header and ignores Opt-In and Created.
+    """The CRM sample maps each activity column by its header and ignores Opt-In, Created and Last Campaign Sent.
+
+    "Last Campaign Sent" names last_contacted, which is always blank (it means when we last texted the customer).
 
     The output CSV lines are pinned exactly, including blank consent on every row.
     """
@@ -177,7 +179,7 @@ def test_restaurant_crm_export(samples, real_schema):
     assert m.get("transactions_last").sources == ["Last Visit"]
     assert m.get("calls_last").sources == ["Last Call"]
     assert m.get("in_sms_last").sources == ["Last Text Received"]
-    assert m.get("last_contacted").sources == ["Last Campaign Sent"]
+    assert m.get("last_contacted").transform == "none" and "Last Campaign Sent" not in m.used_sources()
     assert m.get("redemptions_last").sources == ["Last Reward Redeemed"]
     assert m.get("birthday").sources == ["Birthday"] and m.get("anniversary").sources == ["Anniversary"]
     assert m.get("spin_last").transform == "none"
@@ -188,13 +190,14 @@ def test_restaurant_crm_export(samples, real_schema):
     csv_text = write_output(res.output, real_schema).decode().splitlines()
     assert csv_text[0] == ",".join(HEADERS)
     # Maria Lopez: every activity column filled, birthday "09/12" without a year, anniversary with its real year.
-    assert csv_text[1] == ("5165550100,,10/01/2026 12:15 PM,10/05/2026 07:42 PM,10/03/2026 11:00 AM,"
+    assert csv_text[1] == ("5165550100,,10/01/2026 12:15 PM,10/05/2026 07:42 PM,,"
                            "10/04/2026 06:01 PM,09/28/2026 08:30 PM,,09/12/1600,06/20/2015")
     # Tom Becker: ISO timestamps reformatted, birthday "Mar 3" → 03/03/1600.
-    assert csv_text[2] == "6315550101,,,10/03/2026 06:15 PM,10/03/2026 11:00 AM,,,,03/03/1600,"
+    assert csv_text[2] == "6315550101,,,10/03/2026 06:15 PM,,,,,03/03/1600,"
     # Daniel Cho: "0000-00-00 00:00:00" last visit → blank; "September 12th" and "12/31" → 1600.
     assert csv_text[5] == "6315550188,,,,,,,,09/12/1600,12/31/1600"
     assert all(line.split(",")[1] == "" for line in csv_text[1:])  # consent blank everywhere
+    assert all(line.split(",")[4] == "" for line in csv_text[1:])  # last_contacted blank everywhere
 
 
 def test_loyalty_activity_xlsx(samples, real_schema):
