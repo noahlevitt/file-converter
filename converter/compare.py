@@ -248,7 +248,8 @@ def status_counts(audit: pd.DataFrame, schema: TargetSchema) -> dict[str, int]:
 # Cell status classes on converted cells are "c-" + the engine.CELL_* code, so they match automatically:
 #   c-fmt reformatted (blue)   c-drv built/derived (purple)   c-def default (grey, italic)   c-fix Claude fix (green)
 #   c-blk invalid, left blank (yellow)   c-rpr repaired typo (orange, bold)   c-rej rejected cause (red, bold)
-# The swatch colours in legend_html() and XLSX_FILL below repeat these hex values; keep them in sync.
+# The swatch colours in _LEGEND and XLSX_FILL below repeat these hex values; keep them in sync (DARK_CSS has the
+# dark-mode versions).
 CSS = """
 <style>
 .cmpw{max-height:640px;overflow:auto;border:1px solid #d9dde3;border-radius:8px;background:#fff}
@@ -294,21 +295,68 @@ td .blank{color:#9aa1a9;font-style:italic;font-weight:400}
 """
 
 
-def legend_html(each_row: bool = False) -> str:
+# Dark-mode colours for the same table, layered on top of CSS when the user has dark mode on (see app.py's light/dark
+# toggle). Every light rule above that sets a colour has a dark counterpart here; the meaning of each colour stays the
+# same (blue = reformatted, orange = repaired, red = rejected, ...), only darker tints with light text.
+DARK_CSS = """
+<style>
+.cmpw{border-color:#3a3f4b;background:#0e1117}
+table.cmp th,table.cmp td{border-bottom-color:#262a33;border-right-color:#1f232b;color:#e6edf3}
+table.cmp thead th{background:#1a1d24}
+table.cmp thead tr.g th{color:#a3acb9}
+table.cmp thead tr.h th{box-shadow:0 1px 0 #3a3f4b}
+table.cmp th.gsrc{background:#1f232b}
+table.cmp th.gout{background:#172a46;color:#93c5fd}
+table.cmp td.gap,table.cmp th.gap{background:#1a1d24;border-left-color:#3a3f4b;border-right-color:#3a3f4b}
+table.cmp .meta{background:#0e1117}
+table.cmp thead .meta{background:#1a1d24}
+table.cmp .sub,table.cmp td .was{color:#9aa4af}
+table.cmp td .was{text-decoration-color:#6b7280}
+table.cmp td .why{color:#ff9b9b}
+table.cmp th.unused,table.cmp td.unused{color:#6b7280;background:#13161c}
+.cmp-b.ok{background:#12321f;color:#7ee2a8}.cmp-b.bad{background:#3d1717;color:#ff9b9b}
+.cmp-b.dup{background:#262a33;color:#a3acb9}.cmp-b.empty{background:#1a1d24;color:#6b7280}
+tr.r-rejected td.o{background:#2a1515}
+table.cmp td.o.each{text-decoration-color:#60a5fa}
+tr.r-rejected td.n:not(.c-rej){color:#6b7280;background-image:repeating-linear-gradient(135deg,transparent 0 6px,
+  rgba(255,120,120,.08) 6px 12px)}
+tr.r-duplicate td{color:#7d8590}
+tr.r-empty td{color:#5c6370}
+td.c-fmt{background:#16304f}
+td.c-drv{background:#2a2147}
+td.c-def{background:#262a33}
+td.c-fix{background:#15331f}
+td.c-blk{background:#3a2f0b}
+td.c-rpr{background:#4a2a0f}
+td.c-rej{background:#4a1717;color:#ff9b9b}
+td .blank{color:#6b7280}
+.cmp-legend{color:#a3acb9}
+.cmp-legend i{border-color:#3a3f4b}
+</style>
+"""
+# Legend swatches per mode: (CSS class, light colour, dark colour, label). Keep in sync with CSS / DARK_CSS.
+_LEGEND = [("c-fmt", "#e8f1ff", "#16304f", "reformatted"),
+           ("c-drv", "#f2ecff", "#2a2147", "built from part of / several columns"),
+           ("c-def", "#f3f4f6", "#262a33", "default / fixed value"),
+           ("c-fix", "#e3f6e9", "#15331f", "fixed by approved Claude suggestion"),
+           ("c-rpr", "#ffe2c6", "#4a2a0f", "repaired from a likely typo — check it"),
+           ("c-blk", "#fff4d6", "#3a2f0b", "invalid → left blank"),
+           ("c-rej", "#fde1e1", "#4a1717", "invalid / missing → row rejected")]
+
+
+def legend_html(each_row: bool = False, dark: bool = False) -> str:
     """Return the colour legend shown above the table: one swatch + label per changed-cell status.
 
     Args:
         each_row: True when the mapping uses 'One row per phone number'; adds an explanation of the underlined
             source cell and of the "N +" row labels used for the extra rows.
+        dark: use the dark-mode swatch colours (matching ``DARK_CSS``).
 
-    The first tuple element (CSS class) is informational only; the swatch uses the inline colour, which must match
-    the corresponding ``td.c-*`` rule in ``CSS``. Labels are HTML-escaped.
+    The first tuple element of ``_LEGEND`` (CSS class) is informational only; the swatch uses the inline colour,
+    which must match the corresponding ``td.c-*`` rule in ``CSS`` / ``DARK_CSS``. Labels are HTML-escaped.
     """
-    items = [("c-fmt", "#e8f1ff", "reformatted"), ("c-drv", "#f2ecff", "built from part of / several columns"),
-             ("c-def", "#f3f4f6", "default / fixed value"), ("c-fix", "#e3f6e9", "fixed by approved Claude suggestion"),
-             ("c-rpr", "#ffe2c6", "repaired from a likely typo — check it"), ("c-blk", "#fff4d6", "invalid → left blank"), ("c-rej", "#fde1e1", "invalid / missing → row rejected")]
-    spans = "".join(f'<span><i style="background:{color}"></i>{html.escape(label)}</span>'
-                    for _, color, label in items)
+    spans = "".join(f'<span><i style="background:{dark_color if dark else light_color}"></i>{html.escape(label)}</span>'
+                    for _, light_color, dark_color, label in _LEGEND)
     if each_row:
         spans += ("<span><u><b>underlined</b></u> = the number that row was made from · <b>N +</b> = another row "
                   "from file row N (one row per different number)</span>")
@@ -327,7 +375,7 @@ def _e(value) -> str:
 
 def build_compare_html(source: pd.DataFrame, audit: pd.DataFrame, rows: list[int], schema: TargetSchema,
                        plan: ColumnPlan, file_label: str = "Original file", target_label: str = "Converted",
-                       show_was: bool = True) -> str:
+                       show_was: bool = True, dark: bool = False) -> str:
     """Render the side-by-side table for the given rows as one HTML string (CSS + legend + table).
 
     Args:
@@ -340,6 +388,7 @@ def build_compare_html(source: pd.DataFrame, audit: pd.DataFrame, rows: list[int
         file_label / target_label: texts of the two group headers.
         show_was: also show the original value (struck through) under converted cells whose value was changed
             (reformatted, Claude-fixed, repaired, or blanked) -- the "Show original under changed values" toggle.
+        dark: render with the dark-mode colours (``DARK_CSS``) when the user has dark mode on.
 
     Table structure (columns, left to right):
         Row (sticky; file row number, "N +" for extra rows from one file row) | Status (badge + bad-row reason) |
@@ -353,7 +402,8 @@ def build_compare_html(source: pd.DataFrame, audit: pd.DataFrame, rows: list[int
     """
     cols = plan.source_columns
     fields = schema.fields
-    parts = [CSS, legend_html(bool(plan.each_field)), '<div class="cmpw"><table class="cmp"><thead>']
+    parts = [CSS + (DARK_CSS if dark else ""), legend_html(bool(plan.each_field), dark),
+             '<div class="cmpw"><table class="cmp"><thead>']
     # Header row 1 (tr.g): group labels spanning the original and converted halves; the 2 meta columns are blank.
     parts.append(
         f'<tr class="g"><th class="meta" colspan="2"></th>'
