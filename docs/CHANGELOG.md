@@ -3,6 +3,27 @@
 What changed in each version. The running version is shown in the app's sidebar. Each version is tagged in git
 (`vX.Y.Z`).
 
+## 0.9.0 — no assumed area codes (compliance)
+
+Every feature that guesses or assumes data was reviewed and approved or removed one by one.
+
+**Removed** (a guessed area code sends texts to someone who never gave consent):
+- **Filling in a missing area code.** A 7-digit number is never given the file's most common area code; it stays a
+  bad row: `missing area code (only 7 digits)`.
+- **Changing an area code that looks like a typo.** `514-968-9696` in a file of 516 numbers is no longer imported
+  as 516-968-9696; it stays a bad row: `not a US number — Canada (area code 514, Quebec)`. The same applies to an
+  area code that isn't in use, such as 433.
+
+**Kept** (no digit is added or changed; every repair is marked orange for review):
+- Removing one extra digit (typed twice, or extra at the start or end), with the tie-break on a number found
+  elsewhere in the file.
+- Dropping a foreign country code typed in front of a US number (`+44 516 555 0100`).
+- Reading a misplaced `+` (`+5165550100`, `+1 +51 63 171059`) as a US number.
+- Reading letters typed for digits (`516-555-O1OO`).
+- Choosing a phone column from its values alone when 90%+ are phone numbers (shown for review before import).
+- Treating birthday/anniversary years in the last two years or in the future as "no year" (1600).
+- Treating a year shared by most of a birthday/anniversary column as "no year" (1600).
+
 ## Documentation update (after 0.8.2; no code changes, so the version stays 0.8.2)
 
 - Every source file now starts with an overview, and every function and class has a docstring. Comments explain
