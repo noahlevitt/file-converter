@@ -3,6 +3,24 @@
 What changed in each version. The running version is shown in the app's sidebar. Each version is tagged in git
 (`vX.Y.Z`).
 
+## 0.11.0 — several numbers in one cell
+
+- A cell holding several phone numbers now gives **one row per different number**, exactly like separate phone
+  columns: `516-555-0100 / 917-555-1234`, `H: 516-555-1212 C: 516-555-0100`, `5165550100, 9175551234`, one number
+  per line, `516 555 0100 917 555 1234`. Before, only one number per cell was imported (mobile first).
+- Numbers are only split where they are clearly separate. No digit is added, removed or moved: run-together digits
+  stay one (bad) value, and shorthand such as `516-555-0100/0101` imports just the full number.
+- Labels and extensions stay with their own number, whether written before (`C: 516…`) or after
+  (`516… (cell)`) it.
+- A number labelled fax is skipped when the customer has another number (a fax line can't receive texts); a fax
+  number that is a customer's only number is still imported.
+- An invalid second number in a cell (`516-555-0150 / 555-1212`) is skipped and listed in the summary; the row
+  imports with its valid number. Before, it disappeared without a note.
+- The mapping page says how many cells hold several numbers. *Side by side* underlines just the number each row
+  came from.
+- **Fix:** the bad-rows report could fail when the file already had a column with the phone field's name (e.g.
+  `phone_number`) and several phone columns; the report's extra column is now named `phone_number (this row)`.
+
 ## 0.10.0 — light and dark mode
 
 - A light/dark toggle at the top right of every page: a small square with a moon (switch to dark mode) or a sun
