@@ -55,7 +55,7 @@ Kinds of problem values (see :class:`RowIssue`)
   is left empty but the row still imports.
 * **skipped** - an invalid *extra* phone number (e.g. in a 3rd phone column) on a file row that has at least one
   valid number. It doesn't get its own row; it is only noted. The row itself still imports.
-* **repaired** - a value the normalizer fixed from a likely typo (e.g. a phone area code one digit off). It imports
+* **repaired** - a value the normalizer fixed from a likely typo (e.g. a phone digit typed twice). It imports
   with the repaired value but is flagged so a person can check it (Side by side -> Problems only).
 
 Audit table layout (``ConversionResult.audit``)
@@ -112,7 +112,7 @@ CELL_FORMAT = "fmt"     # reformatted (phone, date, case, ZIP…)
 CELL_DERIVED = "drv"    # built from part of / several columns (name part, address part, combine, split, translate)
 CELL_DEFAULT = "def"    # filled from a default or fixed value
 CELL_FIXED = "fix"      # user-approved AI fix
-CELL_REPAIRED = "rpr"   # repaired from a likely typo (e.g. phone area code one digit off) — worth a look
+CELL_REPAIRED = "rpr"   # repaired from a likely typo (e.g. a phone digit typed twice) — worth a look
 CELL_BLANKED = "blk"    # invalid optional value, left blank
 CELL_REJECT = "rej"     # invalid or missing required value → row rejected
 # Possible values of the audit's _status column. "empty" rows (every cell blank) are skipped, not rejected.
