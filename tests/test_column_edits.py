@@ -168,13 +168,16 @@ def test_column_to_several_fields_and_last_source_removed(real_schema):
     assert m3.get("transactions_last").transform == "none" and m3.targets_of("Last Visit") == ["in_sms_last"]
 
 
-def test_consent_cannot_be_picked(real_schema):
-    """Consent can't be chosen for any column: it is refused with an 'always blank' message.
+def test_consent_can_be_picked_by_a_person(real_schema):
+    """A person can send a column to consent (Goes to); it is recorded as their choice and survives normalizing.
 
-    Consent must come from the customer, never from a spreadsheet column, or people who never agreed get texts.
+    Consent is hand-mapped only: nothing automatic may fill it, but a reviewer who knows the column holds consent
+    can choose it for this file.
     """
-    m2, msgs = apply_column_edit(real_schema, Mapping(), "Occupation", targets=["consent"])
-    assert m2.targets_of("Occupation") == [] and "always blank" in msgs[0]
+    m2, msgs = apply_column_edit(real_schema, Mapping(), "SMS Opt In", targets=["consent"])
+    assert m2.targets_of("SMS Opt In") == ["consent"] and m2.get("consent").origin == "user"
+    assert msgs == ["consent now comes from 'SMS Opt In'."]
+    assert m2.normalized(real_schema, ["SMS Opt In"]).get("consent").sources == ["SMS Opt In"]
 
 
 def test_skip_and_unskip(real_schema):
