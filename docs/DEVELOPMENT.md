@@ -40,7 +40,7 @@ The suite needs no network and no API key. Claude is replaced by fake clients. T
 | `test_engine.py` | End-to-end conversion with the generic example schema |
 | `test_normalizers.py` | Normalizers in isolation |
 | `test_reader.py` | Encodings, delimiters, header detection, Excel files |
-| `test_headers.py` | Header row below titles/report lines, files without a header row, unsure cases, templates for headerless files |
+| `test_headers.py` | Header row below titles/report lines, files without a header row, unsure cases, no templates for headerless files, 1,000 generated files (no customer ever dropped) |
 | `test_column_edits.py` | Goes to / Skip edits, wrong-column warnings |
 | `test_mapping_ai_storage.py` | Auto-mapping, the Claude layer (faked), the grid editor, SQLite store, output |
 | `test_notes_checks.py` | Notes applied by Claude, rule checks, review payload, phone masking |
