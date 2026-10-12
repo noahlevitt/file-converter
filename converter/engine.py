@@ -16,7 +16,8 @@ reviewed mapping (``mapping.py``), and produces:
 The engine is schema-driven and knows nothing about specific business rules. Rules such as "US phone numbers only",
 "birthday/anniversary without a year is written with year 1600" or "activity timestamps are converted to the
 import's time zone" live in the schema YAML and in ``normalizers.py``. The one rule the engine enforces itself is
-``fixed_blank`` (e.g. consent): such a field is always written blank, whatever the file or the mapping says.
+``fixed_blank``: such a field is always written blank, whatever the file or the mapping says. (Consent and
+last_contacted are ``manual_only`` instead: ``Mapping.normalized`` keeps them only when a person mapped them.)
 
 It does no file I/O and has no side effects apart from calling the optional ``progress`` callback.
 
@@ -330,7 +331,7 @@ def convert(
     # Column-at-a-time: each field is fully converted before the next one, so the normalizer context (ctx) can be
     # built from the whole column first.
     for fi, f in enumerate(schema.fields):
-        if f.fixed_blank:  # e.g. consent: always blank, whatever the file or mapping says
+        if f.fixed_blank:  # always blank, whatever the file or mapping says
             out_cols[f.name] = [""] * n
             raw_cols[f.name] = [""] * n
             status_cols[f.name] = [""] * n
@@ -750,7 +751,7 @@ def preview_values(df: pd.DataFrame, schema: TargetSchema, mapping: Mapping, lim
     rows for the normalizers' column context to be meaningful), then for each schema field returns a display
     string keyed by field name:
 
-    * fixed-blank fields (consent): "(always blank)";
+    * fixed-blank fields: "(always blank)";
     * unmapped fields with no default: "" (nothing to show);
     * otherwise up to ``limit`` non-empty output values from the imported rows, joined with " | ", followed by a
       warning with the number of distinct unconvertible values in those rows and one example (truncated).
