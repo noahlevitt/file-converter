@@ -278,7 +278,7 @@ def apply_column_edit(schema: TargetSchema, mapping: Mapping, column: str, targe
     Returns (new mapping, messages describing what changed).
 
     ``skip=False`` un-skips the column; choosing a target for a skipped column also un-skips it. ``skip=True``
-    wins over ``targets``. Unknown field names are ignored, and fixed-blank fields (consent) refuse the column
+    wins over ``targets``. Unknown field names are ignored, and fixed-blank fields refuse the column
     with a message. A field that loses this column keeps its other columns where that still makes sense (see
     :func:`_without_column`).
 
