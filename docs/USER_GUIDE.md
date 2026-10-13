@@ -61,7 +61,7 @@ two tables.
 | Column | Meaning |
 |---|---|
 | Field | The import field. `*` = required (rows without it are bad rows). 🔒 = always blank. ✋ = only filled when you map a column to it yourself (consent, last_contacted). |
-| How | How the value is built: *Copy column*, *One row per phone number*, *Combine columns*, *Leave blank*, … |
+| How | How the value is built: *Copy column*, *One row per phone number*, *Phone + area code column*, *Combine columns*, *Leave blank*, … |
 | Source column(s) | Which column(s) of your file feed this field. Click to change. |
 | Option | Extra setting, e.g. date order `MDY` / `DMY` for dates (`auto` normally works). |
 | Sample output | What the first converted values look like. ⚠ means some values in the first rows can't be converted. |
@@ -72,7 +72,8 @@ two tables.
 
 - **Goes to:** the field(s) this column feeds.
   - Pick a different field to move the column there. That field takes this column as its only source, *except*
-    the phone field: adding a phone column gives each extra number its own row.
+    the phone field: adding a phone column gives each extra number its own row, and adding an *Area Code* column
+    gives the 7-digit numbers their area code.
   - Clear the cell to leave the column out.
 - **Skip:** tick to keep a column out completely. The rules, saved templates and Claude won't map it again, and
   the template remembers it for next time.
@@ -180,6 +181,24 @@ The numbers below it are:
 - **Re-run this import:** runs the same file and mapping again with the current rules, as a new import. The
   original stays as it was.
 
+## Looking up a number (Number history)
+
+**Number history** answers "where did this customer come from, and did they opt in?", also after the import's
+files have been deleted. Type a phone number in any format (`(516) 555-0177`, `516.555.0177`). The table lists
+every import the number was converted in, newest first:
+
+| Column | Meaning |
+|---|---|
+| Imported, #, File, Sheet, By | when the import finished, its number, the client's file (and sheet), who ran it |
+| Row | the row in the client's file, numbered as Excel shows it |
+| Number in file | the number as written in the file (with the area code in front when it came from an area code column) |
+| Consent sent | `true` (subscribed), `false` (opted out) or blank (no change) |
+| Consent in file / Consent from | the consent cell as written in the file, and the column (and translation) it came from; *not mapped* when nobody mapped consent |
+
+Select a row to open that import. **Download (CSV)** saves the table with exact times (UTC), e.g. to answer a
+complaint. Numbers are recorded since version 0.21.0; earlier imports are included when their files still existed
+at the update. Rows that weren't imported (bad rows, duplicates) aren't recorded.
+
 ## How values are converted
 
 ### Phone numbers
@@ -217,10 +236,15 @@ The numbers below it are:
 - **Fax columns** (*Fax*, *Fax Number*, *Business Fax*, *Phone/Fax*) are not imported; the mapping page names them.
   If one actually holds phone numbers, set its **Goes to** to `phone_number` (needed for each file: templates don't
   keep a fax column).
+- **Area code in its own column** (*Area Code* `516`, *Phone* `555-0177`): combined automatically, and *How*
+  shows *Phone + area code column*. Each 7-digit number gets the area code from its own row; a number that
+  already has an area code keeps it. A row whose area code cell is empty is treated like any 7-digit number (the
+  file's main area code, or a bad row). If the column has another name and isn't found, choose *Phone + area code
+  column* under **How** for the phone field and pick both columns (in any order).
 - **ID columns** (*Account Number*, *Order #*, *Card Number*, *Customer Number*, *Loyalty ID*) are not taken for
   the phone column because of their name. One is only used when nearly all of its values are phone numbers. If
-  the file's real phone column can't be used (e.g. 7-digit numbers), the phone field stays empty: map it yourself
-  or ask the client for full numbers.
+  the file's real phone column can't be used (e.g. 7-digit numbers with no area code column), the phone field
+  stays empty: map it yourself or ask the client for full numbers.
 
 ### Dates and times
 
@@ -263,7 +287,8 @@ not Claude, not a default and not a saved template (templates leave them out, so
 
 - **consent:** only map a column that really records the customer's consent. Values become `true` (subscribes the
   customer) or `false` (opts them out); Y/N, yes/no, 1/0, opted in/out and subscribed/unsubscribed are understood.
-  Anything else is left blank, which changes nobody's consent.
+  Anything else is left blank, which changes nobody's consent. What was sent for each number, and from which
+  column and row, can be looked up later under **Number history**.
 - **last_contacted:** when *we* last texted the customer (e.g. *Last Campaign Sent*). Files almost never have it.
 
 ## Templates, target format, users
@@ -276,7 +301,8 @@ not Claude, not a default and not a saved template (templates leave them out, so
   - a similar layout (75%+ of the same columns) starts from that template's rules, and a phone column that is new
     since the template was saved (e.g. *Mobile*) is added to the phone field. A phone column the template's file
     already had and the template leaves out stays out.
-- **Target format:** a read-only description of every field of the import format and its rules.
+- **Target format:** a read-only description of every field of the import format and its rules, how long the
+  files are kept and how long the number history is kept.
 - **Users** (administrators only, and only while logins are on): add users, reset passwords, make or remove
   administrators, delete users.
 
@@ -301,6 +327,9 @@ missing").
 
 **A birthday shows `1600`.** That's intended: it means "month and day known, year unknown". The target system
 expects this.
+
+**A customer says they never opted in.** Look the number up under **Number history**: it shows which file and row
+the number came from, what the consent cell said and which column it was taken from.
 
 **A phone is orange.** It was repaired from a likely typo. Check the original underneath. If the repair is wrong,
 fix the number in the original file and re-run.
