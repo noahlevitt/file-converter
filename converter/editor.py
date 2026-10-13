@@ -180,7 +180,8 @@ def apply_row_edit(schema: TargetSchema, mapping: Mapping, field_name: str, chan
           phone number" (and that one is refused for other fields) - the edit is corrected, with a message.
         * Sensible automatic transform: choosing sources without a How gives "Copy column" (one column) or the
           multi-column default (phone: one row per number; other fields: first non-empty); a multi-column
-          transform left with one column becomes a copy, and clearing all sources unmaps the field.
+          transform left with one column becomes a copy (not when that How was just chosen: the row then waits
+          for its second column), and clearing all sources unmaps the field.
         * Option: parsed with :func:`parse_option`; on a parse error the old params stay and the error is
           returned. Name/address parts get their default part when none is set yet.
         * The field is marked as set by the reviewer, and any chosen column that was skipped is un-skipped.
@@ -192,7 +193,8 @@ def apply_row_edit(schema: TargetSchema, mapping: Mapping, field_name: str, chan
     f = schema.field(field_name)
     if f.fixed_blank:
         return mapping, "always blank — the target format keeps this column empty"
-    fm = mapping.get(field_name).model_copy(deep=True)
+    before = mapping.get(field_name)
+    fm = before.model_copy(deep=True)
     error = None
 
     if col_sources in changes:
@@ -216,7 +218,10 @@ def apply_row_edit(schema: TargetSchema, mapping: Mapping, field_name: str, chan
         fm.transform = "copy" if len(fm.sources) == 1 else several
     elif fm.transform == "copy" and len(fm.sources) > 1:
         fm.transform = several
-    elif fm.transform in ("coalesce", "concat", "each_row", "area_code") and len(fm.sources) == 1:
+    elif (fm.transform in ("coalesce", "concat", "each_row", "area_code") and len(fm.sources) == 1
+          and col_sources in changes and col_how not in changes and len(before.sources) > 1):
+        # A column was removed from a multi-column transform. (A multi-column How chosen while one column is
+        # picked stays, so the second column can be added; the Check column says one is missing.)
         fm.transform = "copy"
     elif fm.transform not in ("none", "constant") and not fm.sources and col_sources in changes:
         # The reviewer removed every source column -> not mapped. (Choosing a How before any column is left
@@ -250,7 +255,8 @@ def _without_column(fm: FieldMapping, column: str) -> FieldMapping:
     * No column left -> not mapped.
     * A multi-column transform (first non-empty / combine / one row per number / phone + area code column) left
       with one column -> copy; params are kept only when the transform stays the same (they belong to that
-      transform). 'Phone + area code column' left with only its area code column -> not mapped.
+      transform). 'Phone + area code column' left with only its area code column -> not mapped; without its last
+      area code column -> one row per phone number (or copy).
     * Anything ``check_transform`` rejects afterwards (e.g. a combine that needs 2+ columns) -> not mapped.
 
     The result is always marked as the reviewer's choice. Example: each_row of ["Phone", "Phone 2"] without
@@ -262,6 +268,8 @@ def _without_column(fm: FieldMapping, column: str) -> FieldMapping:
     transform = fm.transform
     if transform == "area_code" and all(is_area_code_header(s) for s in sources):
         return FieldMapping(origin="user", reason="set by reviewer")  # an area code alone is no phone number
+    if transform == "area_code" and is_area_code_header(column) and not any(map(is_area_code_header, sources)):
+        transform = "each_row"  # its area code column is gone: the phone columns are read as they are
     if transform in ("coalesce", "concat", "each_row", "area_code") and len(sources) == 1:
         transform = "copy"
     params = fm.params if transform == fm.transform else {}
@@ -342,7 +350,7 @@ def apply_column_edit(schema: TargetSchema, mapping: Mapping, column: str, targe
                 fields[name] = FieldMapping(sources=[*before.sources, column], origin="user", reason="set by reviewer",
                                             transform="area_code" if area else "each_row",
                                             params=dict(before.params) if area else {})
-                if is_area_code_header(column) and before.transform != "area_code":
+                if is_area_code_header(column):
                     messages.append(f"{f.header} now also uses '{column}' — 7-digit numbers get their area code "
                                     f"from it ({', '.join(fields[name].sources)}).")
                 else:
