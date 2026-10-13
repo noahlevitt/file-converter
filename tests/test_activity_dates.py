@@ -141,3 +141,18 @@ def test_last_contacted_only_by_hand(real_schema):
     assert m2.get("last_contacted").origin == "user"
     assert convert(df, real_schema, m2).output["last_contacted"].iloc[0] == "10/01/2026 03:15 PM"
     assert m2.without_manual(real_schema).get("last_contacted").transform == "none"  # what a template keeps
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("01/01/1900", "01/01/1900 12:00 AM"),
+    ("01/01/1970 00:00:00", "01/01/1970 12:00 AM"),  # a common "empty" timestamp - still imported as written
+    ("01/01/2099", "01/01/2099 12:00 AM"),           # future
+])
+def test_activity_dates_are_imported_as_written(real_schema, value, expected):
+    """Only birthday and anniversary use a placeholder year (1600). Activity dates are imported as they are, even
+    when they look like a placeholder or lie in the future (decided: no blanking, no substitute date)."""
+    df = pd.DataFrame({"Phone": PHONES[:1], "Last Visit": [value]})
+    m = Mapping(fields={"phone_number": FieldMapping(sources=["Phone"], transform="copy"),
+                        "transactions_last": FieldMapping(sources=["Last Visit"], transform="copy")})
+    res = convert(df, real_schema, m)
+    assert res.output["transactions_last"].tolist() == [expected] and res.blanked_values == 0
