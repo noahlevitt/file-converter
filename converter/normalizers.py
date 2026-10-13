@@ -54,9 +54,9 @@ Phone rules (real target: 10 US digits, "(516) 555-0100" → "5165550100"), in t
   7. Only the field's `countries` are accepted (US plus territories in the real schema). A valid number from
      another country is rejected with where it's from: "not a US number — Canada (area code 514, Quebec)".
   8. Typo repair (_repair_phone, US region only) when exactly one US number fits: a foreign country code in
-     front of a US number, or one digit too many. No digit is ever added or changed: area codes are never
-     "corrected" or filled in (removed in 0.9.0 for compliance). Every repair is recorded in ctx["repairs"] so it
-     can be checked.
+     front of a US number, one digit too many, an area code that doesn't exist one keystroke from an area code the
+     file uses, or a missing area code when 80%+ of the file shares one (the last two restored in 0.20.0). A real
+     area code is never changed. Every repair is recorded in ctx["repairs"] so it can be checked.
   9. Anything else is rejected with the most specific reason found (too few/many digits, area code not in
      use, exchange not in use, ...).
 
@@ -539,10 +539,11 @@ def normalize_phone(value: str, field: FieldSpec, params: dict, ctx: dict) -> tu
     marks those cells as repaired so a person can check them. A failed repair adds its reason to the error.
     Examples:
         "51655501444"       → ("5165550144", None), repairs note "one digit too many (a digit typed twice)"
-        "5149689696"        → ("", "not a US number — Canada (area code 514, Quebec)")   area codes are never
-                                                                                         changed or assumed
-        "+1 (433) 309-8420" → ("", "not a real US number (area code 433 isn't in use)")
-    The repair evidence (phone_local, phone_known) comes from prepare_phone through ctx.
+        "5149689696"        → ("", "not a US number — Canada (area code 514, Quebec)")   a real area code is
+                                                                                         never changed
+        "(156) 555-0199"    → ("5165550199", None) in a file of 516 numbers: 156 doesn't exist (see _repair_phone)
+        "555-0177"          → ("5165550177", None) when 80%+ of the file's numbers are 516
+    The repair evidence (phone_local, phone_dominant, phone_known) comes from prepare_phone through ctx.
     """
     region = _phone_region(field, params)
     countries = tuple(c.upper() for c in field.countries)
@@ -558,7 +559,8 @@ def normalize_phone(value: str, field: FieldSpec, params: dict, ctx: dict) -> tu
         return out, err
     # Only US numbers are expected, so a number that fails is most likely a typo: try to repair it.
     local = ctx.get("phone_local", ())
-    fixed, note = _repair_phone(value, countries, fmt, local, ctx.get("phone_known", frozenset()))
+    fixed, note = _repair_phone(value, countries, fmt, local, ctx.get("phone_known", frozenset()),
+                                ctx.get("phone_dominant"))
     if fixed:
         ctx.setdefault("repairs", {})[value] = note
         return fixed, None
@@ -568,17 +570,19 @@ def normalize_phone(value: str, field: FieldSpec, params: dict, ctx: dict) -> tu
 def prepare_phone(field: FieldSpec, values: list[str]) -> dict:
     """Evidence from this file's valid numbers, used by the phone repairs that are allowed (see _repair_phone).
 
-    phone_local: area codes used by at least 5% of the valid numbers (and at least twice). Only used to decide
-        whether "+44 516 555 0100"-style values may be read as US numbers; area codes themselves are never changed
-        or filled in (removed for compliance in 0.9.0: a guessed area code texts a stranger).
-    phone_known: every valid 10-digit number in the column (breaks ties when an extra digit has several possible
+    phone_local: area codes used by at least 5% of the valid numbers (and at least twice): whether
+        "+44 516 555 0100"-style values may be read as US numbers, and which area code an area code that doesn't
+        exist was probably meant to be (156 in a 516 file).
+    phone_dominant: the one area code used by 80%+ of the valid numbers (and at least 5 of them), or None. A 7-digit
+        number gets it (restored in 0.20.0; removed in 0.9.0).
+    phone_known: every valid 10-digit number in the column (breaks ties when a repair has several possible
         fixes).
 
     Called by prepare() once per phone column with the column's cleaned values from non-empty rows (empty strings
     are skipped). Example: a Long Island file with 5 × 516, 2 × 631 and 1 × 917 numbers → phone_local
-    ("516", "631"). Only a quick digit check is used (no full parsing), so cells holding several numbers don't
-    count as evidence. Example call result:
-        {"phone_local": ("516", "631"), "phone_known": frozenset({"5165550100", ...})}
+    ("516", "631") and phone_dominant None (516 is only 62%). Only a quick digit check is used (no full parsing), so
+    cells holding several numbers don't count as evidence. Example call result:
+        {"phone_local": ("516", "631"), "phone_dominant": None, "phone_known": frozenset({"5165550100", ...})}
     """
     counts: dict[str, int] = {}
     known: set[str] = set()
@@ -593,9 +597,10 @@ def prepare_phone(field: FieldSpec, values: list[str]) -> dict:
         counts[d[:3]] = counts.get(d[:3], 0) + 1
         known.add(d)
         total += 1
-    # Most-used first (only membership matters today; the order keeps results stable and readable).
+    # Most-used first, so the commonest area code is tried first and messages list it first.
     local = tuple(sorted((c for c, n in counts.items() if n >= 2 and n >= 0.05 * total), key=lambda c: -counts[c]))
-    return {"phone_local": local, "phone_known": frozenset(known)}
+    dominant = next((c for c, n in counts.items() if n >= 5 and n >= 0.8 * total), None)
+    return {"phone_local": local, "phone_dominant": dominant, "phone_known": frozenset(known)}
 
 
 # Cached (100,000 entries): typo repair calls this for every candidate fix of every failing value, and
@@ -620,32 +625,45 @@ def _fmt_us(d10: str) -> str:
     return f"({d10[:3]}) {d10[3:6]}-{d10[6:]}"
 
 
+def _one_digit_off(a: str, b: str) -> bool:
+    """Whether two area codes differ by one digit or by two neighbouring digits swapped.
+
+    ("156", "516") → True (swap), ("517", "516") → True (one digit), ("212", "516") → False. Same length only.
+    """
+    diff = [i for i in range(len(a)) if a[i] != b[i]]
+    return len(diff) == 1 or (len(diff) == 2 and diff[1] == diff[0] + 1 and a[diff[0]] == b[diff[1]]
+                              and a[diff[1]] == b[diff[0]])
+
+
 def _repair_phone(value: str, countries: tuple[str, ...], fmt: str, local: tuple[str, ...],
-                  known: frozenset = frozenset()) -> tuple[str, str]:
+                  known: frozenset = frozenset(), dominant: str | None = None) -> tuple[str, str]:
     """Best-effort repair of a number that isn't a valid US number. Returns (formatted, note) or ("", why not).
 
     Repairs are only made when exactly one US number fits; each one is reported so a person can check it.
-    Approved repairs (each decided one by one by the business; see docs/CHANGELOG.md, 0.9.0):
+    Approved repairs (each decided one by one by the business; see docs/CHANGELOG.md, 0.9.0 and 0.20.0):
     1. A country code (other than +1) in front of a valid US number: +44 516 555 0100 → 516-555-0100. Not done
        when the value is a real number of that country and the US area code isn't one this file uses.
     2. One digit too many: a digit typed twice, an extra digit at the end or at the start.
+    3. An area code that doesn't exist anywhere in North America (_area_code_in_use: 156, 433) and is one digit
+       off, or two neighbouring digits swapped, from an area code this file uses (`local`): 156 → 516. A real
+       area code is never changed (514 is Quebec, even in a file of 516 numbers).
+    4. 7 digits (no area code) when one area code makes up 80%+ of the file (`dominant`): 555-0177 → 516-555-0177.
     When several numbers fit, the one that already appears elsewhere in the file wins; otherwise nothing is guessed.
+    Rules 3 and 4 were removed in 0.9.0 and restored in 0.20.0 (rule 3 only for area codes that don't exist).
 
-    Deliberately NOT done (removed in 0.9.0 as a compliance risk): changing an area code that looks like a typo
-    (514 in a file of 516 numbers) and filling in a missing area code (7-digit numbers). Both would invent the
-    digits that decide whose phone receives the texts; such numbers stay bad rows with their reason.
-
-    Rule 2 only runs when rule 1 found nothing. Why repair at all: the import is US-only, so a number that fails is
-    far more often a typo than a real foreign number. Why so careful: a wrong guess would text a stranger, hence
-    "exactly one fit", no new digits, and a note on every repair.
-    `local` and `known` are prepare_phone's phone_local and phone_known.
+    Each rule only runs when the ones before it found nothing. Why repair at all: the import is US-only, so a
+    number that fails is far more often a typo than a real foreign number. Why so careful: a wrong guess would text
+    a stranger, hence "exactly one fit", area codes only from the file itself, and a note on every repair.
+    `local`, `known` and `dominant` are prepare_phone's phone_local, phone_known and phone_dominant.
     Examples in a file of 516/631 numbers (fmt "digits10"):
         "+44 516 555 0188" → ("5165550188", "removed country code +44 in front of a US number")
         "51655501444"      → ("5165550144", "one digit too many (a digit typed twice); the same number appears
                               elsewhere in this file")             when 516-555-0144 is in the file
-        "5149689696"       → ("", "")                               area code is not changed
-    Failures return ("", reason): "could be (516) 946-1961 or (516) 946-1966, so it wasn't guessed", or "" when no
-    rule applied (the caller then reports the parser's own reason).
+        "5149689696"       → ("", "")                               514 exists (Quebec): not changed
+        "(156) 555-0199"   → ("5165550199", "area code 156 doesn't exist; read as 516, which this file uses")
+    Failures return ("", reason): "could be (516) 946-1961 or (516) 946-1966, so it wasn't guessed", "not a likely
+    typo of this file's area codes (516, 631)" for an area code that doesn't exist, or "" when no rule applied (the
+    caller then reports the parser's own reason).
     """
     body = _EXT_RE.sub("", _prep_phone(value))
     digits = re.sub(r"\D", "", body)
@@ -686,6 +704,18 @@ def _repair_phone(value: str, countries: tuple[str, ...], fmt: str, local: tuple
                     why = ("a digit typed twice" if doubled else "an extra digit at the end" if i == 10
                            else "an extra digit at the start")
                     add(seq[:i] + seq[i + 1:], f"one digit too many ({why})")
+    # 3. An area code that doesn't exist, one keystroke from an area code this file uses. Only the file's own area
+    # codes are tried (against every area code, almost any typo would "match" one), and a real area code is never
+    # changed: it may be a real number elsewhere.
+    fake = [seq for seq in seqs if len(seq) == 10 and not _area_code_in_use(seq[:3])]
+    if not found and local:
+        for seq in fake:
+            for code in local:
+                if _one_digit_off(seq[:3], code):
+                    add(code + seq[3:], f"area code {seq[:3]} doesn't exist; read as {code}, which this file uses")
+    # 4. Missing area code: only when one area code covers 80%+ of the file; with a mix there is no safe guess.
+    if not found and dominant and len(digits) == 7:
+        add(dominant + digits, f"no area code; used {dominant}, the area code of most numbers in this file")
     # Several fits: prefer the single one that already appears elsewhere in the file (likely the same person).
     if len(found) > 1:
         seen = [d for d in found if d in known]
@@ -697,6 +727,8 @@ def _repair_phone(value: str, countries: tuple[str, ...], fmt: str, local: tuple
     if len(found) > 1:
         options = " or ".join(_fmt_us(d) for d in list(found)[:3])
         return "", f"could be {options}, so it wasn't guessed"
+    if fake and local:
+        return "", f"not a likely typo of this file's area codes ({', '.join(local[:4])})"
     return "", ""
 
 
