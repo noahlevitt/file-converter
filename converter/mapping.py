@@ -69,6 +69,7 @@ def phone_rule(field_type: str, transform: str) -> str:
     * phone field + "coalesce" (First non-empty) -> "each_row": taking only the first number would silently drop
       the others, and every number of a contact should be imported.
     * any other field + "each_row" -> "coalesce": expanding rows is only defined for the phone field.
+    * any other field + "area_code" (Phone + area code column) -> "concat".
     * everything else is returned unchanged.
 
     Examples: ``phone_rule("phone", "coalesce") -> "each_row"``, ``phone_rule("date", "each_row") ->
@@ -78,6 +79,8 @@ def phone_rule(field_type: str, transform: str) -> str:
         return "each_row"
     if field_type != "phone" and transform == "each_row":
         return "coalesce"
+    if field_type != "phone" and transform == "area_code":
+        return "concat"
     return transform
 
 
@@ -145,6 +148,8 @@ class FieldMapping(BaseModel):
             return "first non-empty of " + ", ".join(self.sources)
         elif self.transform == "each_row":
             return "one row per value in " + ", ".join(self.sources)
+        elif self.transform == "area_code":
+            return "Phone + area code column: " + ", ".join(self.sources)
         # A plain copy shows just the column; other transforms are prefixed with their UI label.
         label = "" if self.transform == "copy" else f"{info.label if info else self.transform}: "
         return f"{label}{src}{extra}"
@@ -206,8 +211,9 @@ class Mapping(BaseModel):
         3. An unknown transform becomes "none"; "none" and "constant" never keep sources.
         4. :func:`phone_rule`: "First non-empty" on a phone field becomes "One row per phone number", and
            "One row per phone number" on any other field becomes "First non-empty".
-        5. A multi-column transform (coalesce / concat / each_row) left with one source becomes a plain copy
-           (e.g. a template for "Phone" + "Phone 2" used on a file that only has "Phone").
+        5. A multi-column transform (coalesce / concat / each_row / area_code) left with one source becomes a plain
+           copy (e.g. a template for "Phone" + "Phone 2" used on a file that only has "Phone"); 'Phone + area code
+           column' left with only its area code column (:func:`is_area_code_header`) is not mapped.
         6. A transform that needs sources but has none left, or that :func:`~converter.transforms.check_transform`
            rejects (wrong number of columns, bad part name, ...), resets the field to "not mapped".
         7. Params are reduced to those the transform reads (:meth:`FieldMapping.clean_params`).
@@ -251,7 +257,9 @@ class Mapping(BaseModel):
             if fm.transform in ("none", "constant"):
                 fm.sources = []
             fm.transform = phone_rule(f.type, fm.transform)
-            if fm.transform in ("coalesce", "concat", "each_row") and len(fm.sources) == 1:
+            if fm.transform == "area_code" and fm.sources and all(is_area_code_header(c) for c in fm.sources):
+                fm = FieldMapping()  # only the area code column is left: no numbers to give it to
+            if fm.transform in ("coalesce", "concat", "each_row", "area_code") and len(fm.sources) == 1:
                 fm.transform = "copy"
             if fm.transform not in ("none", "constant") and not fm.sources:
                 fm = FieldMapping()  # its source column isn't in this file
@@ -302,16 +310,17 @@ class Mapping(BaseModel):
         """The field whose numbers each get their own output row, or None when no field does.
 
         That is the field using 'One row per phone number' (several phone columns), otherwise the first phone field
-        copied from a single column: one cell can hold several numbers too ("516-555-0100 / 917-555-1234"), and each
-        different number gets its own row either way. Phone fields built any other way (combined columns, a fixed
-        value) never expand rows.
+        copied from a single column or using 'Phone + area code column': one cell can hold several numbers too
+        ("516-555-0100 / 917-555-1234"), and each different number gets its own row either way. Phone fields built
+        any other way (combined columns, a fixed value) never expand rows.
 
         Used by the engine (which rows to expand), the side-by-side view (which cells to underline) and the mapping
         page (the "one row per number" note). Call it on a normalized mapping, as those callers do.
         """
         fields = schema.mappable_fields
         return (next((f for f in fields if self.get(f.name).transform == "each_row"), None)
-                or next((f for f in fields if f.type == "phone" and self.get(f.name).transform == "copy"), None))
+                or next((f for f in fields
+                         if f.type == "phone" and self.get(f.name).transform in ("copy", "area_code")), None))
 
 
 # ---------------------------------------------------------------------------
@@ -346,6 +355,33 @@ def is_fax_column(column: str) -> bool:
     """
     text = re.sub(r"([a-z])([A-Z])", r"\1 \2", column)  # camelCase → camel Case
     return any(w.lower() in FAX_WORDS for w in re.findall(r"[A-Za-z]+", text))
+
+
+def is_area_code_header(column: str) -> bool:
+    """True when the header names an area code column: "Area Code", "AreaCode", "Phone Area Code", "area_cd",
+    "Area", "NPA"; not "Delivery Area" or "Areas Served". Callers that map automatically also check the values."""
+    h = norm_header(column)
+    return h in ("npa", "area") or h.startswith("areac") or "areacode" in h or (
+        "area" in re.sub(r"([a-z])([A-Z])", r"\1 \2", column).lower().split() and h.endswith(("code", "cd")))
+
+
+def area_code_source(sources: list[str], records: list[dict[str, str]]) -> int:
+    """Position of the area code column among the sources of a 'Phone + area code column' mapping.
+
+    The column named like one (:func:`is_area_code_header`: "Area Code", "NPA"); when none or several are, the one
+    whose filled cells (in the first 5,000 rows) are most often an area code ("516", "(516)"). Picked once for the
+    whole file, so an odd cell in that column ("N/A", "000") is never taken for a phone number.
+    Example: ["Phone", "Area Code"] -> 1.
+    """
+    named = [i for i, c in enumerate(sources) if is_area_code_header(c)]
+    if len(named) == 1:
+        return named[0]
+
+    def share(i: int) -> float:
+        filled = [v for v in (N.clean_text(r.get(sources[i], "")) for r in records[:5000]) if v]
+        return sum(bool(N.area_code_cell(v)) for v in filled) / len(filled) if filled else 0.0
+
+    return max(named or range(len(sources)), key=share)
 
 
 def norm_header(h: str) -> str:
