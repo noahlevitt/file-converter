@@ -124,6 +124,8 @@ CALL_LOG_WORDS = {"call", "calls", "caller", "callerid", "dialed", "dialled", "d
 # The words a call-length header is made of: "Duration", "Call Duration", "Talk Time (sec)", "Duration Mins".
 _DURATION_HEADER_WORDS = {"duration", "call", "talk", "ring", "time", "length", "total", "sec", "secs", "seconds",
                           "s", "min", "mins", "minutes", "hh", "mm", "ss", "in"}
+# A date's time that is just midnight at the end of the value: "2026-03-15 00:00:00", "… 00:00", "…T00:00:00.000".
+_MIDNIGHT_RE = re.compile(r"[ t]00:00(?::00(?:\.0+)?)?$", re.I)
 # A time of day on its own ("3:15 PM", "15:15:00"): a separate Time column next to a Date column.
 _TIME_ONLY_RE = re.compile(r"^\s*\d{1,2}:\d{2}(:\d{2})?\s*([ap]\.?m\.?)?\s*$", re.I)
 
@@ -735,8 +737,12 @@ def _named_time_partner(date_col: ColumnProfile, profiles: list[ColumnProfile], 
 
 
 def _has_times(p: ColumnProfile) -> bool:
-    """Whether a date column's sample values include a time of day ("10/01/2026 3:15 PM", ISO "…T15:15:00")."""
-    return any(":" in v for v in p.samples)
+    """Whether a date column's sample values include a time of day ("10/01/2026 3:15 PM", ISO "…T15:15:00").
+
+    Midnight alone doesn't count: a spreadsheet date cell reads as "2026-03-15 00:00:00" (the date parser drops that
+    midnight when a time from a Time column follows it).
+    """
+    return any(":" in v and not _MIDNIGHT_RE.search(v) for v in p.samples)
 
 
 def _map_generic_dates(schema: TargetSchema, profiles: list[ColumnProfile], fields: dict[str, FieldMapping],
