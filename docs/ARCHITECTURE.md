@@ -166,6 +166,7 @@ changes (`Store.purge_drafts`).
 | Duplicates only when every column matches | schema `dedupe: keys: ["*"]`; `engine.convert` |
 | Bad rows not imported, counted with reasons | `engine.convert` (`RowIssue.rejected`), `output.write_rejects`, summary |
 | No live spreadsheet formulas in downloads (client values starting with `=`, `+`, `-`, `@` get an apostrophe) | `output.neutralise_formula`, `write_rejects`; `app.rejects_download` for files from older versions |
+| Excel error values (`#REF!`, `#VALUE!`…) reported as such for every field type; own mistake-check finding; skipped by *Suggest fixes* | `normalizers.sheet_error`, `normalize`; `checks.run_checks`; `app._repair_section` |
 | Activity dates imported as written (no placeholder dates outside birthday/anniversary) | `normalizers.normalize_date` (`no_year_value` only on birthday/anniversary) |
 | A browser refresh keeps the mapping in progress | `app.save_draft` / `restore_draft`, `Store` drafts |
 | Skipped columns stay out everywhere | `Mapping.excluded_columns`; `normalized`, `services.merge`, `ai._without_skipped` |
