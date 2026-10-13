@@ -37,6 +37,11 @@ DATA_DIR/imports/<id>/ and are deleted after FILE_RETENTION_DAYS; the import rec
 The ``files_json`` column maps a file *kind* ("output", "rejects", "summary", "audit", ...) to its file name in
 that folder; ``files_purged`` records that the folder has been deleted so the UI can say so.
 
+A file still being mapped on New import is a *draft* (since 0.15.0): DATA_DIR/drafts/<random id>/ holds the upload
+and the page's last saved state, so a browser refresh can restore the work (``create_draft``, ``save_draft_state``,
+``load_draft``). Drafts are deleted on "Start import", "Start over" or a different upload, and after 24 hours
+without changes (``purge_drafts``). They are files only; there is no database table for them.
+
 Concurrency
 -----------
 SQLite in WAL mode comfortably handles an internal tool with 5–20 concurrent users. Every method opens its own
@@ -55,8 +60,11 @@ table, so adding a column to a deployed database needs an explicit ``ALTER TABLE
 from __future__ import annotations
 
 import json
+import re
+import secrets
 import shutil
 import sqlite3
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -303,6 +311,33 @@ class ImportRecord:
             return None
         el = self.elapsed(now).total_seconds()
         return timedelta(seconds=el / self.progress * (1 - self.progress))
+
+
+@dataclass
+class Draft:
+    """A file being mapped on New import, kept on disk so a browser refresh doesn't lose the work (since 0.15.0).
+
+    Attributes:
+        id: random token, also in the page's URL (?draft=<id>); only that browser tab knows it.
+        username: who uploaded the file; a draft is only restored for the same user.
+        filename: the uploaded file's name.
+        data: the uploaded bytes.
+        state: what the app saved last (how the file was read, the mapping, time zone, template name...); ``{}``
+            until the first save.
+    """
+
+    id: str
+    username: str
+    filename: str
+    data: bytes
+    state: dict[str, Any]
+
+
+# Drafts nobody changed for this long are deleted (they hold a client's file, like an import's stored files).
+DRAFT_MAX_AGE_HOURS = 24
+# Regex: a draft id as made by secrets.token_urlsafe(18) (24 URL-safe characters). Anything else is refused before
+# it gets near a path, so an edited URL can't point outside the drafts folder.
+_DRAFT_ID_RE = re.compile(r"[A-Za-z0-9_-]{20,64}")
 
 
 @dataclass
@@ -839,6 +874,90 @@ class Store:
                 "error='The server restarted while this import was waiting or running. Use Re-run to start it again.' "
                 "WHERE status IN ('queued','running')", (_now(),))
             return cur.rowcount
+
+    # ---------------------------------------------------------------- drafts (New import, before "Start import")
+    @property
+    def drafts_root(self) -> Path:
+        """Folder with one sub-folder per draft: DATA_DIR/drafts/<draft id>/ (file, meta.json, state.json)."""
+        return self.db_path.parent / "drafts"
+
+    def _draft_dir(self, draft_id: str | None) -> Path | None:
+        """The folder of a draft id, or None for anything that isn't a well-formed id (see _DRAFT_ID_RE)."""
+        if not draft_id or not _DRAFT_ID_RE.fullmatch(draft_id):
+            return None
+        return self.drafts_root / draft_id
+
+    def create_draft(self, username: str, filename: str, data: bytes) -> str:
+        """Keep an uploaded file as a new draft and return its id (a random, unguessable token).
+
+        Side effects: writes DATA_DIR/drafts/<id>/file and meta.json, and deletes drafts nobody changed for
+        DRAFT_MAX_AGE_HOURS (purge_drafts), so abandoned uploads don't pile up.
+        """
+        self.purge_drafts()
+        draft_id = secrets.token_urlsafe(18)
+        d = self.drafts_root / draft_id
+        d.mkdir(parents=True)
+        (d / "file").write_bytes(data)
+        (d / "meta.json").write_text(json.dumps({"username": username, "filename": filename,
+                                                 "created_at": _now()}), encoding="utf-8")
+        return draft_id
+
+    def save_draft_state(self, draft_id: str, state: dict[str, Any]) -> bool:
+        """Store the app's state for a draft (replacing the previous one). Returns False if the draft is gone.
+
+        Written to a temporary file and renamed, so a reader never sees half a file. Each save also marks the
+        draft as recently used (the purge goes by the time of the last change).
+        """
+        d = self._draft_dir(draft_id)
+        if d is None or not (d / "file").exists():
+            return False
+        tmp = d / "state.json.tmp"
+        tmp.write_text(json.dumps(state), encoding="utf-8")
+        tmp.replace(d / "state.json")
+        return True
+
+    def load_draft(self, draft_id: str | None, username: str) -> Draft | None:
+        """The draft with this id if it exists, belongs to `username` and isn't expired; otherwise None."""
+        d = self._draft_dir(draft_id)
+        try:
+            if d is None or self._draft_expired(d):
+                return None
+            meta = json.loads((d / "meta.json").read_text(encoding="utf-8"))
+            if meta.get("username") != username:
+                return None
+            state_p = d / "state.json"
+            state = json.loads(state_p.read_text(encoding="utf-8")) if state_p.exists() else {}
+            return Draft(id=draft_id, username=meta["username"], filename=meta["filename"],
+                         data=(d / "file").read_bytes(), state=state)
+        except (OSError, ValueError, KeyError):
+            return None
+
+    def delete_draft(self, draft_id: str | None) -> None:
+        """Delete a draft's folder (after "Start import", "Start over" or a different upload). Unknown ids: no-op."""
+        d = self._draft_dir(draft_id)
+        if d is not None:
+            shutil.rmtree(d, ignore_errors=True)
+
+    @staticmethod
+    def _draft_expired(d: Path, max_age_hours: float = DRAFT_MAX_AGE_HOURS) -> bool:
+        """True when nothing in the draft folder changed for `max_age_hours` (or the folder is missing)."""
+        try:
+            last = max(p.stat().st_mtime for p in d.iterdir())
+        except (OSError, ValueError):  # missing folder, or an empty one
+            return True
+        return time.time() - last > max_age_hours * 3600
+
+    def purge_drafts(self, max_age_hours: float = DRAFT_MAX_AGE_HOURS) -> int:
+        """Delete drafts nobody changed for `max_age_hours`; returns how many. Called on every new draft and by
+        the runner's regular purge. A draft holds a client's file, so it isn't kept longer than needed."""
+        if not self.drafts_root.exists():
+            return 0
+        n = 0
+        for d in self.drafts_root.iterdir():
+            if d.is_dir() and self._draft_expired(d, max_age_hours):
+                shutil.rmtree(d, ignore_errors=True)
+                n += 1
+        return n
 
     def purge_files(self, older_than_days: int) -> int:
         """Delete stored files of finished imports older than N days (records and counts are kept).
