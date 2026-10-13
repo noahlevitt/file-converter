@@ -44,12 +44,14 @@ development see [DEVELOPMENT.md](DEVELOPMENT.md).
                                                      jobs.ImportRunner.submit → thread pool
  6. Background run ──────────────────────────────►  jobs.run_import: read again → engine.convert →
                                                       output.write_output / write_rejects / write_summary,
-                                                      audit.parquet + source.parquet, counts on the import record
+                                                      audit.parquet + source.parquet, numberlog.record (each
+                                                      number + consent into number_log), counts on the record
  7. Imports page: live progress, cancel ─────────►  storage (progress, stage, cancel flag), ui_format
     finished import: side by side, what changed ─►  compare.build_compare_html / field_change_summary /
                                                       comparison_xlsx (from source.parquet + audit.parquet)
     optional: check whole import, suggest fixes ─►  services.check_for_mistakes, ai.repair_values +
                                                       services.validate_repairs → re-run with overrides
+ 8. Number history: look a number up ───────────►  numberlog.lookup → Store.number_history + the import records
 ```
 
 Re-runs (**Re-run this import**, **Re-run the import with these changes**, **Apply fixes and re-run**) create a
@@ -62,13 +64,13 @@ All business logic is in `converter/`. Only `app.py` and `converter/auth.py` imp
 
 | Module | Responsibility |
 |---|---|
-| `app.py` | Streamlit UI: login, navigation, the light/dark toggle and the five pages (New import, Imports, Templates, Target format, Users). Holds no conversion logic; it calls the package. |
+| `app.py` | Streamlit UI: login, navigation, the light/dark toggle and the six pages (New import, Imports, Number history, Templates, Target format, Users). Holds no conversion logic; it calls the package. |
 | `converter/sheeterrors.py` | Finds Excel error cells (`#DIV/0!`…) in `.xlsx`/`.xlsm` (sheet XML), `.ods` (content.xml) and `.xls` (xlrd, after a quick byte search), which the spreadsheet library reads as empty; the reader puts the codes back. |
 | `converter/reader.py` | Turns uploaded bytes into a DataFrame of text: encoding detection, delimiter sniffing, sheet choice, header-row detection (`detect_header`: compares each row with the rest of its columns, skips title rows, recognises files without a header row, flags unsure cases), unique names for blank/duplicate headers (`Column 3`, `Phone (2)`…), stray spaces and byte-order marks; a CSV quote mark that is never closed costs only its row (`_quote_check`, `_lenient_grid`). Excel artifacts in values (`="…"`, `5.16E+09`, serial dates) are handled later by the normalizers. |
 | `converter/sheetsize.py` | Size check before a spreadsheet is read (`check_sheet_size`): finds where a sheet's values reach from the file structure (.xlsx/.xlsm sheet XML, .ods repeated rows and cells), estimates the memory reading needs, and refuses only sheets that need more than the computer (or container) has. Protects the app from files that made the spreadsheet library abort the process. |
 | `converter/schema.py` | Pydantic models of the target format (`FieldSpec`, `OutputSpec`, `DedupeSpec`, `TargetSchema`) and `load_schema`. Validates the YAML and fills derived defaults. |
 | `converter/mapping.py` | `FieldMapping` / `Mapping` (target field → transform + source columns + params, plus reviewer notes and skipped columns), `normalized()` (makes a mapping fit a file), column profiling, header fingerprints for template matching. |
-| `converter/transforms.py` | Registry of the allowed transforms (copy, coalesce, one row per phone number, combine, name part, address part, split, translate values, fixed value) and `apply_transform`. Transforms only *extract* a raw value; they never validate. |
+| `converter/transforms.py` | Registry of the allowed transforms (copy, coalesce, one row per phone number, phone + area code column, combine, name part, address part, split, translate values, fixed value) and `apply_transform`. Transforms only *extract* a raw value; they never validate. |
 | `converter/heuristics.py` | Rule-based automatic mapping: header synonyms + fuzzy matching + value evidence. Includes phone-column detection, phone-setting/consent column exclusion, full-name and full-address splitting, and split birthday columns. |
 | `converter/normalizers.py` | Per-type cleaning and validation: phone (US-only, limited typo repair: extra digit, foreign country code, an area code that doesn't exist, a missing area code from the file's main one), date/datetime (via `dateparse`), email, ZIP, state, boolean, enum, numbers, strings. `prepare()` builds a per-column context first (day/month order, placeholder year, the file's own numbers and area codes as evidence). |
 | `converter/dateparse.py` | The date/time parser: every common spelling, Excel serials, Unix timestamps, time zones, two-digit years, no-year dates (`NO_YEAR`). |
@@ -79,8 +81,9 @@ All business logic is in `converter/`. Only `app.py` and `converter/auth.py` imp
 | `converter/services.py` | Glue used by the UI and CLI: `make_assistant`, `initial_mapping`, `merge`, `check_for_mistakes`, `validate_repairs`. |
 | `converter/editor.py` | Mapping editing for the two grids: field-side (`apply_row_edit`) and column-side (`apply_column_edit`: Goes to / Skip), plus the "Option" cell text. |
 | `converter/compare.py` | Side-by-side HTML table, filters and counts, the "What changed" per-field summary, and the colour-coded comparison workbook. |
-| `converter/storage.py` | SQLite store (users, templates, imports, user preferences), the per-import file folders and New import drafts; retention purge. |
-| `converter/jobs.py` | `run_import` (one import, start to finish, with progress and cancel) and `ImportRunner` (thread pool, purge loop). |
+| `converter/storage.py` | SQLite store (users, templates, imports, user preferences, number history), the per-import file folders and New import drafts; retention purges. |
+| `converter/numberlog.py` | Number history: `record` (an import's converted numbers, file rows, phone and consent cells and consent sent, into `number_log`), `backfill` (imports from before 0.21.0 whose files still exist), `lookup` (one number, with file name, user, time and consent column read from each import's record), `consent_source`. |
+| `converter/jobs.py` | `run_import` (one import, start to finish, with progress and cancel; records its numbers) and `ImportRunner` (thread pool, purge loop, number-history backfill at start). |
 | `converter/auth.py` | Login gate: `AUTH_MODE=none` (the default for now: no login, everyone is the local admin) or password mode with bcrypt accounts. |
 | `converter/config.py` | `Settings` from environment variables / `.env`. |
 | `converter/cli.py` | Command line: `inspect` (show detected columns and mapping) and `convert` (run a conversion, exit code 2 when there were bad rows). |
@@ -115,7 +118,8 @@ Mapping
 - it finds the mapping's columns in the file case-insensitively, then ignoring spaces and punctuation when only one
   column fits (templates are matched that way, so `Last Visit Date` in a template finds `Last_Visit_Date`);
 - it drops fax columns (`is_fax_column`) from a phone field unless a person put them there (`origin="user"`);
-- it enforces the phone rule (several phone columns → `each_row`);
+- it enforces the phone rule (several phone columns → `each_row`; `area_code` only on the phone field, and with
+  only its area code column left it is unmapped);
 - it locks fixed-blank fields;
 - it resets invalid transform/param combinations.
 
@@ -141,6 +145,7 @@ documented at the top of `engine.py`.
 | `user_prefs` | per-user display preferences, e.g. `theme` = `light` / `dark` (one row per user and key) |
 | `templates` | name, header fingerprint and headers, mapping JSON, read options (sheet, header row, time zone), creator/updater, use count |
 | `imports` | who, file name and size, status (queued / running / completed / failed / cancelled / interrupted), progress and stage, timestamps, cancel flag, **snapshots** of the schema, mapping, read options and approved fixes, counts and summary JSON, file names, parent import |
+| `number_log` | one row per number an import converted (0.21.0): number (indexed), import id, file row, phone cell, consent sent, consent cell. File name, user, time and consent column come from the import's row. Kept after the files are deleted; `NUMBER_RECORD_DAYS` limits it (default forever) |
 
 Per-import files live in `data/imports/<id>/`:
 - `source.<ext>`: the uploaded original;
@@ -149,7 +154,8 @@ Per-import files live in `data/imports/<id>/`:
 - `summary.txt`;
 - `source.parquet` and `audit.parquet`.
 
-The files are deleted after `FILE_RETENTION_DAYS`. The database record and its counts are kept.
+The files are deleted after `FILE_RETENTION_DAYS`. The database record and its counts are kept, and so is the
+number history (`number_log`) until `NUMBER_RECORD_DAYS`.
 
 A file still being mapped on New import is a draft in `data/drafts/<random id>/` (`file`, `meta.json` with the
 uploader, `state.json` with how it was read and the mapping so far). The id is in the page URL (`?draft=…`), so a
@@ -164,6 +170,8 @@ changes (`Store.purge_drafts`).
 | US numbers only, `+1` assumed, 10-digit output | `normalizers._parse_phone`, schema `countries`, `format: digits10` |
 | Phone typo repair (extra digit, foreign country code, an area code that doesn't exist, a missing area code when 80%+ of the file shares one; never a real area code), each repair marked | `normalizers.prepare_phone`, `_repair_phone`; engine `CELL_REPAIRED` |
 | One row per different phone number (several columns, or several numbers in one cell) | `transforms` (`each_row`), `mapping.phone_rule`, `Mapping.row_field`, `normalizers.split_phones`, `engine._expand_rows` |
+| Area code in its own column: each 7-digit number gets its row's area code (`area_code`); found by header + values; full numbers kept | `heuristics._map_area_code_column` (auto_map step 2b), `mapping.is_area_code_header`, `area_code_source`; `normalizers.split_area_code`, `with_area_code`; `engine._expand_rows`; `editor.apply_column_edit`, `services.initial_mapping` (similar template) |
+| Number history: every converted number with its file row, phone and consent cells and consent sent, kept after the files | `numberlog.record` (from `jobs.run_import`), `backfill` (`ImportRunner`), `lookup`; `Store.log_numbers`, `number_history`, `purge_number_log`; `app.page_numbers` |
 | Columns *about* a phone (marketing preference, type, opt-in) never used as numbers | `heuristics.is_phone_header`, `is_consent_column` |
 | ID columns (*Account Number*, *Order #*, *Loyalty ID*) get no header evidence for the phone field; used only when 90%+ of their values are phones. *WhatsApp* is a phone word | `heuristics.names_other_number`, `score`, `_words` |
 | Fax numbers never imported: fax columns never feed the phone field unless a person maps them (noted on the mapping page); a cell's only number labelled fax makes a bad row | `mapping.is_fax_column`, `Mapping.normalized`, `heuristics.score` / `auto_map`, `services._fax_note`; `normalizers.FAX_REASON`, `engine._expand_rows` |
