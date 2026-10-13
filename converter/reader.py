@@ -45,7 +45,7 @@ from pathlib import Path
 import pandas as pd
 from charset_normalizer import from_bytes
 
-from .normalizers import clean_text, looks_like_date, looks_like_email, looks_like_phone
+from .normalizers import DETECT_MAX_LEN, clean_text, looks_like_date, looks_like_email, looks_like_phone
 from .sheetsize import SheetTooBig, check_sheet_size
 
 # Delimited text files (the delimiter is sniffed, except .tsv/.tab which are always tab-separated).
@@ -241,6 +241,8 @@ def _looks_like_data(cell: str) -> bool:
     of :func:`detect_header` (files where no column holds phones, emails or dates); the main rule uses
     :func:`_cell_kind`.
     """
+    if len(cell) > DETECT_MAX_LEN:  # long text (notes) is never a single data value, and slow to match
+        return False
     return bool(_NUMERIC_RE.match(cell) or _DATEISH_RE.match(cell) or _EMAIL_RE.match(cell))
 
 
@@ -500,21 +502,31 @@ def _unique_headers(raw: list[str]) -> list[str]:
     """Make header names usable as DataFrame columns and mapping sources: non-blank and unique.
 
     Whitespace runs are collapsed; a blank header becomes "Column <position>" (1-based); a repeated header
-    (case-insensitive) gets " (2)", " (3)", ... appended, keeping its own spelling.
+    (case-insensitive) gets " (2)", " (3)", ... appended, keeping its own spelling. A generated name never equals
+    another header of the file, whatever the case: with "Phone, Phone, Phone (2)" the second Phone becomes
+    "Phone (3)", so all three columns are kept (before 0.15.3 two columns were both called "Phone (2)").
 
     Example: ``["Name", "name", " ", "Phone  Number", "Name"]`` ->
     ``["Name", "name (2)", "Column 3", "Phone Number", "Name (3)"]``.
     """
-    seen: dict[str, int] = {}
+    cleaned = [re.sub(r"\s+", " ", h).strip() for h in raw]
+    # Names the file itself uses: a generated name must not take one of them.
+    reserved = {c.lower() for c in cleaned if c}
+    used: set[str] = set()
     out = []
-    for i, h in enumerate(raw):
-        name = re.sub(r"\s+", " ", h).strip() or f"Column {i + 1}"
-        key = name.lower()
-        if key in seen:
-            seen[key] += 1
-            name = f"{name} ({seen[key]})"
+    for i, own in enumerate(cleaned):
+        base = own or f"Column {i + 1}"
+        if own and base.lower() not in used:
+            name = base  # first use of a name in the file: kept as it is
         else:
-            seen[key] = 1
+            # A repeat gets " (2)", " (3)"…; a blank gets "Column N". Either way a name the file already uses (or
+            # one given out earlier) is skipped.
+            n = 2 if own else 1
+            name = f"{base} ({n})" if own else base
+            while name.lower() in used or name.lower() in reserved:
+                n += 1
+                name = f"{base} ({n})"
+        used.add(name.lower())
         out.append(name)
     return out
 
