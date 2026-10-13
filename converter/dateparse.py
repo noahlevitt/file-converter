@@ -295,6 +295,11 @@ def _make(y: int, m: int, d: int, hh: int = 0, mi: int = 0) -> datetime:
         raise DateError("not a real calendar date") from exc
 
 
+def _zero_year(text: str) -> bool:
+    """A year written as zeros that means "unknown": "0", "000", "0000". Not "00", which is the year 2000."""
+    return len(text) in (1, 3, 4) and int(text) == 0
+
+
 def _md(a: int, b: int, order: str) -> tuple[int, int]:
     """Month/day from two numbers, using the column order unless the values only fit one way.
 
@@ -417,7 +422,8 @@ def _extract_time(s: str) -> tuple[str, int | None, int | None]:
 
 
 def parse(value: str, order: str = "MDY", allow_no_year: bool = False, today: date | None = None,
-          serial_hint: bool = False, target_tz: str = DEFAULT_TZ) -> tuple[datetime, bool]:
+          serial_hint: bool = False, target_tz: str = DEFAULT_TZ, convert_zones: bool = True
+          ) -> tuple[datetime, bool]:
     """Return (datetime, has_time). Month/day-only values get year NO_YEAR. Raises DateError.
 
     The module's public entry point (see the module docstring for the formats):
@@ -427,8 +433,11 @@ def parse(value: str, order: str = "MDY", allow_no_year: bool = False, today: da
         today          reference date for two-digit years (tests pass a fixed date); defaults to date.today()
         serial_hint    the column holds Excel serial numbers, so any bare number in Excel's range is one
         target_tz      IANA zone of the import; zoned times and Unix timestamps are converted into it
-    The datetime is always naive: in target_tz when the value carried a zone, else as written. has_time is True
-    when the value had a time of day (Unix timestamps report False: they were already converted).
+        convert_zones  False for calendar dates (birthdays): a zone written with the value is ignored, so
+                       "1985-09-12T00:00:00Z" stays September 12 (converted to New York it would be Sep 11)
+    The datetime is always naive: in target_tz when the value carried a zone (and convert_zones), else as
+    written. has_time is True when the value had a time of day (Unix timestamps report False: they were already
+    converted).
         parse("10/09/2026 3:45 PM EST")     → (2026-10-09 15:45, True)
         parse("2026-10-09T19:45:00Z")       → (2026-10-09 15:45, True)    UTC → New York
         parse("Sep 12", allow_no_year=True) → (0004-09-12 00:00, False)
@@ -442,7 +451,7 @@ def parse(value: str, order: str = "MDY", allow_no_year: bool = False, today: da
         raise DateError("empty")
     dt, has_time = _parse_prepped(s, order, allow_no_year, today, serial_hint, target_tz)
     # Only real moments are converted: a value with a time and a real year (month/day-only values aren't moments).
-    if has_time and dt.year != NO_YEAR:
+    if has_time and dt.year != NO_YEAR and convert_zones:
         dt = _to_zone(dt, src_tz, target_tz)
     return dt, has_time
 
@@ -461,7 +470,8 @@ def _parse_prepped(s: str, order: str, allow_no_year: bool, today: date, serial_
            - month name + 1 number: the day, no year ("Sep 12"); + 2 numbers: day and year in either order
              ("oct 9 2026", "9 oct 2026", "2026 oct 9", "09-oct-26")
            - 3 numbers: year first when the first has 4 digits (2026-10-09), else month/day in column order and
-             the year last (10/09/2026, 10/09/26); a 0000 year means "no year" in birthday-type columns
+             the year last (10/09/2026, 10/09/26); a year of 0, 000 or 0000 means "no year" in birthday-type columns
+             (a "Birth Year" column holding 0); "00" stays 2000
            - 2 numbers: month and day only ("9/12"); with a 4-digit one it's "month and year but no day"
            - 1 number: _compact
     Errors: "unrecognized word 'x'", "more than one month name", "month name but no day", "month and year but
@@ -536,6 +546,8 @@ def _parse_prepped(s: str, order: str, allow_no_year: bool, today: date, serial_
             year_txt, day = a, int(b)
         else:
             year_txt, day = b, int(a)
+        if allow_no_year and _zero_year(year_txt):  # "Sep 12 0": no year
+            return _make(NO_YEAR, m, day), False
         return _make(_year(year_txt, m, day, today), m, day, hh, mi), has_time
 
     if len(nums) == 3:
@@ -551,7 +563,7 @@ def _parse_prepped(s: str, order: str, allow_no_year: bool, today: date, serial_
             return _make(year, mm, dd, hh, mi), has_time
         # Month/day first, year last: month/day in column order, two-digit years via _year.
         mm, dd = _md(int(a), int(b), order)
-        if allow_no_year and len(c) == 4 and int(c) == 0:  # 09/12/0000
+        if allow_no_year and _zero_year(c):  # 09/12/0000, "9 12 0" (Birth Month, Day, Year columns)
             return _make(NO_YEAR, mm, dd), False
         return _make(_year(c, mm, dd, today), mm, dd, hh, mi), has_time
     if len(nums) == 2:
