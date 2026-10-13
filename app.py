@@ -766,7 +766,8 @@ def page_new_import() -> None:
         c1, c2, c3 = st.columns([2, 2, 1], vertical_alignment="bottom")
         sheet = rr.sheet
         if rr.sheet_names and len(rr.sheet_names) > 1:
-            sheet = c1.selectbox("Sheet", rr.sheet_names, index=rr.sheet_names.index(rr.sheet))
+            sheet = c1.selectbox("Sheet", rr.sheet_names, index=rr.sheet_names.index(rr.sheet),
+                                 format_func=lambda s: f"{s} (hidden)" if s in getattr(rr, "hidden_sheets", []) else s)
         # The box is 1-based for people (0 = "no header row"); the reader uses a 0-based row index or None.
         hdr_default = 0 if rr.header_row is None else rr.header_row + 1
         hdr = c2.number_input("Header is on row (0 = file has no header row)", min_value=0, max_value=100,
