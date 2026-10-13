@@ -92,6 +92,9 @@ class ReadResult:
     sheet_names: list[str] = field(default_factory=list)
     # Spreadsheets: the sheet that was read (None for text files).
     sheet: str | None = None
+    # Spreadsheets: sheets hidden in Excel (shown as "(hidden)" in the sheet choice; never read unless chosen, or
+    # unless no visible sheet has data).
+    hidden_sheets: list[str] = field(default_factory=list)
     header_row: int | None = 0  # 0-based index in the raw grid; None = file has no header row
     # What auto-detection found, kept even when the caller chose another header row (or "no header").
     detected_header_row: int | None = 0
@@ -315,8 +318,8 @@ def _lenient_grid(text: str, delimiter: str, n_sep: int) -> tuple[list[list[str]
     The csv reader is fed one line at a time. A row that began at a stray quote (:func:`_quote_check`, or still
     open after MAX_CELL_LINES lines that look like rows of the file, `n_sep` delimiters each) is dropped; its first
     line is read on its own with quote marks as plain characters, and reading continues with the next line.
-    Everything else is read exactly as the csv module reads it (a quote inside a cell, as in ``5" tall``, is an ordinary character
-    there too). Each stray quote costs at most MAX_CELL_LINES lines of extra reading.
+    Everything else is read exactly as the csv module reads it (a quote inside a cell, as in ``5" tall``, is an
+    ordinary character there too). Each stray quote costs at most MAX_CELL_LINES lines of extra reading.
     Returns (grid, the grid row indexes read that way, row indexes of cells to check: see _quote_check).
     """
     lines = list(io.StringIO(text, newline=""))  # each line keeps its own line break (\n, \r\n or \r)
@@ -370,6 +373,65 @@ def list_sheets(data: bytes, ext: str) -> list[str]:
         return [str(s) for s in xl.sheet_names]
     except Exception as exc:  # pragma: no cover - library error surface
         raise ReadError(f"Could not open spreadsheet: {exc}") from exc
+
+
+def _sheets_to_pass_over(data: bytes) -> dict[str, str]:
+    """Sheets not to read by default, with why: {"Lookup": "is hidden", "Chart1": "is a chart"}.
+
+    Hidden and very hidden sheets (lookup tables, old data, settings) and sheets that aren't worksheets (chart and
+    dialog sheets) hold no customer list. Empty when the spreadsheet library can't tell (every sheet then counts).
+    """
+    try:
+        from python_calamine import CalamineWorkbook, SheetTypeEnum, SheetVisibleEnum
+        wb = CalamineWorkbook.from_filelike(io.BytesIO(data))
+        out = {}
+        for m in wb.sheets_metadata:
+            if m.visible != SheetVisibleEnum.Visible:
+                out[m.name] = "is hidden"
+            elif m.typ != SheetTypeEnum.WorkSheet:
+                out[m.name] = "is a chart" if m.typ == SheetTypeEnum.ChartSheet else "isn't a worksheet"
+        return out
+    except Exception:  # noqa: BLE001 - only a better default; never a reason to refuse the file
+        return {}
+
+
+def _choose_sheet(data: bytes, ext: str, sheets: list[str]) -> tuple[str | None, list[list[str]], str | None]:
+    """The sheet to read when none was chosen: the first visible worksheet that has any value.
+
+    Before 0.17.0 the first sheet was always read: an empty first sheet ("Sheet1" left in a workbook) stopped the
+    file with "No data found", and a hidden first sheet (a lookup table) was read instead of the customers.
+    Order tried: visible worksheets in file order, then the others (a workbook whose only data is on a hidden
+    sheet still reads). Each sheet is size-checked before it is read (:func:`sheetsize.check_sheet_size`).
+    Returns (sheet, its raw grid, a warning naming the sheets passed over or None). With no values anywhere the
+    first sheet is returned with an empty grid, and read_file reports "No data found".
+    """
+    pass_over = _sheets_to_pass_over(data)
+    order = [s for s in sheets if s not in pass_over] + [s for s in sheets if s in pass_over]
+    why = dict(pass_over)
+    for name in order:
+        _check_size(data, ext, name)
+        grid = _read_excel_grid(data, name)
+        if any(_clean_cell(c) for row in grid for c in row):
+            break
+        why[name] = "is empty"
+    else:
+        return (sheets[0] if sheets else None), [], None
+    before = sheets[:sheets.index(name)]
+    if not before:
+        return name, grid, None
+    reasons = [f"'{s}' {why.get(s, 'was passed over')}" for s in before]
+    listed = reasons[0] if len(reasons) == 1 else ", ".join(reasons[:-1]) + " and " + reasons[-1]
+    hidden = " (a hidden sheet)" if pass_over.get(name) == "is hidden" else ""
+    return name, grid, (f"Read sheet '{name}'{hidden} because {listed}. If that isn't the customer list, pick "
+                        "another sheet under File options and click Re-read file.")
+
+
+def _check_size(data: bytes, ext: str, sheet: str | None) -> None:
+    """:func:`sheetsize.check_sheet_size` with its refusal as a ReadError (the message names the far cell)."""
+    try:
+        check_sheet_size(data, ext, sheet)
+    except SheetTooBig as exc:
+        raise ReadError(str(exc)) from None
 
 
 def _read_excel_grid(data: bytes, sheet: str | None) -> list[list[str]]:
@@ -753,17 +815,19 @@ def read_file(
     header_row: "auto" to detect, an int (0-based raw row), or None for "no header row".
 
     Inputs: ``filename`` (only its extension is used, to pick the reader), the raw ``data`` bytes, and for
-    spreadsheets the ``sheet`` name (unknown or None -> the first sheet). The reviewer can re-read the file with
-    another sheet or header row; ``ReadResult.detected_header_row`` keeps the automatic choice.
+    spreadsheets the ``sheet`` name (unknown or None -> the first visible sheet with data, see
+    :func:`_choose_sheet`). The reviewer can re-read the file with another sheet or header row;
+    ``ReadResult.detected_header_row`` keeps the automatic choice.
 
     Steps: check the extension and that the file isn't empty -> raw grid (text: encoding + delimiter detection;
     spreadsheet: sheet choice) -> clean cells -> detect or apply the header row -> :func:`build_frame` ->
     warnings.
 
     Warnings (``ReadResult.warnings``): a quote mark that is never closed (text files; the rows after it are still
-    read, see :func:`_read_text_grid`), rows with more values than header columns (text files only - usually an
-    unquoted comma such as ``Smith, John``), header found below the first row, no header row, detection unsure,
-    a header row holding a phone number / email / date (likely a customer row, e.g. picked by hand), no data rows.
+    read, see :func:`_read_text_grid`), sheets passed over because they are empty or hidden (spreadsheets), rows
+    with more values than header columns (text files only - usually an unquoted comma such as ``Smith, John``),
+    header found below the first row, no header row, detection unsure, a header row holding a phone number / email
+    / date (likely a customer row, e.g. picked by hand), no data rows.
 
     Raises :class:`ReadError` for an unsupported extension, an empty file, a file or sheet without any values, a
     header row past the end of the file, a spreadsheet that can't be opened, or a sheet too big for this computer's
@@ -787,21 +851,25 @@ def read_file(
     else:
         read_warnings = []
         sheets = list_sheets(data, ext)
-        # The requested sheet if it exists, else the first one.
-        chosen_sheet = sheet if sheet in sheets else (sheets[0] if sheets else None)
-        # Before the spreadsheet library reserves memory for the sheet: a stray value far away from the table can
-        # make it ask for hundreds of GB and abort the whole app (see sheetsize.py). Refused with a clear message
-        # only when the sheet needs more memory than this computer has.
-        try:
-            check_sheet_size(data, ext, chosen_sheet)
-        except SheetTooBig as exc:
-            raise ReadError(str(exc)) from None
-        grid = _read_excel_grid(data, chosen_sheet)
+        hidden = [s for s, why in _sheets_to_pass_over(data).items() if why == "is hidden" and s in sheets]
+        result_kwargs.update(hidden_sheets=hidden)
+        # Every sheet is size-checked before the spreadsheet library reserves memory for it: a stray value far away
+        # from the table can make it ask for hundreds of GB and abort the whole app (see sheetsize.py). Refused with
+        # a clear message only when the sheet needs more memory than this computer has.
+        if sheet in sheets:  # the sheet the reviewer (or a saved import) chose
+            chosen_sheet = sheet
+            _check_size(data, ext, chosen_sheet)
+            grid = _read_excel_grid(data, chosen_sheet)
+        else:  # the first visible sheet with data
+            chosen_sheet, grid, passed = _choose_sheet(data, ext, sheets)
+            read_warnings = [passed] if passed else []
 
     # Clean once up front: the empty-file check, header detection, the ragged-row check and the raw preview see
     # the same values as build_frame (a cell holding only a non-breaking space counts as empty).
     cleaned = [[_clean_cell(c) for c in row] for row in grid]
     if not any(any(r) for r in cleaned):
+        if len(sheets) > 1 and sheet not in sheets:
+            raise ReadError("No data found in any sheet of the file.")
         raise ReadError("No data found in the file" + (f" (sheet '{chosen_sheet}')" if chosen_sheet else "") + ".")
 
     # Always detect (reported as detected_header_row); use it unless the caller chose a row (int) or "no header"
