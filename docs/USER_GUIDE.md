@@ -246,6 +246,10 @@ not Claude, not a default and not a saved template (templates leave them out, so
 
 ## Common questions
 
+**A reason says *Excel error (broken formula in the client's file)*.** The cell held `#REF!`, `#VALUE!`,
+`#DIV/0!` or a similar code: a formula in the client's spreadsheet was broken when they exported it, so there is
+no value to import. If that column matters, ask the client for a fresh export.
+
 **A birthday shows `1600`.** That's intended: it means "month and day known, year unknown". The target system
 expects this.
 
