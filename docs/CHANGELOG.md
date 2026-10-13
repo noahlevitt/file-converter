@@ -3,6 +3,26 @@
 What changed in each version. The running version is shown in the app's sidebar. Each version is tagged in git
 (`vX.Y.Z`).
 
+## 0.19.0 — Excel errors in spreadsheets; day/month order edge cases
+
+- **Excel error codes in spreadsheets.** The spreadsheet library reads a cell holding `#DIV/0!`, `#REF!`,
+  `#VALUE!`… as empty, so in .xlsx, .xls and .ods files the reason added in 0.15.1 was lost: a phone said "required
+  value is missing" and other fields were blank without a word. The codes are now read from the file itself, so
+  these files report *Excel error (broken formula in the client's file)* like a CSV. .xls files need the new `xlrd`
+  package (run `.venv/bin/pip install -r requirements.txt` once); without it they read as before. .xlsb isn't
+  covered. Cost: about 0.1 s on a 150,000-row .xlsx (3% of reading it).
+- **Spreadsheet date cells with a Time column.** A date cell reads as `2026-03-15 00:00:00`; joined with a *Time*
+  column that gave `2026-03-15 00:00:00 15:15:00`, which wasn't a readable date, so every date was lost (0.18.0
+  dropped the time instead). Now it gives 03/15/2026 03:15 PM.
+- **An input format sets the order.** With *Option* `%d/%m/%Y`, values with a time after the date
+  (`03/10/2026 3:15 PM`) fell back to month-first and became March 10; now October 3.
+- **`YMD` works for 2-digit years.** `26/10/09` with *Option* `YMD` became October 26, 2009; now October 9, 2026.
+- **Day-first dates without separators.** In a column of `15032026`, `28022026`, `01042026` the last one was read
+  as January 4; such values now count as day-first evidence like `15/03/2026` (also `150390`-style values that
+  can only be day-first, and `1503` birthdays). `20261009` and six-digit values that could be year-month-day don't
+  count.
+- All 406 test files give identical results.
+
 ## 0.18.0 — birthdays keep their day and year; dates go to the right field
 
 - **Birthdays stored as UTC midnight no longer move a day.** `1985-09-12T00:00:00Z` (how many systems store a
