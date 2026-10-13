@@ -31,7 +31,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from .mapping import FieldMapping, Mapping, phone_rule
+from .mapping import FieldMapping, Mapping, is_area_code_header, phone_rule
 from .schema import FieldSpec, TargetSchema
 from .transforms import ADDRESS_PARTS, DATE_ORDERS, NAME_PARTS, TRANSFORMS, check_transform
 
@@ -84,7 +84,7 @@ def option_text(fm: FieldMapping, f: FieldSpec) -> str:
         return "; ".join(f"{m.get('from', '')}={m.get('to', '')}" for m in p.get("value_map", []))
     if t == "constant":
         return str(p.get("value", ""))
-    if t in ("copy", "coalesce", "each_row"):
+    if t in ("copy", "coalesce", "each_row", "area_code"):
         # Copy-like transforms only have options for dates (how to read them) and phones (default country).
         # An explicit strptime pattern wins over a date order.
         if f.type in ("date", "datetime"):
@@ -144,7 +144,7 @@ def parse_option(transform: str, f: FieldSpec, text: str | None) -> tuple[dict[s
         return {"value_map": pairs}, None
     if transform == "constant":
         return {"value": text}, None
-    if transform in ("copy", "coalesce", "each_row"):
+    if transform in ("copy", "coalesce", "each_row", "area_code"):
         if f.type in ("date", "datetime") and text:
             # A "%" means an explicit strptime pattern; otherwise a date order (auto / MDY / DMY / YMD).
             if "%" in text:
@@ -203,7 +203,7 @@ def apply_row_edit(schema: TargetSchema, mapping: Mapping, field_name: str, chan
         if phone_rule(f.type, new_t) != new_t:
             # Not allowed for this field type: apply the allowed equivalent and tell the reviewer why.
             error = ("several phone columns always give one row per number" if f.type == "phone"
-                     else "'One row per phone number' is only for the phone field")
+                     else f"'{LABELS[new_t]}' is only for the phone field")
             new_t = phone_rule(f.type, new_t)
         if new_t != fm.transform:
             fm.transform = new_t
@@ -216,7 +216,7 @@ def apply_row_edit(schema: TargetSchema, mapping: Mapping, field_name: str, chan
         fm.transform = "copy" if len(fm.sources) == 1 else several
     elif fm.transform == "copy" and len(fm.sources) > 1:
         fm.transform = several
-    elif fm.transform in ("coalesce", "concat", "each_row") and len(fm.sources) == 1:
+    elif fm.transform in ("coalesce", "concat", "each_row", "area_code") and len(fm.sources) == 1:
         fm.transform = "copy"
     elif fm.transform not in ("none", "constant") and not fm.sources and col_sources in changes:
         # The reviewer removed every source column -> not mapped. (Choosing a How before any column is left
@@ -248,8 +248,9 @@ def _without_column(fm: FieldMapping, column: str) -> FieldMapping:
     """Field mapping with one source column removed; falls back to 'not mapped' when nothing usable is left.
 
     * No column left -> not mapped.
-    * A multi-column transform (first non-empty / combine / one row per number) left with one column -> copy;
-      params are kept only when the transform stays the same (they belong to that transform).
+    * A multi-column transform (first non-empty / combine / one row per number / phone + area code column) left
+      with one column -> copy; params are kept only when the transform stays the same (they belong to that
+      transform). 'Phone + area code column' left with only its area code column -> not mapped.
     * Anything ``check_transform`` rejects afterwards (e.g. a combine that needs 2+ columns) -> not mapped.
 
     The result is always marked as the reviewer's choice. Example: each_row of ["Phone", "Phone 2"] without
@@ -259,7 +260,9 @@ def _without_column(fm: FieldMapping, column: str) -> FieldMapping:
     if not sources:
         return FieldMapping(origin="user", reason="set by reviewer")
     transform = fm.transform
-    if transform in ("coalesce", "concat", "each_row") and len(sources) == 1:
+    if transform == "area_code" and all(is_area_code_header(s) for s in sources):
+        return FieldMapping(origin="user", reason="set by reviewer")  # an area code alone is no phone number
+    if transform in ("coalesce", "concat", "each_row", "area_code") and len(sources) == 1:
         transform = "copy"
     params = fm.params if transform == fm.transform else {}
     if check_transform(transform, sources, params):
@@ -273,7 +276,9 @@ def apply_column_edit(schema: TargetSchema, mapping: Mapping, column: str, targe
 
     targets: target field names this column should go to (None = unchanged, [] = not imported). A field that
     gains this column takes it as its only source; whatever fed that field before is dropped from it. Phone fields
-    are the exception: the column is added to the others and each different number becomes its own row.
+    are the exception: the column is added to the others and each different number becomes its own row; an area
+    code column ("Area Code") added to the phone field gives its 7-digit numbers their area code ('Phone + area
+    code column').
     skip: True removes the column from every field and keeps it out (also of templates and Claude's suggestions).
     Returns (new mapping, messages describing what changed).
 
@@ -331,11 +336,18 @@ def apply_column_edit(schema: TargetSchema, mapping: Mapping, column: str, targe
             before = fields.get(name, FieldMapping())
             has_sources = before.transform not in ("none", "constant") and bool(before.sources)
             if f.type == "phone" and has_sources:
-                # Phone columns add up: each different number becomes its own row.
-                fields[name] = FieldMapping(sources=[*before.sources, column], transform="each_row", origin="user",
-                                            reason="set by reviewer")
-                messages.append(f"{f.header} now also uses '{column}' — one row per different number "
-                                f"({', '.join(fields[name].sources)}).")
+                # Phone columns add up: each different number becomes its own row. An area code column gives the
+                # 7-digit numbers their area code ('Phone + area code column', which also gives one row per number).
+                area = before.transform == "area_code" or is_area_code_header(column)
+                fields[name] = FieldMapping(sources=[*before.sources, column], origin="user", reason="set by reviewer",
+                                            transform="area_code" if area else "each_row",
+                                            params=dict(before.params) if area else {})
+                if is_area_code_header(column) and before.transform != "area_code":
+                    messages.append(f"{f.header} now also uses '{column}' — 7-digit numbers get their area code "
+                                    f"from it ({', '.join(fields[name].sources)}).")
+                else:
+                    messages.append(f"{f.header} now also uses '{column}' — one row per different number "
+                                    f"({', '.join(fields[name].sources)}).")
                 continue
             # Any other field: this column replaces whatever fed the field before (plain copy).
             if has_sources:
