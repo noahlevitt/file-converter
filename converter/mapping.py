@@ -198,8 +198,9 @@ class Mapping(BaseModel):
            last_contacted) keep a mapping only when a person made it (``origin == "user"``): whatever the rules,
            a template or Claude put there is removed, so they are never filled without a human choosing the column.
         2. Source columns are matched to the file case-insensitively and rewritten in the file's spelling
-           (a template made on "PHONE" works on "Phone"); columns missing from the file or skipped by the reviewer
-           are removed.
+           (a template made on "PHONE" works on "Phone"); failing that, ignoring spaces and punctuation when only
+           one column fits ("Last Visit Date" works on "Last_Visit_Date", as templates are matched that way);
+           columns missing from the file or skipped by the reviewer are removed.
         3. An unknown transform becomes "none"; "none" and "constant" never keep sources.
         4. :func:`phone_rule`: "First non-empty" on a phone field becomes "One row per phone number", and
            "One row per phone number" on any other field becomes "First non-empty".
@@ -214,8 +215,21 @@ class Mapping(BaseModel):
         """
         # lower-case name -> the file's spelling of that column
         lookup = {c.lower(): c for c in columns}
+        # Fallback: letters and digits only ("Last_Visit_Date" = "Last Visit Date" = "last-visit-date"), as template
+        # matching compares headers (header_fingerprint). Only used when exactly one column of the file has that form.
+        by_form: dict[str, list[str]] = {}
+        for c in columns:
+            by_form.setdefault(norm_header(c), []).append(c)
+
+        def find(name: str) -> str | None:
+            """The file's column for a name from the mapping, or None when the file has no such column."""
+            if name.lower() in lookup:
+                return lookup[name.lower()]
+            same = by_form.get(norm_header(name), [])
+            return same[0] if len(same) == 1 and norm_header(name) else None
+
         # Skipped columns that exist in this file, in the file's spelling, without duplicates (order kept).
-        excluded = list(dict.fromkeys(lookup[c.lower()] for c in self.excluded_columns if c.lower() in lookup))
+        excluded = list(dict.fromkeys(c for c in map(find, self.excluded_columns) if c))
         skip = {c.lower() for c in excluded}
         out: dict[str, FieldMapping] = {}
         for f in schema.fields:
@@ -227,7 +241,7 @@ class Mapping(BaseModel):
             if f.manual_only and fm.transform != "none" and fm.origin != "user":
                 out[f.name] = FieldMapping(reason="mapped by hand only")
                 continue
-            fm.sources = [lookup[s.lower()] for s in fm.sources if s.lower() in lookup and s.lower() not in skip]
+            fm.sources = [c for c in map(find, fm.sources) if c and c.lower() not in skip]
             if fm.transform not in TRANSFORMS:
                 fm.transform = "none"
             if fm.transform in ("none", "constant"):
@@ -241,7 +255,7 @@ class Mapping(BaseModel):
                 fm = FieldMapping()  # invalid combination (e.g. a copy of two columns): better unmapped than wrong
             fm.params = fm.clean_params()
             out[f.name] = fm
-        notes = {lookup[c.lower()]: n for c, n in self.column_notes.items() if c.lower() in lookup and n.strip()}
+        notes = {find(c): n for c, n in self.column_notes.items() if find(c) and n.strip()}
         return Mapping(fields=out, column_notes=notes, general_note=self.general_note, excluded_columns=excluded)
 
     def problems(self, schema: TargetSchema) -> dict[str, str]:
