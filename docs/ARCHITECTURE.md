@@ -113,6 +113,7 @@ Mapping
 - it keeps every schema field and drops unknown sources and skipped columns;
 - it finds the mapping's columns in the file case-insensitively, then ignoring spaces and punctuation when only one
   column fits (templates are matched that way, so `Last Visit Date` in a template finds `Last_Visit_Date`);
+- it drops fax columns (`is_fax_column`) from a phone field unless a person put them there (`origin="user"`);
 - it enforces the phone rule (several phone columns → `each_row`);
 - it locks fixed-blank fields;
 - it resets invalid transform/param combinations.
@@ -164,6 +165,10 @@ changes (`Store.purge_drafts`).
 | One row per different phone number (several columns, or several numbers in one cell) | `transforms` (`each_row`), `mapping.phone_rule`, `Mapping.row_field`, `normalizers.split_phones`, `engine._expand_rows` |
 | Columns *about* a phone (marketing preference, type, opt-in) never used as numbers | `heuristics.is_phone_header`, `is_consent_column` |
 | ID columns (*Account Number*, *Order #*, *Loyalty ID*) get no header evidence for the phone field; used only when 90%+ of their values are phones. *WhatsApp* is a phone word | `heuristics.names_other_number`, `score`, `_words` |
+| Fax numbers never imported: fax columns never feed the phone field unless a person maps them (noted on the mapping page); a cell's only number labelled fax makes a bad row | `mapping.is_fax_column`, `Mapping.normalized`, `heuristics.score` / `auto_map`, `services._fax_note`; `normalizers.FAX_REASON`, `engine._expand_rows` |
+| Texting-activity columns (*Last SMS Received*, `in_sms_last`) are not phone columns, even when empty | `heuristics.PHONE_ATTRIBUTE_WORDS`, `is_phone_header` |
+| A similar template (75%+) adds phone columns that are new since it was saved | `services.initial_mapping` |
+| Without a chosen sheet, the first visible sheet with data is read (empty, hidden and chart sheets passed over, with a warning) | `reader._choose_sheet`, `_sheets_to_pass_over`; `ReadResult.hidden_sheets` |
 | Several numbers in one cell found by the phonenumbers matcher, separators, digit groups, then North American shapes (used only when they find every number the others found, and more) | `normalizers.split_phones`, `_split_phones`, `_NANP_RE`, `_span_pieces` |
 | A CSV quote mark that is never closed costs only its row (warning names it); cells of any size; a quote inside a cell is an ordinary character | `reader._read_text_grid`, `_quote_check`, `_lenient_grid` |
 | Birthday/anniversary without a real year → year 1600 | `dateparse` (`NO_YEAR`), `normalizers.normalize_date`, `_placeholder_year`; schema `no_year_value` |
