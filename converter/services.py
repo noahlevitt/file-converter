@@ -46,7 +46,8 @@ from .checks import Finding, build_review_payload, run_checks
 from .config import Settings
 from .engine import source_rows
 from .heuristics import auto_map
-from .mapping import ColumnProfile, FieldMapping, Mapping, has_generic_columns, is_fax_column, norm_header
+from .mapping import (ColumnProfile, FieldMapping, Mapping, has_generic_columns, is_area_code_header, is_fax_column,
+                      norm_header)
 from .schema import TargetSchema
 from .storage import Store, Template
 
@@ -163,7 +164,8 @@ def initial_mapping(schema: TargetSchema, df: pd.DataFrame, profiles: list[Colum
             tm = near_tpl.mapping.normalized(schema, columns)
             manual = {f.name for f in schema.fields if f.manual_only}
             # Columns the template's file had: a phone column among them that the template doesn't use was left out
-            # by a person; a phone column the rules find among the NEW columns is added (one row per number).
+            # by a person; a phone column the rules find among the NEW columns is added (one row per number), and so
+            # is a new area code column the rules give 7-digit numbers ('Phone + area code column').
             known = {norm_header(h) for h in near_tpl.headers}
             added: list[str] = []  # notes about phone columns added that way
             for name, fm in tm.fields.items():
@@ -172,14 +174,22 @@ def initial_mapping(schema: TargetSchema, df: pd.DataFrame, profiles: list[Colum
                     found = rules.fields[name]
                     new = [c for c in found.sources if norm_header(c) not in known and c not in fm.sources]
                     if schema.field(name).type == "phone" and found.transform != "none" and new:
-                        listed, many = ", ".join(f"'{c}'" for c in new), len(new) > 1
+                        area = [c for c in new if found.transform == "area_code" and is_area_code_header(c)]
+                        phones = [c for c in new if c not in area]
                         fm.sources = [*fm.sources, *new]
-                        fm.transform = "each_row"
+                        fm.transform = "area_code" if area or fm.transform == "area_code" else "each_row"
                         fm.confidence = "medium"
-                        fm.reason = f"template, plus new phone column{'s' if many else ''} {listed}"
-                        added.append(f"Phone column{'s' if many else ''} {listed} {'are' if many else 'is'} new since "
-                                     f"template '{near_tpl.name}' and {'were' if many else 'was'} added to the phone "
-                                     "field: one row per different number.")
+                        fm.reason = "template, plus new " + " and ".join(
+                            f"{kind} column{'s' if len(cols) > 1 else ''} {', '.join(repr(c) for c in cols)}"
+                            for kind, cols in (("phone", phones), ("area code", area)) if cols)
+                        if phones:
+                            listed, many = ", ".join(f"'{c}'" for c in phones), len(phones) > 1
+                            added.append(f"Phone column{'s' if many else ''} {listed} {'are' if many else 'is'} new "
+                                         f"since template '{near_tpl.name}' and {'were' if many else 'was'} added to "
+                                         "the phone field: one row per different number.")
+                        if area:
+                            added.append(f"Area code column '{area[0]}' is new since template '{near_tpl.name}': "
+                                         "7-digit phone numbers get their area code from it.")
                     rules.fields[name] = fm
             # Notes: rule notes win on a clash; the template's general note is used when the rules have none.
             rules.column_notes = {**tm.column_notes, **rules.column_notes}
