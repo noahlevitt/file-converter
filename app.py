@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 
@@ -77,12 +78,15 @@ from converter.editor import (FROM_LABEL, LABELS, OPTION_HELP, apply_column_edit
 from converter.engine import convert, count_multi_number_cells, preview_values, source_rows
 from converter.jobs import ImportRunner
 from converter.mapping import Mapping, has_generic_columns, profile_columns
+from converter.output import neutralise_csv
 from converter.reader import SUPPORTED_EXTENSIONS, ReadError, read_file
 from converter.schema import TargetSchema, load_schema
 from converter.services import (check_for_mistakes, initial_mapping, make_assistant, merge,
                                 validate_repairs)
 from converter.storage import ImportRecord, Store
 from converter.ui_format import fmt_dt, fmt_duration, fmt_eta, fmt_size, status_color, status_text
+
+log = logging.getLogger("app")
 
 # Browser tab title and the heading of the login form; override with APP_TITLE in .env.
 APP_TITLE = os.getenv("APP_TITLE", "Import File Converter")
@@ -280,6 +284,17 @@ def load_import_tables(import_id: int, folder: str) -> tuple[pd.DataFrame, pd.Da
     return source_rows(pd.read_parquet(d / "source.parquet"), audit), audit
 
 
+@st.cache_data(max_entries=6, show_spinner=False)
+def rejects_download(path: str, mtime: float) -> bytes:
+    """The rejected-rows file as offered for download, with would-be spreadsheet formulas neutralised.
+
+    Files written since 0.15.0 are already safe and come back byte for byte; older ones (kept until the retention
+    purge) are fixed here, so no download can carry a live formula from a client's file (see
+    output.neutralise_csv). `mtime` is only part of the cache key, so a re-written file is read again.
+    """
+    return neutralise_csv(Path(path).read_bytes())
+
+
 # Module-level setup, run on every rerun (cheap: the resources above are cached).
 store = get_store()
 runner = get_runner()
@@ -323,19 +338,114 @@ ss.setdefault("uploader_version", 0)
 #   notes_result / check_result   Claude's notes result and the last mistake check, kept so Accept works later
 #   pending       set to None by load_and_map but not read anywhere in this file (left over; harmless)
 #   multi_cells   {phone source columns: number of cells holding several numbers} (see multi_number_cells)
+#   read_args     how the file was read: {"sheet", "header_row"} as requested ("auto" = detected), for a restore
+#   draft_id      the draft kept on disk for this file (see "Drafts" below); draft_saved  the state last saved
+#   remember_pref the "Remember this mapping" box as restored from a draft (its starting value)
 FILE_KEYS = ["file_sig", "file_name", "file_bytes", "read", "profiles", "mapping", "map_meta", "pending",
              "edit_errors", "ai_used", "template_name", "read_error", "timezone", "notes_result", "check_result",
-             "multi_cells"]
+             "multi_cells", "read_args", "draft_id", "draft_saved", "remember_pref"]
 
 
 def reset_file_state() -> None:
     """Forget the file on the New import page by removing every key in FILE_KEYS from session state.
 
+    Also deletes the file's draft (the copy kept for a browser refresh) and takes its id out of the URL: the file
+    was imported, cleared with "Start over" or replaced by another upload, so there is nothing left to restore.
     Doesn't touch the uploader itself: callers that want the file uploader emptied too also bump
     ss.uploader_version, which gives the uploader a new key.
     """
+    store.delete_draft(ss.get("draft_id"))
     for k in FILE_KEYS:
         ss.pop(k, None)
+    if "draft" in st.query_params:
+        del st.query_params["draft"]
+
+
+# ---------------------------------------------------------------------------
+# Drafts: a browser refresh doesn't lose a mapping in progress (since 0.15.0)
+# ---------------------------------------------------------------------------
+# A refresh starts a new Streamlit session, which has empty session state. So the file being mapped is also kept
+# on disk as a *draft* (Store.create_draft: DATA_DIR/drafts/<random id>/), its id is put in the page's URL
+# (?draft=<id>), and the state below is saved there whenever it changes. After a refresh the URL still carries the
+# id, and the New import page restores the file, how it was read and the mapping. Only that browser tab knows the
+# id, and a draft is only restored for the user who uploaded the file. Not kept: Claude's answers waiting for
+# Accept / Discard (run them again). Drafts go away on "Start import", "Start over", another upload, or after 24
+# hours without changes.
+
+def draft_state() -> dict:
+    """The New import state worth restoring after a refresh, as JSON-ready data.
+
+    read_args (re-reading the stored file with them gives the same table), the mapping (with column notes, the
+    general note and skipped columns), map_meta (the banner), the template name as typed, the client time zone,
+    whether Claude was involved, and the "Remember this mapping" box.
+    """
+    return {"read_args": ss.get("read_args") or {"sheet": None, "header_row": "auto"},
+            "mapping": ss.mapping.model_dump(mode="json"), "map_meta": ss.map_meta,
+            "template_name": ss.get(template_key(), ss.get("template_name")), "timezone": ss.get("timezone"),
+            "ai_used": bool(ss.get("ai_used")), "remember": ss.get("remember_mapping", True)}
+
+
+def save_draft() -> None:
+    """Keep the file and its state on disk, and its draft id in the URL; called at the end of New import.
+
+    The file is written once (when the draft is created); the state only when it changed since the last save.
+    If the draft was deleted meanwhile (e.g. the same URL was imported in another tab), a new one is made. Disk
+    errors are logged and otherwise ignored: a draft is a convenience and must never break the page.
+    """
+    if ss.get("read") is None:
+        return
+    state = draft_state()
+    text = json.dumps(state, sort_keys=True)
+    try:
+        if not ss.get("draft_id"):
+            ss.draft_id, ss.draft_saved = store.create_draft(user["username"], ss.file_name, ss.file_bytes), None
+        if text != ss.get("draft_saved"):
+            if not store.save_draft_state(ss.draft_id, state):
+                ss.draft_id = store.create_draft(user["username"], ss.file_name, ss.file_bytes)
+                store.save_draft_state(ss.draft_id, state)
+            ss.draft_saved = text
+    except OSError:
+        log.exception("Could not save the New import draft")
+        return
+    if st.query_params.get("draft") != ss.draft_id:
+        st.query_params["draft"] = ss.draft_id
+
+
+def restore_draft(draft_id: str) -> None:
+    """After a refresh: bring back the file and mapping of the draft in the URL (?draft=<id>).
+
+    The file is re-read with the saved read_args and the saved mapping is applied (normalised against the
+    current target format). If the draft has no saved state yet, or it no longer fits (e.g. the target format
+    changed), the file is mapped afresh as if just uploaded. A draft that is gone (imported, cleared, older than
+    24 hours) or belongs to another user isn't restored; the page says so once and the id leaves the URL.
+    """
+    draft = store.load_draft(draft_id, user["username"])
+    if draft is None:
+        del st.query_params["draft"]
+        ss.draft_missing = True
+        return
+    ss.file_sig = (draft.filename, hashlib.sha1(draft.data).hexdigest())
+    ss.file_name, ss.file_bytes, ss.draft_id = draft.filename, draft.data, draft.id
+    ss.draft_restored = draft.filename
+    saved = draft.state
+    try:
+        args = saved["read_args"]
+        rr = read_file(ss.file_name, ss.file_bytes, sheet=args.get("sheet"), header_row=args.get("header_row", "auto"))
+        mapping = Mapping.model_validate(saved["mapping"]).normalized(schema, list(rr.df.columns))
+        map_meta = dict(saved["map_meta"])
+    except Exception:  # no state saved yet, or it doesn't fit any more: start the mapping over for this file
+        load_and_map()
+        return
+    ss.read, ss.read_error, ss.read_args = rr, None, args
+    ss.profiles = profile_columns(rr.df, n_samples=settings.ai_sample_values)
+    ss.mapping, ss.map_meta = mapping, map_meta
+    ss.template_name = saved.get("template_name") or Path(ss.file_name).stem
+    ss.timezone = saved.get("timezone") if saved.get("timezone") in ZONE_LABEL else "America/New_York"
+    ss.ai_used = bool(saved.get("ai_used"))
+    ss.remember_pref = bool(saved.get("remember", True))
+    ss.multi_cells, ss.pending, ss.notes_result, ss.check_result, ss.edit_errors = {}, None, None, None, []
+    ss.draft_saved = json.dumps(saved, sort_keys=True)
+    ss.editor_version += 1
 
 
 def load_and_map(sheet: str | None = None, header_row: int | None | str = "auto", use_ai: bool = True) -> None:
@@ -345,7 +455,7 @@ def load_and_map(sheet: str | None = None, header_row: int | None | str = "auto"
     has no header row, int = 0-based row of the raw grid), `use_ai` (allow Claude to refine the mapping; it is
     only actually used when an assistant exists and AI_AUTO_MAP is on).
 
-    Reads ss.file_name / ss.file_bytes. Writes ss.read and ss.read_error; on success also ss.profiles,
+    Reads ss.file_name / ss.file_bytes. Writes ss.read and ss.read_error; on success also ss.read_args, ss.profiles,
     ss.mapping, ss.map_meta, ss.template_name, ss.timezone, ss.ai_used, and clears ss.multi_cells, ss.pending,
     ss.notes_result, ss.check_result and ss.edit_errors. Bumps ss.editor_version so both data editors start fresh. Any edits the
     reviewer made to the old mapping are discarded, which is what "Re-read file" should do.
@@ -360,6 +470,7 @@ def load_and_map(sheet: str | None = None, header_row: int | None | str = "auto"
         return
     ss.read_error = None
     ss.read = rr
+    ss.read_args = {"sheet": sheet, "header_row": header_row}  # as requested, so a restored draft reads the same
     # The number of sample values per column is the same setting that limits what Claude is shown, so the
     # samples in the UI match what Claude would see.
     ss.profiles = profile_columns(rr.df, n_samples=settings.ai_sample_values)
@@ -575,6 +686,14 @@ def page_new_import() -> None:
     st.header("New import")
     st.caption(f"Target format: **{schema.label}** · supported files: "
                f"{', '.join(e.lstrip('.') for e in SUPPORTED_EXTENSIONS)}")
+    # After a browser refresh session state is empty, but the URL still names the draft of the file being mapped.
+    if not ss.get("file_name") and st.query_params.get("draft"):
+        restore_draft(st.query_params["draft"])
+    if name := ss.pop("draft_restored", None):
+        st.info(f"Picked up where you left off with **{name}** (the page was reloaded).")
+    if ss.pop("draft_missing", False):
+        st.caption("The mapping in progress from before the reload isn't kept any more (it was imported, cleared, "
+                   "or unchanged for 24 hours). Upload the file again.")
 
     top = st.columns([4, 1], vertical_alignment="bottom")
     with top[0]:
@@ -762,17 +881,20 @@ def page_new_import() -> None:
         c1.checkbox("Remember this mapping", value=False, disabled=True, key="remember_mapping_headerless",
                     help="Files without a header row are not saved as templates.")
     else:
-        c1.checkbox("Remember this mapping", value=True, key="remember_mapping",
+        # remember_pref: the box as it was before a browser refresh (restore_draft); otherwise ticked.
+        c1.checkbox("Remember this mapping", value=ss.get("remember_pref", True), key="remember_mapping",
                     help="Saves the mapping as a template; the next file with the same columns maps instantly.")
     c2.text_input("Template name", value=ss.get("template_name") or "", key=template_key(),
                   disabled=headerless or not ss.get("remember_mapping", True))
     if c3.button("Start import", type="primary", disabled=bool(problems), width="stretch"):
         import_id = start_import()
         # Clear the page *before* switching: open_import ends this run, and coming back to New import should
-        # show an empty uploader rather than the file that was just imported.
+        # show an empty uploader rather than the file that was just imported. This also deletes the draft.
         reset_file_state()
         ss.uploader_version += 1
         open_import(import_id)
+    # Everything above may have changed the mapping or the file's settings: keep them for a browser refresh.
+    save_draft()
 
 
 # Column headers of the "Columns in your file" table (one row per column of the uploaded file).
@@ -1305,7 +1427,7 @@ def _completed_view(rec: ImportRecord) -> None:
     if rej_p:
         # The rejected-rows file holds duplicates as well as bad rows, so both are counted on the button.
         n_rej = (rec.rejected or 0) + (rec.duplicates or 0)
-        d[1].download_button(f"⬇ Rejected rows ({n_rej:,})", rej_p.read_bytes(),
+        d[1].download_button(f"⬇ Rejected rows ({n_rej:,})", rejects_download(str(rej_p), rej_p.stat().st_mtime),
                              rec.files.get("rejects_download", "rejected.csv"), mime="text/csv", width="stretch",
                              on_click="ignore", disabled=not n_rej)
     sum_p = store.file_path(rec, "summary")
