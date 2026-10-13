@@ -46,6 +46,7 @@ import pandas as pd
 from charset_normalizer import from_bytes
 
 from .normalizers import clean_text, looks_like_date, looks_like_email, looks_like_phone
+from .sheetsize import SheetTooBig, check_sheet_size
 
 # Delimited text files (the delimiter is sniffed, except .tsv/.tab which are always tab-separated).
 TEXT_EXTENSIONS = {".csv", ".tsv", ".txt", ".tab"}
@@ -578,7 +579,8 @@ def read_file(
     a header row holding a phone number / email / date (likely a customer row, e.g. picked by hand), no data rows.
 
     Raises :class:`ReadError` for an unsupported extension, an empty file, a file or sheet without any values, a
-    header row past the end of the file, or a spreadsheet that can't be opened.
+    header row past the end of the file, a spreadsheet that can't be opened, or a sheet too big for this computer's
+    memory (:func:`sheetsize.check_sheet_size`).
 
     Example: ``read_file("export.csv", b"Report\\n\\nName,Phone\\nAna,2015550111\\n")`` -> header_row 2, columns
     ["Name", "Phone"], warning "Header found on row 3; 2 row(s) above it were skipped.".
@@ -599,6 +601,13 @@ def read_file(
         sheets = list_sheets(data, ext)
         # The requested sheet if it exists, else the first one.
         chosen_sheet = sheet if sheet in sheets else (sheets[0] if sheets else None)
+        # Before the spreadsheet library reserves memory for the sheet: a stray value far away from the table can
+        # make it ask for hundreds of GB and abort the whole app (see sheetsize.py). Refused with a clear message
+        # only when the sheet needs more memory than this computer has.
+        try:
+            check_sheet_size(data, ext, chosen_sheet)
+        except SheetTooBig as exc:
+            raise ReadError(str(exc)) from None
         grid = _read_excel_grid(data, chosen_sheet)
 
     # Clean once up front: the empty-file check, header detection, the ragged-row check and the raw preview see
