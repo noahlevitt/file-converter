@@ -1,7 +1,7 @@
 """Import File Converter — internal web app (the Streamlit entry point).
 
-Pages: New import · Imports (tracker, progress, results, side-by-side comparison) · Templates · Target format
-· Users (admins only)
+Pages: New import · Imports (tracker, progress, results, side-by-side comparison) · Number history · Templates
+· Target format · Users (admins only)
 
 Run locally:   streamlit run app.py
 Run on server: docker compose up -d   (see README.md)
@@ -11,9 +11,9 @@ What it does
 A user uploads a customer/contact file (CSV, TSV, TAB, TXT, XLSX, XLSM, XLSB, XLS, ODS) and the app converts it
 into the fixed import format described in schemas/target_schema.yaml: 10-digit US phone numbers (one row per
 different number), activity timestamps as MM/DD/YYYY HH:MM AM/PM, birthday/anniversary as MM/DD/YYYY with year
-1600 when the file has no real year, and the consent column always blank. All of those rules live in the `converter` package; this
-file is only the web UI on top of it. Claude is optional and only called when someone clicks a Claude button
-(or when AI_AUTO_MAP is on).
+1600 when the file has no real year, and consent only when a person maps it. All of those rules live in the
+`converter` package; this file is only the web UI on top of it. Claude is optional and only called when someone
+clicks a Claude button (or when AI_AUTO_MAP is on).
 
 How this file is organised (top to bottom)
 ------------------------------------------
@@ -26,7 +26,7 @@ How this file is organised (top to bottom)
 4. Imports: the list page with live progress (page_imports / _import_list) and the page for one import
    (page_import_detail → _live_progress while running, _completed_view when done, with the side-by-side view,
    the mistake check and Claude value fixes).
-5. The Templates, Target format and Users pages.
+5. The Number history, Templates, Target format and Users pages.
 6. Navigation: st.navigation picks the page from the URL, the sidebar is drawn, and nav.run() runs the page.
 
 How a request flows
@@ -77,7 +77,8 @@ from converter.editor import (FROM_LABEL, LABELS, OPTION_HELP, apply_column_edit
                               row_problem)
 from converter.engine import convert, count_multi_number_cells, preview_values, source_rows
 from converter.jobs import ImportRunner
-from converter.mapping import Mapping, has_generic_columns, profile_columns
+from converter.mapping import Mapping, area_code_source, has_generic_columns, profile_columns
+from converter.numberlog import lookup as number_lookup
 from converter.normalizers import sheet_error
 from converter.output import neutralise_csv
 from converter.reader import SUPPORTED_EXTENSIONS, ReadError, read_file
@@ -229,11 +230,12 @@ def get_runner() -> ImportRunner:
     """Return the one background ImportRunner (thread pool) for this server process.
 
     Creating it has side effects, which is why it must only happen once: imports that were queued or running when
-    the server last stopped are marked "interrupted" (they can't resume), and stored files older than
-    FILE_RETENTION_DAYS are purged. IMPORT_WORKERS sets how many imports convert at the same time; the rest wait
-    in the queue.
+    the server last stopped are marked "interrupted" (they can't resume), stored files older than
+    FILE_RETENTION_DAYS are purged, and the numbers of earlier imports are recorded for the Number history page
+    (in the background). IMPORT_WORKERS sets how many imports convert at the same time; the rest wait in the queue.
     """
-    return ImportRunner(get_store(), workers=settings.import_workers, retention_days=settings.file_retention_days)
+    return ImportRunner(get_store(), workers=settings.import_workers, retention_days=settings.file_retention_days,
+                        record_days=settings.number_record_days)
 
 
 @st.cache_resource
@@ -850,9 +852,15 @@ def page_new_import() -> None:
     each = mapping.row_field(schema)
     if each is not None:
         each_fm = mapping.get(each.name)
-        multi = multi_number_cells(df, each, each_fm.sources)
-        if each_fm.transform == "each_row" or multi:
-            note = (f"ℹ️ A customer with different numbers in {', '.join(each_fm.sources)} gets one row per number in "
+        phones = list(each_fm.sources)
+        if each_fm.transform == "area_code":
+            # 'Phone + area code column': the area code column holds no numbers of its own.
+            area = phones.pop(area_code_source(phones, df.head(5000).to_dict("records")))
+            st.caption(f"ℹ️ 7-digit numbers in {', '.join(phones)} get the area code from **{area}** (the same "
+                       "row); numbers that already have an area code are kept as they are.")
+        multi = multi_number_cells(df, each, phones)
+        if len(phones) > 1 or multi:
+            note = (f"ℹ️ A customer with different numbers in {', '.join(phones)} gets one row per number in "
                     f"**{each.header}**, with the other columns copied from their original row.")
             if multi:
                 note += (f" {multi:,} cell{'s hold' if multi != 1 else ' holds'} several numbers; each different "
@@ -1701,6 +1709,63 @@ def _repair_section(rec: ImportRecord, rec_schema: TargetSchema, audit: pd.DataF
 
 
 # ---------------------------------------------------------------------------
+# Page: Number history
+# ---------------------------------------------------------------------------
+
+# How a recorded consent value reads in the Number history table.
+CONSENT_TEXT = {"true": "true — subscribed", "false": "false — opted out", "": "blank — no change"}
+
+
+def page_numbers() -> None:
+    """Page "Number history": every import a phone number was converted in, and where its consent came from.
+
+    Reads the record kept by converter.numberlog (table number_log), which stays after each import's files are
+    deleted (FILE_RETENTION_DAYS), for NUMBER_RECORD_DAYS (default forever). The typed number is read like a phone
+    cell ("(516) 555-0177", "+1 516.555.0177"). One table row per import: when and by whom, the file and its row,
+    the number and consent as written in the file, the consent sent to the import and the column it came from.
+    Selecting a row opens the import; the table can be downloaded as CSV (e.g. to answer a complaint).
+    """
+    st.header("Number history")
+    st.caption("Look up a phone number: every import it was converted in, the file and row it came from, and the "
+               "consent value sent with it. Kept after the import's files are deleted"
+               + (f" (for {settings.number_record_days} days)." if settings.number_record_days > 0 else "."))
+    text = st.text_input("Phone number", placeholder="(516) 555-0177", key="num_search")
+    if not text.strip():
+        return
+    res = number_lookup(store, text, schema)
+    if res.error:
+        st.error(f"'{text.strip()}' can't be looked up: {res.error}.")
+        return
+    if not res.entries:
+        st.info(f"**{res.number}** isn't in any recorded import. Imports are recorded since version 0.21.0 (earlier "
+                "ones too, if their files hadn't been deleted yet).")
+        return
+    st.markdown(f"**{res.number}** — converted in {len(res.entries):,} import"
+                f"{'s' if len(res.entries) != 1 else ''} (newest first).")
+    table = pd.DataFrame([{
+        "Imported": fmt_dt(e["imported_at"], TZ), "#": e["import_id"], "File": e["filename"],
+        "Sheet": e["sheet"], "Row": e["file_row"], "Number in file": e["phone_value"],
+        "Consent sent": CONSENT_TEXT.get(e["consent"], e["consent"]), "Consent in file": e["consent_value"],
+        "Consent from": e["consent_from"] or "not mapped", "By": e["username"],
+    } for e in res.entries])
+    if not table["Sheet"].astype(bool).any():
+        table = table.drop(columns="Sheet")
+    st.caption("Select a row to open the import.")
+    event = st.dataframe(table, hide_index=True, width="stretch", on_select="rerun", selection_mode="single-row",
+                         key="numbers_table",
+                         column_config={"#": st.column_config.NumberColumn(width="small", format="%d"),
+                                        "Row": st.column_config.NumberColumn(width="small", format="%d")})
+    # The CSV keeps exact UTC times; cells are neutralised so a spreadsheet never runs one as a formula.
+    csv = pd.DataFrame(res.entries).rename(columns={"imported_at": "imported_at_utc"})
+    csv.insert(0, "number", res.number)
+    st.download_button("⬇ Download (CSV)", neutralise_csv(csv.to_csv(index=False).encode("utf-8-sig")),
+                       f"number_history_{res.number}.csv", mime="text/csv")
+    sel = event.selection.rows if event and event.selection else []
+    if sel:
+        open_import(int(table.iloc[sel[0]]["#"]))
+
+
+# ---------------------------------------------------------------------------
 # Pages: templates, target format, users
 # ---------------------------------------------------------------------------
 
@@ -1802,6 +1867,9 @@ def page_schema() -> None:
     st.markdown(f"**Stored files:** each import's original and converted files are kept for "
                 f"{settings.file_retention_days} days" if settings.file_retention_days > 0
                 else "**Stored files:** kept indefinitely")
+    st.markdown("**Number history:** each converted number, its consent value and the file row it came from are "
+                + (f"kept for {settings.number_record_days} days" if settings.number_record_days > 0
+                   else "kept indefinitely") + ", also after the files are deleted.")
 
 
 def page_users() -> None:
@@ -1872,6 +1940,7 @@ _landing = os.getenv("DEFAULT_PAGE", "new")  # "new" or "imports": which page op
 # url_path is the address of each page (e.g. /imports?id=12), so links and bookmarks keep working.
 PAGE_NEW = st.Page(page_new_import, title="New import", icon="⬆️", url_path="new", default=_landing != "imports")
 PAGE_IMPORTS = st.Page(page_imports, title="Imports", icon="📋", url_path="imports", default=_landing == "imports")
+PAGE_NUMBERS = st.Page(page_numbers, title="Number history", icon="🔎", url_path="numbers")
 PAGE_TEMPLATES = st.Page(page_templates, title="Templates", icon="🧩", url_path="templates")
 PAGE_SCHEMA = st.Page(page_schema, title="Target format", icon="🎯", url_path="target-format")
 PAGE_USERS = st.Page(page_users, title="Users", icon="👥", url_path="users")
@@ -1880,7 +1949,7 @@ PAGE_USERS = st.Page(page_users, title="Users", icon="👥", url_path="users")
 # accounts do nothing. That is the access control for it: a page that isn't passed to st.navigation can't be
 # opened, even by typing its URL.
 logins_on = settings.auth_mode != "none"
-nav = st.navigation([PAGE_NEW, PAGE_IMPORTS, PAGE_TEMPLATES, PAGE_SCHEMA]
+nav = st.navigation([PAGE_NEW, PAGE_IMPORTS, PAGE_NUMBERS, PAGE_TEMPLATES, PAGE_SCHEMA]
                     + ([PAGE_USERS] if user["is_admin"] and logins_on else []))
 
 # Sidebar, drawn on every page under the navigation menu.
