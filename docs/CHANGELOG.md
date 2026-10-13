@@ -3,6 +3,19 @@
 What changed in each version. The running version is shown in the app's sidebar. Each version is tagged in git
 (`vX.Y.Z`).
 
+## 0.15.2 — a stray cell can no longer crash the app
+
+- **Fix:** a spreadsheet with a value far away from its table (e.g. one stray value in the sheet's last cell,
+  XFD1048576) made the spreadsheet library try to reserve hundreds of GB and stopped the whole app for everyone,
+  interrupting running imports. A 5 KB file was enough; so was a tiny .ods that repeats a row a million times.
+- Such a sheet is now refused when it is uploaded, with a message naming the far cell and how to fix the file
+  (Ctrl+End in Excel). Only sheets that need more memory than the computer has are refused (80% of its memory, or
+  of the container's limit), so every file that could be read before is read exactly as before. Formatting far
+  away (formatted but empty cells and rows) doesn't count.
+- Checked for .xlsx, .xlsm and .ods (an .xls can't get that big; .xlsb isn't checked). Speed: about 0.015 s for a
+  5,000-row file and 0.5 s for 150,000 rows (reading that file takes about 3 s); a file isn't checked twice
+  (re-read, refresh, the background import). CSV files are unaffected.
+
 ## 0.15.1 — Excel error values explained
 
 - A cell holding an Excel error code (`#VALUE!`, `#REF!`, `#DIV/0!`, `#NAME?`, `#NUM!`, `#NULL!`, newer codes such
