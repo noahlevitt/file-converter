@@ -169,6 +169,11 @@ changes (`Store.purge_drafts`).
 | Texting-activity columns (*Last SMS Received*, `in_sms_last`) are not phone columns, even when empty | `heuristics.PHONE_ATTRIBUTE_WORDS`, `is_phone_header` |
 | A similar template (75%+) adds phone columns that are new since it was saved | `services.initial_mapping` |
 | Without a chosen sheet, the first visible sheet with data is read (empty, hidden and chart sheets passed over, with a warning) | `reader._choose_sheet`, `_sheets_to_pass_over`; `ReadResult.hidden_sheets` |
+| Birthdays/anniversaries are calendar dates: a zone written with them is not converted | `normalizers.prepare_date` (`ctx["calendar"]`), `parse_date`; `dateparse.parse(convert_zones=False)` |
+| A complete birthday column with years beats Birth Month/Day columns; day-of-week columns never a part; year 0 = no year | `heuristics._full_date_wins`, `_date_part_columns`; `dateparse._zero_year` |
+| Dates about a birthday (*Birthday Reward Sent*) never feed birthday/anniversary; consent, *Membership Duration*, *Phone Extension* don't make a call log; *Date Added* / *Import Date* are creation dates | `heuristics.DATE_EVENT_WORDS`, `score`; `_looks_like_call_log`, `_call_log_header`; `CREATION_DATE_WORDS` |
+| A column named for a date field is mapped when its values are machine formats (serials, Unix, compact, 1600) | `heuristics.type_share`, `_sample_dates` |
+| Named date + time columns combined (*Last Visit Date* + *Last Visit Time*) | `heuristics.auto_map` step 1b, `_named_time_partner` |
 | Several numbers in one cell found by the phonenumbers matcher, separators, digit groups, then North American shapes (used only when they find every number the others found, and more) | `normalizers.split_phones`, `_split_phones`, `_NANP_RE`, `_span_pieces` |
 | A CSV quote mark that is never closed costs only its row (warning names it); cells of any size; a quote inside a cell is an ordinary character | `reader._read_text_grid`, `_quote_check`, `_lenient_grid` |
 | Birthday/anniversary without a real year → year 1600 | `dateparse` (`NO_YEAR`), `normalizers.normalize_date`, `_placeholder_year`; schema `no_year_value` |
