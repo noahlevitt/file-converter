@@ -357,31 +357,92 @@ def is_fax_column(column: str) -> bool:
     return any(w.lower() in FAX_WORDS for w in re.findall(r"[A-Za-z]+", text))
 
 
+# Words that make an "area code" header about something other than the customer's phone: "Store Area Code",
+# "Delivery Area Code", "Sales Area Code", "Service Area".
+_AREA_CODE_NOT_PHONE = {"store", "delivery", "branch", "location", "restaurant", "shop", "sales", "zone", "region",
+                        "territory", "district", "service", "served", "areas"}
+# Words left out when pairing an area code column with its phone column ("Home Area Code" ↔ "Home Phone").
+_PAIR_DROP = {"area", "code", "cd", "npa", "ac", "areacode", "phone", "phones", "phonenumber", "number", "num", "no",
+              "nbr", "tel", "telephone", "ph", "contact"}
+# Words that mean the same kind of line, so "Cell Area Code" pairs with "Mobile Phone".
+_PAIR_SAME = {"cell": "mobile", "cellular": "mobile", "cellphone": "mobile", "wireless": "mobile", "house": "home",
+              "office": "work", "business": "work"}
+
+
+def _header_words(column: str) -> list[str]:
+    """Lower-case words of a header, also split at camelCase and letter/digit boundaries: "AreaCode2" → area,
+    code, 2."""
+    text = re.sub(r"([a-z])([A-Z])", r"\1 \2", column)
+    text = re.sub(r"([A-Za-z])(\d)|(\d)([A-Za-z])", lambda m: " ".join(g for g in m.groups() if g), text)
+    return re.findall(r"[a-z]+|\d+", text.lower())
+
+
 def is_area_code_header(column: str) -> bool:
     """True when the header names an area code column: "Area Code", "AreaCode", "Phone Area Code", "area_cd",
-    "Area", "NPA"; not "Delivery Area" or "Areas Served". Callers that map automatically also check the values."""
+    "Area", "NPA", "Home Area Code"; not "Delivery Area", "Areas Served", "Area #", or an area code of something
+    other than the customer's phone ("Store Area Code", "Delivery Area Code"). Callers that map automatically also
+    check the values."""
     h = norm_header(column)
-    return h in ("npa", "area") or h.startswith("areac") or "areacode" in h or (
-        "area" in re.sub(r"([a-z])([A-Z])", r"\1 \2", column).lower().split() and h.endswith(("code", "cd")))
+    words = _header_words(column)
+    if set(words) & _AREA_CODE_NOT_PHONE:
+        return False
+    return (h == "npa" or column.strip().lower() == "area" or h.startswith("areac") or "areacode" in h
+            or ("area" in words and h.endswith(("code", "cd"))))
 
 
-def area_code_source(sources: list[str], records: list[dict[str, str]]) -> int:
-    """Position of the area code column among the sources of a 'Phone + area code column' mapping.
+def _pair_key(column: str) -> str:
+    """What is left of a header without its area code / phone words, for pairing an area code column with its phone
+    column: "Home Area Code" → "home", "Home Phone" → "home", "Cell Area Code" → "mobile", "Area Code (2)" →
+    "2", "Phone 2" → "2", "Area Code" → "", "Phone" → ""."""
+    return " ".join(_PAIR_SAME.get(w, w) for w in _header_words(column) if w not in _PAIR_DROP)
 
-    The column named like one (:func:`is_area_code_header`: "Area Code", "NPA"); when none or several are, the one
-    whose filled cells (in the first 5,000 rows) are most often an area code ("516", "(516)"). Picked once for the
-    whole file, so an odd cell in that column ("N/A", "000") is never taken for a phone number.
-    Example: ["Phone", "Area Code"] -> 1.
+
+def area_code_columns(sources: list[str], records: list[dict[str, str]]) -> list[int]:
+    """Positions of the area code columns among the sources of a 'Phone + area code column' mapping.
+
+    The columns named like one (:func:`is_area_code_header`: "Area Code", "Home Area Code", "NPA"). When none is,
+    the one column whose filled cells (in the first 5,000 rows) are most often an area code ("516", "(516)"), if at
+    least half are; otherwise none, and every column is read as phone numbers. Example: ["Phone", "Area Code"] →
+    [1].
     """
     named = [i for i, c in enumerate(sources) if is_area_code_header(c)]
-    if len(named) == 1:
-        return named[0]
+    if named:
+        return named
 
     def share(i: int) -> float:
         filled = [v for v in (N.clean_text(r.get(sources[i], "")) for r in records[:5000]) if v]
         return sum(bool(N.area_code_cell(v)) for v in filled) / len(filled) if filled else 0.0
 
-    return max(named or range(len(sources)), key=share)
+    best = max(range(len(sources)), key=share, default=None)
+    return [best] if best is not None and share(best) >= 0.5 else []
+
+
+def area_code_pairs(sources: list[str], records: list[dict[str, str]]) -> tuple[list[int], dict[int, int | None]]:
+    """Which area code column each phone column of a 'Phone + area code column' mapping takes its area code from.
+
+    Returns (positions of the area code columns, {phone column position: area code column position or None}).
+    A phone column uses the area code column named for the same kind of number ("Home Phone" ← "Home Area Code",
+    "Mobile" ← "Cell Area Code", "Phone (2)" ← "Area Code (2)"); otherwise the plain one ("Area Code", "NPA", or a
+    column found by its values); a plain "Phone" column also uses the only area code column there is. Anything
+    else gets none (None): its 7-digit numbers are treated like any number without an area code, rather than
+    taking another line's area code ("Work Phone" never takes "Home Area Code"). Picked once for the whole file
+    (from the headers, or the first 5,000 rows when no header names one), so an odd cell in an area code column
+    ("000") is never taken for a phone number. The order the columns were picked in doesn't matter.
+    Example: ["Home Area Code", "Home Phone", "Cell Area Code", "Cell Phone", "Work Phone"] → ([0, 2], {1: 0,
+    3: 2, 4: None}).
+    """
+    areas = area_code_columns(sources, records)
+    phones = [i for i in range(len(sources)) if i not in areas]
+    named = any(is_area_code_header(sources[a]) for a in areas)
+    keys = {a: _pair_key(sources[a]) if named else "" for a in areas}
+    plain = next((a for a in areas if not keys[a]), None)
+    pairs: dict[int, int | None] = {}
+    for i in phones:
+        key = _pair_key(sources[i])
+        same = [a for a in areas if key and keys[a] == key]
+        pairs[i] = (same[0] if len(same) == 1 else plain if plain is not None
+                    else areas[0] if not key and len(areas) == 1 else None)
+    return areas, pairs
 
 
 def norm_header(h: str) -> str:
