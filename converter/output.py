@@ -16,7 +16,9 @@ Pure functions that turn an ``engine.ConversionResult`` into bytes; the caller d
     zeros / plus signs, including when someone edits and re-saves the file. Column widths fit the content.
 
 * :func:`write_rejects` — rejected and duplicate rows with reasons, as UTF-8 CSV with a BOM (opens correctly in
-  Excel).
+  Excel). Cells that a spreadsheet would run as a formula are neutralised (:func:`neutralise_formula`), because
+  this file repeats the client's original values and is opened by staff in Excel. :func:`neutralise_csv` does the
+  same for rejects files written by older versions when they are downloaded.
 * :func:`write_summary` — the human-readable ``summary.txt``.
 * :func:`output_filename` / :func:`rejects_filename` / :func:`timestamp` — file names, e.g.
   ``guests_converted_20261010-1342.csv`` and ``guests_REJECTED_3rows_20261010-1342.csv``.
@@ -26,6 +28,7 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -83,7 +86,9 @@ def write_output(df: pd.DataFrame, schema: TargetSchema) -> bytes:
     spec = schema.output
     if spec.format == "xlsx":
         buf = io.BytesIO()
-        with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+        # Every value is written as text: never as a formula ("=..."), a link or a number, whatever it looks like.
+        opts = {"strings_to_formulas": False, "strings_to_urls": False, "strings_to_numbers": False}
+        with pd.ExcelWriter(buf, engine="xlsxwriter", engine_kwargs={"options": opts}) as writer:
             # Excel limits sheet names to 31 characters.
             df.to_excel(writer, sheet_name=spec.sheet_name[:31], index=False, header=spec.include_header)
             ws = writer.sheets[spec.sheet_name[:31]]
@@ -109,14 +114,62 @@ def write_output(df: pd.DataFrame, schema: TargetSchema) -> bytes:
     return buf.getvalue().encode(spec.encoding, errors="replace")
 
 
+# Formula injection ("CSV injection"): Excel, LibreOffice and Google Sheets run a cell that starts with "=", "+",
+# "-" or "@" as a formula, e.g. =HYPERLINK("http://x","click") becomes a live link and -2+3+cmd|' /C calc'!A0 can
+# start a program. Tab and carriage return at the start are on OWASP's list too (some tools strip them first).
+_FORMULA_START = ("=", "+", "-", "@")
+# Regex: a plain number such as "-12", "+1", "3.5" or "-.5" - a spreadsheet reads it as a number, not a formula.
+_PLAIN_NUMBER_RE = re.compile(r"[+-]?(\d+(\.\d*)?|\.\d+)")
+# Regex: only sign characters and spaces ("-", "--", "+ -"): a dash used as "empty", nothing to run.
+_ONLY_SIGNS_RE = re.compile(r"[-+=@\s]*")
+
+
+def neutralise_formula(value):
+    """A cell value that is safe to open in a spreadsheet: a would-be formula gets a leading apostrophe.
+
+    The apostrophe makes the cell text (OWASP's advice for CSV injection); the value is otherwise unchanged, so a
+    person still sees exactly what the client's file held. Plain numbers and lone dashes are left alone, as is
+    anything that isn't a string.
+        '=HYPERLINK("http://x","click")' → "'=HYPERLINK(\\"http://x\\",\\"click\\")"
+        "+1 (516) 555-0100"               → "'+1 (516) 555-0100"
+        "@SUM(A1)"  → "'@SUM(A1)"     "-12" → "-12"     "-" → "-"     "516-555-0100" → unchanged
+    """
+    if not isinstance(value, str) or not value:
+        return value
+    if not (value.startswith(("\t", "\r")) or value.lstrip().startswith(_FORMULA_START)):
+        return value
+    if _PLAIN_NUMBER_RE.fullmatch(value.strip()) or _ONLY_SIGNS_RE.fullmatch(value):
+        return value
+    return "'" + value
+
+
+def neutralise_csv(data: bytes) -> bytes:
+    """A UTF-8 CSV file (e.g. a stored rejects file) with every would-be formula neutralised.
+
+    Returns ``data`` itself when no cell needed a change - which is always the case for rejects files written
+    since 0.15.0 - so their bytes stay identical. Used when an older import's rejects file is downloaded.
+    """
+    text = data.decode("utf-8-sig")
+    rows = list(csv.reader(io.StringIO(text, newline="")))
+    safe = [[neutralise_formula(c) for c in row] for row in rows]
+    if safe == rows:
+        return data
+    buf = io.StringIO(newline="")
+    csv.writer(buf, lineterminator="\n").writerows(safe)
+    return buf.getvalue().encode("utf-8-sig")
+
+
 def write_rejects(result: ConversionResult) -> bytes:
     """Serialize ``result.rejects`` (rejected + duplicate rows with status, file row, reasons and original values).
 
     Always plain CSV, independent of the target format, because this report is for people to read and fix in
-    Excel, not for importing.
+    Excel, not for importing. The original values (and column names) come from the client's file, so any that a
+    spreadsheet would run as a formula are neutralised first (:func:`neutralise_formula`).
     """
+    rejects = result.rejects.map(neutralise_formula)
+    rejects.columns = [neutralise_formula(str(c)) for c in rejects.columns]
     # utf-8-sig so Excel opens it with the right encoding.
-    return result.rejects.to_csv(index=False).encode("utf-8-sig")
+    return rejects.to_csv(index=False).encode("utf-8-sig")
 
 
 def write_summary(result: ConversionResult, schema: TargetSchema, source_filename: str, user: str,
