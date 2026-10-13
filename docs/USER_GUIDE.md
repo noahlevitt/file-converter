@@ -186,14 +186,17 @@ The numbers below it are:
 
 - **US only; +1 assumed.** Any punctuation, spacing, extension, label (`Cell:`), Excel artifact (`5165550100.0`,
   `="5165550100"`) or letters typed for digits (`516-555-O1OO`) is handled.
-- **Typos are repaired when exactly one US number fits**, without adding or changing any digit:
+- **Typos are repaired when exactly one US number fits:**
   - an extra digit is removed (a digit typed twice, or one extra at the start or end);
-  - a country code typed in front of a US number is removed (`+44 516 555 0100`).
+  - a country code typed in front of a US number is removed (`+44 516 555 0100`);
+  - an area code that doesn't exist anywhere and is one keystroke from an area code the file uses is read as that
+    one (`(156) 555-0199` in a 516 file → 516-555-0199);
+  - a number without an area code (7 digits) gets the area code of 80%+ of the file's numbers.
 
   Every repair is imported **and shown in orange**. Check them: a wrong guess texts a stranger.
-- **Area codes are never assumed or changed.** A number with no area code, or with an area code that looks like
-  a typo (`514…` in a file of `516` numbers), is a bad row with its reason. Fix it in the original file if you know
-  the right number.
+- **A real area code is never changed.** `514…` in a file of `516` numbers is a bad row (514 is Quebec), and a
+  7-digit number in a file with a mix of area codes is a bad row. Fix it in the original file if you know the right
+  number.
 - **Not guessed:** when two numbers fit equally, the row is a bad row and the reason lists both options, e.g.
   "could be (516) 946-1961 or (516) 946-1966".
 - **Bad rows with a reason:** missing area code, too few or too many digits, an area code that isn't in use,
