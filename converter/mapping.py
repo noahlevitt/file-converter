@@ -200,7 +200,9 @@ class Mapping(BaseModel):
         2. Source columns are matched to the file case-insensitively and rewritten in the file's spelling
            (a template made on "PHONE" works on "Phone"); failing that, ignoring spaces and punctuation when only
            one column fits ("Last Visit Date" works on "Last_Visit_Date", as templates are matched that way);
-           columns missing from the file or skipped by the reviewer are removed.
+           columns missing from the file or skipped by the reviewer are removed. A fax column
+           (:func:`is_fax_column`) is removed from a phone field unless a person put it there (``origin == "user"``):
+           an old template, Claude or the rules never import fax numbers.
         3. An unknown transform becomes "none"; "none" and "constant" never keep sources.
         4. :func:`phone_rule`: "First non-empty" on a phone field becomes "One row per phone number", and
            "One row per phone number" on any other field becomes "First non-empty".
@@ -242,6 +244,8 @@ class Mapping(BaseModel):
                 out[f.name] = FieldMapping(reason="mapped by hand only")
                 continue
             fm.sources = [c for c in map(find, fm.sources) if c and c.lower() not in skip]
+            if f.type == "phone" and fm.origin != "user":
+                fm.sources = [c for c in fm.sources if not is_fax_column(c)]  # a fax line can't receive texts
             if fm.transform not in TRANSFORMS:
                 fm.transform = "none"
             if fm.transform in ("none", "constant"):
@@ -327,6 +331,21 @@ def has_generic_columns(columns: list[str]) -> bool:
         ["Column 1", "Column 2"] → True;  ["Column 1", "Phone"] → False;  [] → False
     """
     return bool(columns) and all(_GENERIC_COLUMN_RE.fullmatch(str(c)) for c in columns)
+
+
+# Header words of a fax number (whole words, so "Fairfax" doesn't count). A fax line can't receive texts: such a column
+# never feeds a phone field unless a person maps it (Mapping.normalized), and the rules never propose it.
+FAX_WORDS = {"fax", "faxes", "facsimile", "telefax"}
+
+
+def is_fax_column(column: str) -> bool:
+    """True when the header names a fax number, also next to a phone word ("Phone/Fax" is a fax line too).
+
+    Examples: ``is_fax_column("Fax") -> True``, ``"Business Fax"``, ``"fax_number"``, ``"BusinessFax"`` -> True;
+    ``is_fax_column("Fairfax Store") -> False``, ``is_fax_column("Phone") -> False``.
+    """
+    text = re.sub(r"([a-z])([A-Z])", r"\1 \2", column)  # camelCase → camel Case
+    return any(w.lower() in FAX_WORDS for w in re.findall(r"[A-Za-z]+", text))
 
 
 def norm_header(h: str) -> str:
