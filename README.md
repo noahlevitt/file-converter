@@ -113,19 +113,20 @@ Every value is reduced to the 10-digit US number:
 #### Repairing typos (US numbers only)
 
 Only US numbers are expected, so a number that isn't a valid US number is treated as a likely typo. It is repaired
-only when exactly **one** US number fits and **no digit is added or changed** (each repair below was approved one
-by one):
+only when exactly **one** US number fits (each repair below was approved one by one):
 
 | Typo | Example | Repaired to |
 |---|---|---|
 | Country code in front of a US number | `+44 516 555 0100` | 516-555-0100 (not done for a real foreign number whose area code isn't used in the file, e.g. a London number) |
 | `+1` added to a number that already had a `+` | `+1 +51 63 171059` | 516-317-1059 |
 | One digit too many (typed twice, extra at the end or start) | `51655501444` | 516-555-0144 |
+| An area code that doesn't exist anywhere, one keystroke (one digit, or two swapped) from an area code the file uses | `(156) 555-0199` in a file of 516 numbers | 516-555-0199 |
+| No area code (7 digits), when 80%+ of the file's numbers (at least 5) share one area code | `555-0177` in a file of 516 numbers | 516-555-0177 |
 
-**Never done (compliance):** area codes are never changed or filled in. A number whose area code looks like a typo
-(`514-968-9696` in a file of 516 numbers) or that has no area code (`555-0177`) stays a bad row with its reason
-(`not a US number — Canada (area code 514, Quebec)`, `missing area code (only 7 digits)`): an assumed area code
-would send texts to someone who never gave consent. Removed in 0.9.0.
+The last two were removed in 0.9.0 and restored in 0.20.0. **A real area code is never changed:** `514-968-9696`
+in a file of 516 numbers stays a bad row (`not a US number — Canada (area code 514, Quebec)`), because it may be
+someone's real number. A 7-digit number in a file with a mix of area codes stays a bad row (`missing area code
+(only 7 digits)`). A filled-in or corrected area code decides whose phone gets the texts: check these repairs.
 
 - When two or more numbers fit, the one that already appears elsewhere in the file wins; otherwise nothing is guessed
   and the reason lists the options ("could be (516) 946-1961 or (516) 946-1966").
@@ -145,7 +146,8 @@ for the phone field are upgraded automatically.
 - The same number twice (`201-555-0111` and `(201) 555-0111`, in two columns or in one cell) counts once.
 - An invalid extra number (e.g. `123` in phone3, or `555-1212` after a full number in the same cell) is skipped;
   the row still imports with the customer's other number(s), and the summary lists what was skipped. A number
-  without an area code is never completed from the number next to it.
+  without an area code is completed only from the file's main area code (see above), never from the number next
+  to it.
 - **Fax numbers are never imported** (a fax line can't receive texts). A number labelled fax in a cell
   (`Fax: 516-555-0199`, `516-555-0199 (fax)`) is skipped when the customer has another number; when it is their
   only number the row is a bad row, *labelled as a fax number* (before 0.17.0 it was imported then). Columns named
