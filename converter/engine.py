@@ -97,7 +97,7 @@ from typing import Any, Callable
 import pandas as pd
 
 from . import normalizers as N
-from .mapping import Mapping
+from .mapping import Mapping, area_code_source
 from .schema import TargetSchema
 from .transforms import apply_transform
 
@@ -362,9 +362,9 @@ def convert(
         ctx = each_ctx if f is each_field else N.prepare(f, [v for i, v in enumerate(cleaned) if not blank[i]], params)
         if timezone:
             ctx["tz"] = timezone
-        # copy/coalesce/each_row pass the file value through, so "unchanged" vs "reformatted" can be told apart by
-        # comparing output with input. Other transforms build a new value (name part, combine, split, translate…).
-        passthrough = fm.transform in ("copy", "coalesce", "each_row")
+        # copy/coalesce/each_row/area_code pass the file value through, so "unchanged" vs "reformatted" can be told
+        # apart by comparing output with input. Other transforms build a new value (name part, combine, split…).
+        passthrough = fm.transform in ("copy", "coalesce", "each_row", "area_code")
 
         # Cache of raw value -> (output, error) for this field. Contact files repeat values a lot (same date, city,
         # state, area code…) and phone/date parsing is the expensive part, so each distinct value is normalized
@@ -522,7 +522,7 @@ def convert(
     )
     # Show which value of the file row each entry is about, when file rows can hold several numbers.
     if each_field is not None and not rejects.empty and (
-            mapping.get(each_field.name).transform == "each_row" or any(extra)):
+            mapping.get(each_field.name).transform in ("each_row", "area_code") or any(extra)):
         # An expanded file row can appear several times in the report (e.g. one number rejected, another a
         # duplicate); this extra column (after Reason) says which phone value each entry is about. If the file
         # already has a column with that name (e.g. a file in the import format itself), the extra one is renamed.
@@ -629,13 +629,19 @@ def _expand_rows(records: list[dict[str, str]], blank: list[bool], f, mapping: M
     # Per file row: the non-empty cleaned values of the source columns, each cell split into one value per number
     # (phone fields only), as (value, labelled fax) pairs. Empty list for blank rows.
     per_row: list[list[tuple[str, bool]]] = []
+    area_at = area_code_source(fm.sources, records) if fm.transform == "area_code" else None
     for k, r in enumerate(records):
         vals: list[tuple[str, bool]] = []
         if not blank[k]:
-            for c in fm.sources:
-                v = N.clean_text(r.get(c, ""))
+            cells = [N.clean_text(r.get(c, "")) for c in fm.sources]
+            # 'Phone + area code column': one cell is the row's area code, the others hold the numbers; each 7-digit
+            # number (also one of several in a cell) gets that area code (N.with_area_code).
+            area, phone_at = N.split_area_code(cells, area_at) if area_at is not None else ("", range(len(cells)))
+            for i in phone_at:
+                v = cells[i]
                 if v:
-                    vals += N.split_phones(v, f, fm.params) if f.type == "phone" else [(v, False)]
+                    pieces = N.split_phones(v, f, fm.params) if f.type == "phone" else [(v, False)]
+                    vals += [(N.with_area_code(p, area), fax) for p, fax in pieces] if area else pieces
         per_row.append(vals)
     # Evidence for phone repairs (the file's area codes and known numbers) comes from the split values, so numbers
     # from cells holding several count too.
