@@ -153,6 +153,9 @@ _SHEET_ERROR_RE = re.compile(
 
 # The reason given for such a cell, whatever the field type.
 SHEET_ERROR_REASON = "Excel error (broken formula in the client's file)"
+# A number labelled fax in a phone cell ("Fax: 516-555-0199"): never imported, a fax line can't receive texts. Skipped
+# when the row has another number, the row's reason when it has none (engine._expand_rows).
+FAX_REASON = "labelled as a fax number (a fax can't receive texts)"
 
 
 def sheet_error(value: str) -> str | None:
