@@ -125,7 +125,8 @@ def run_import(store: Store, import_id: int) -> ImportRecord:
     0.08–0.92   ``engine.convert`` (its own 0–1 progress is scaled into this range)
     0.93        write the output file, ``rejected.csv``, ``summary.txt`` and ``audit.parquet``
     0.97        record the converted numbers and their consent values (``numberlog.record``; a failure there is
-                logged and doesn't fail the import, and the server's next start records them from the audit file)
+                logged and doesn't fail the import, and the server's next start records them from the audit file;
+                an import cancelled or failed after this point has them removed again)
     0.99        finishing; then ``complete_import`` stores counts, summary and file names (progress 1.0)
     ==========  ==========================================================================================
 
@@ -210,11 +211,22 @@ def run_import(store: Store, import_id: int) -> ImportRecord:
         summary["warnings"] = rr.warnings
         store.complete_import(import_id, summary, files)
     except ImportCancelled:
+        _forget_numbers(store, import_id)
         store.finish_import(import_id, "cancelled", stage="Cancelled by user")
     except Exception as exc:  # record the failure for the user; full trace goes to the server log
         log.error("Import %s failed:\n%s", import_id, traceback.format_exc())
+        _forget_numbers(store, import_id)
         store.finish_import(import_id, "failed", error=f"{type(exc).__name__}: {exc}", stage="Failed")
     return store.get_import(import_id)
+
+
+def _forget_numbers(store: Store, import_id: int) -> None:
+    """Remove the numbers recorded for an import that then ended cancelled or failed (a cancel noticed, or an error,
+    after the numbers were recorded): nothing of it was imported. Never raises."""
+    try:
+        store.log_numbers(import_id, [])
+    except Exception:  # noqa: BLE001 - Store.number_history also leaves out imports that didn't complete
+        log.exception("Removing the recorded numbers of import %s failed", import_id)
 
 
 class ImportRunner:
