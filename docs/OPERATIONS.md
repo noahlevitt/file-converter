@@ -107,6 +107,7 @@ All settings are in `.env`; each one is explained in `.env.example`. The ones yo
 | `DEFAULT_PAGE` | `new` | `imports` opens the Imports page first. |
 | `IMPORT_WORKERS` | `2` | Imports converted at the same time; the rest wait as *queued*. |
 | `FILE_RETENTION_DAYS` | `30` | Days to keep each import's files. `0` = forever. Records and counts are always kept. |
+| `NUMBER_RECORD_DAYS` | `0` | Days to keep the number history (each converted number, its consent and the file row it came from; *Number history* page). `0` = forever. It outlives the files on purpose. |
 
 Restart the app after changing `.env`: `Ctrl + C` then `./run_local.sh`, or `docker compose up -d`. The target
 format (`schemas/target_schema.yaml`) is reloaded automatically when the file changes.
@@ -116,8 +117,8 @@ format (`schemas/target_schema.yaml`) is reloaded automatically when the file ch
 Everything lives in `data/`:
 
 ```
-data/converter.db            users, templates, import history, display preferences (SQLite, WAL mode: also -wal
-                             and -shm files)
+data/converter.db            users, templates, import history, number history, display preferences (SQLite, WAL
+                             mode: also -wal and -shm files)
 data/imports/<id>/           source.<ext> (uploaded file), converted file, rejected.csv, summary.txt,
                              source.parquet + audit.parquet (for the side-by-side view)
 data/drafts/<random id>/     a file still being mapped on New import, so a browser refresh doesn't lose the work
@@ -132,7 +133,9 @@ data/drafts/<random id>/     a file still being mapped on New import, so a brows
 
 **Space:** files of finished imports older than `FILE_RETENTION_DAYS` are deleted automatically when the app
 starts, and then at most once an hour when an import is started. The import record and its counts stay; its page says the files were deleted.
-Abandoned drafts (24 hours without changes) are deleted at the same moments and whenever a file is uploaded.
+Abandoned drafts (24 hours without changes) are deleted at the same moments and whenever a file is uploaded, and so
+is the number history of imports older than `NUMBER_RECORD_DAYS` (when set). The number history takes about 80
+bytes per converted number in `converter.db` (a 100,000-row import adds about 8 MB).
 
 **Memory and very large spreadsheets:** a sheet whose values span more cells than the computer's memory can hold
 is refused when it is uploaded ("This sheet is too big to read on this computer…"), instead of crashing the app.
@@ -140,7 +143,13 @@ The limit follows the machine (80% of its memory, or of the container's memory l
 server with more memory accepts bigger sheets.
 
 **Customer data:** uploaded files contain customers' phone numbers. Keep `data/` on an encrypted disk, restrict
-who can sign in, and set a retention period you are comfortable with.
+who can sign in, and set a retention period you are comfortable with. The number history keeps each converted
+number and its consent cells in `converter.db` after the files are deleted (forever unless `NUMBER_RECORD_DAYS`
+is set), so it can answer consent questions later.
+
+**First start on 0.21.0:** imports completed before it get their numbers recorded from their stored files, in the
+background (the app is usable meanwhile; the log says "Recorded the numbers of N earlier import(s)"). Imports whose
+files were already deleted can't be added.
 
 ## Updating
 
