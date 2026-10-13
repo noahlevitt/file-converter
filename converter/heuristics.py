@@ -36,7 +36,7 @@ import re
 
 from rapidfuzz import fuzz
 
-from .mapping import ColumnProfile, FieldMapping, Mapping, norm_header
+from .mapping import ColumnProfile, FieldMapping, Mapping, is_fax_column, norm_header
 from .schema import FieldSpec, TargetSchema
 
 # Schema field type -> key in ColumnProfile.shares that gives value-type evidence for it. A "datetime" field is
@@ -76,17 +76,19 @@ GENERIC_HEADERS = {"date", "time", "datetime", "timestamp", "created", "createda
 PHONE_WORDS = {"phone", "phones", "phonenumber", "mobile", "cell", "cellphone", "cellular", "tel", "telephone", "ph",
                "sms", "text", "texting", "whatsapp", "wireless", "landline", "contact", "msisdn"}
 # Words that turn a phone header into a header ABOUT the phone (a setting or label), not the number itself:
-# "phone4MarketingPreference", "Phone Type", "SMS Opt In", "Phone Verified", "Phone Ext".
+# "phone4MarketingPreference", "Phone Type", "SMS Opt In", "Phone Verified", "Phone Ext", and texting activity
+# such as "Last SMS Received", "SMS Last", "Last Text Sent" (dates, often empty in a file).
 # One of these words anywhere in the header is enough: is_phone_header() then says False, and step 2 of auto_map
 # never adds a column that mentions a phone word but isn't a phone header (step 1 scores columns by header and
-# values, so such a column full of phone-like values could still be matched there). "fax" is here so "Fax" / "Phone Fax"
-# never count as phone headers: a fax line can't receive texts.
+# values, so such a column full of phone-like values could still be matched there). Fax columns are never phone
+# columns at all (mapping.is_fax_column): a fax line can't receive texts.
 PHONE_ATTRIBUTE_WORDS = {"preference", "preferences", "pref", "prefs", "marketing", "type", "kind", "label", "status",
                          "verified", "verification", "valid", "validated", "confirmed", "consent", "opt", "optin",
                          "optout", "opted", "ext", "extension", "country", "countrycode", "code", "carrier", "flag",
                          "enabled", "disabled", "allowed", "allow", "permission", "subscribed", "unsubscribed",
                          "source", "date", "time", "updated", "created", "count", "is", "has", "can", "ok", "fax",
-                         "notes", "note", "comment", "comments"}
+                         "notes", "note", "comment", "comments", "last", "latest", "recent", "first", "received",
+                         "sent", "delivered", "timestamp", "datetime"}
 # "Number"-like words: a short header made of one of these (plus at most one other word) is a phone header, e.g.
 # "Contact Number" is caught by "contact" anyway, but "Primary No" or "Number 2" only by this rule.
 NUMBER_WORDS = {"number", "num", "no", "nbr", "numbers"}
@@ -196,7 +198,8 @@ def is_phone_header(column: str) -> bool:
     Rules, in order:
 
     1. A header about the phone rather than the number ("Phone Type", "phoneVerified", "Phone Ext",
-       "phone4MarketingPreference", "Fax") or any consent column -> False.
+       "phone4MarketingPreference", "Last SMS Received"), a fax column ("Fax", "Phone/Fax") or any consent column
+       -> False.
     2. A phone word ("phone", "mobile", "cell", "tel", "sms", ...) -> True ("Home Phone", "Tel.", "SMS Number").
     3. A "number" word in a short header (at most 2 words) without a word that names another kind of number ->
        True ("Phone No" is already caught by 2, "Primary No" here); "Order Number", "Member No" -> False.
@@ -204,7 +207,7 @@ def is_phone_header(column: str) -> bool:
     Examples: ``is_phone_header("Mobile") -> True``, ``is_phone_header("Occupation") -> False``.
     """
     words = set(_words(column))
-    if words & PHONE_ATTRIBUTE_WORDS or is_consent_column(column):
+    if words & PHONE_ATTRIBUTE_WORDS or is_fax_column(column) or is_consent_column(column):
         return False
     if words & PHONE_WORDS:
         return True
@@ -285,7 +288,7 @@ def names_other_number(column: str) -> bool:
 def score(column: ColumnProfile, f: FieldSpec) -> float:
     """Overall fit (roughly 0..100) of a source column for a target field: header evidence + value evidence.
 
-    * Consent columns -> 0: never mapped.
+    * Consent columns -> 0: never mapped. Fax columns -> 0 for phone fields: a fax line can't receive texts.
     * A header naming another kind of number ("Account Number", "Order #", "Loyalty ID") gets no header evidence
       for the phone field (:func:`names_other_number`).
     * Empty column (no values in this file) -> half the header score: no value evidence, so it can't reach the
@@ -303,7 +306,7 @@ def score(column: ColumnProfile, f: FieldSpec) -> float:
 
     Example: header "Cell" (synonym -> 100) with 95% phone-like values -> 0.55*100 + 45*0.95 = 97.75.
     """
-    if is_consent_column(column.name):
+    if is_consent_column(column.name) or (f.type == "phone" and is_fax_column(column.name)):
         return 0.0
     hs = header_score(column.name, f)
     # "Account Number" looks a lot like "contact number" / "phone number" to a fuzzy comparison, and ten-digit IDs
@@ -440,7 +443,10 @@ def auto_map(schema: TargetSchema, profiles: list[ColumnProfile]) -> Mapping:
               never - it describes the phone, it isn't the number.
             * Header says nothing about phones ("Col 7", "Occupation"): only with clear value evidence (see
               :func:`enough_evidence`), so one stray number typed into "Occupation" doesn't make it a phone column.
+            * A fax column ("Fax", "Fax Number", "Business Fax"): never, however phone-like its values.
             """
+            if is_fax_column(p.name):
+                return False
             share = p.shares.get("phone", 0)
             if is_phone_header(p.name):
                 # Named like a phone column: needs some phone numbers in it (or be empty in this file, e.g. Phone 4).
@@ -458,7 +464,7 @@ def auto_map(schema: TargetSchema, profiles: list[ColumnProfile]) -> Mapping:
             # Step 1 found no phone column by header. Then columns whose VALUES are clearly phone numbers are
             # more trustworthy than weakly named ones: if there are any, use only those.
             strong = [p for p in profiles if p.name not in used and enough_evidence(p, p.shares.get("phone", 0))
-                      and not is_consent_column(p.name)]
+                      and not is_consent_column(p.name) and not is_fax_column(p.name)]
             if strong:
                 phone_cols = [p.name for p in strong]
         if len(phone_cols) >= 2:
