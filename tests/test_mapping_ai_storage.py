@@ -221,6 +221,37 @@ def test_template_reused_without_ai(tmp_path, samples, schema):
     assert sug.source == "template" and not fake.calls
 
 
+def test_template_works_when_headers_differ_in_punctuation(tmp_path, real_schema):
+    """Templates match headers ignoring spaces and punctuation, so their columns are found the same way (0.16.0).
+
+    Before, a template made on "Last Visit Date" matched a file with "Last_Visit_Date" 100%, was applied, and then
+    lost that column (only case was ignored when finding it): the dates were silently left out.
+    """
+    s = Store(tmp_path / "t.db")
+    first = pd.DataFrame({"Phone": ["5165550100"], "Last Visit Date": ["10/01/2026"], "Birth Date": ["03/15/1985"]})
+    m = initial_mapping(real_schema, first, profile_columns(first), None, None, use_ai=False).mapping
+    m.excluded_columns, m.column_notes = ["Notes Col"], {"Birth Date": "year is often 1900"}
+    s.save_template("Client", list(first.columns) + ["Notes Col"], m, {}, real_schema.name, "x")
+    second = pd.DataFrame({"Phone": ["5165550100"], "Last_Visit_Date": ["10/01/2026"], "birth-date": ["03/15/1985"],
+                           "notes_col": ["x"]})
+    sug = initial_mapping(real_schema, second, profile_columns(second), s, None, use_ai=False)
+    assert sug.source == "template"
+    assert {k: v.sources for k, v in sug.mapping.fields.items() if v.transform != "none"} == {
+        "phone_number": ["Phone"], "transactions_last": ["Last_Visit_Date"], "birthday": ["birth-date"]}
+    assert sug.mapping.excluded_columns == ["notes_col"]
+    assert sug.mapping.column_notes == {"birth-date": "year is often 1900"}
+
+
+def test_punctuation_fallback_never_guesses_between_two_columns(real_schema):
+    """The exact (case-insensitive) name wins; when only the punctuation-free form fits two columns, neither is used."""
+    m = Mapping(fields={"phone_number": FieldMapping(sources=["Phone"], transform="copy"),
+                        "transactions_last": FieldMapping(sources=["Last-Visit"], transform="copy")})
+    assert m.normalized(real_schema, ["Phone", "Last Visit", "Last_Visit"]).get("transactions_last").transform == "none"
+    m.get("transactions_last").sources = ["last_visit"]
+    assert m.normalized(real_schema, ["Phone", "Last Visit", "Last_Visit"]).get("transactions_last").sources == [
+        "Last_Visit"]
+
+
 # ---------------------------------------------------------------- output
 def test_output_keeps_text(schema, tmp_path):
     """CSV and Excel output keep values as text, so a ZIP's leading zero and a phone's '+' survive."""
