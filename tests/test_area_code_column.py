@@ -10,6 +10,9 @@ number gets its row's area code; numbers that already have one are kept as they 
 area code column ("000") turned the feature off and every row became a bad row; a second area code column ("Cell
 Area Code") was ignored; letters typed for digits ("555-O177") and a spreadsheet ".0" ("5550177.0") didn't get the
 row's area code; "Store Area Code" and "Area #" were taken for the customer's area code.
+
+0.21.2: the country code 1 in an area code cell ("1-516", "+1 516") or in front of a 7-digit number ("+1 555-0177")
+is read as such.
 """
 
 import random
@@ -162,7 +165,9 @@ def test_whole_number_typed_into_the_area_code_column_is_kept(real_schema):
 # --- helpers --------------------------------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("value,code", [("516", "516"), ("(516)", "516"), (" 516 ", "516"), ("516.0", "516"),
-                                        ("123", ""), ("11530", ""), ("Nassau", ""), ("", "")])
+                                        ("123", ""), ("11530", ""), ("Nassau", ""), ("", ""),
+                                        ("1-516", "516"), ("+1 516", "516"), ("+1 (516)", "516"), ("1516", "516"),
+                                        ("(1) 516", "516"), ("1516.0", "516"), ("151", ""), ("+44 20", "")])
 def test_area_code_cell(value, code):
     assert area_code_cell(value) == code
 
@@ -431,3 +436,33 @@ def test_no_area_code_column_among_the_sources(real_schema):
     df = pd.DataFrame({"Phone": ["516-555-0177", "631-555-0188"], "Mobile": ["917-555-1234", ""]})
     res = convert(df, real_schema, area_mapping("Phone", "Mobile"))
     assert sorted(res.output["phone_number"]) == ["5165550177", "6315550188", "9175551234"]
+
+
+# --- 0.21.2: the country code 1 -------------------------------------------------------------------------------------
+
+def test_country_code_in_the_area_code_and_phone_columns(real_schema):
+    """"1-516" in the area code column is area code 516; "+1 555-0177" in the phone column is a 7-digit number."""
+    df = pd.DataFrame({"Area Code": ["1-516", "+1 (631)", "1917", "212"],
+                       "Phone": ["555-0177", "+1 555-0188", "1-555-0199", "Cell: +1 555-0100 x12"]})
+    fm, res = phones(real_schema, df)
+    assert fm.transform == "area_code"
+    assert res.output["phone_number"].tolist() == ["5165550177", "6315550188", "9175550199", "2125550100"]
+    assert res.repaired_values == 0
+
+
+@pytest.mark.parametrize("value,local", [("+1 555-0177", "555-0177"), ("+15550177", "5550177"),
+                                         ("1-555-0177", "555-0177"), ("1 555 0177", "555 0177"),
+                                         ("15550177", None), ("+1 516-555-0177", None), ("+44 555-0177", None)])
+def test_country_code_in_front_of_7_digits(value, local):
+    from converter.normalizers import _local_form
+    assert _local_form(value) == local
+
+
+def test_country_code_and_7_digits_get_the_files_main_area_code(real_schema):
+    """No area code column: "+1 555-0177" is filled from the file's main area code like "555-0177" (0.20.0 rule);
+    "15550188" (8 digits run together) is not guessed."""
+    df = pd.DataFrame({"Phone": [f"516-555-01{i:02d}" for i in range(8)] + ["+1 555-0177", "15550188"]})
+    res = convert(df, real_schema, Mapping(fields={"phone_number": FieldMapping(sources=["Phone"], transform="copy")}))
+    assert res.output["phone_number"].tolist()[8:] == ["5165550177"]
+    assert res.audit.iloc[8]["st.phone_number"] == CELL_REPAIRED
+    assert "too few digits" in res.rejects.iloc[0]["Reason"]
