@@ -3,6 +3,22 @@
 What changed in each version. The running version is shown in the app's sidebar. Each version is tagged in git
 (`vX.Y.Z`).
 
+## 0.15.3 — one odd cell can't stop a file; long notes no longer slow uploads
+
+- **One value never stops a file.** A garbage date such as `10/09/2026 12:1111…` used to stop the mapping page and
+  fail the import; now that cell is "not a date" and everything else imports. `+1 ` repeated many times in a phone
+  cell no longer runs out of recursion depth. Any unexpected error on a value now costs only that value (reason
+  *couldn't be read (unexpected error…)*, details in the server log).
+- **Repeated column names:** `Phone, Phone, Phone (2)` used to crash the page and `Phone, phone, Phone (2)` silently
+  dropped one phone column. Repeats now get the next free number (`Phone (3)`), so every column is kept and used.
+- **Long Notes columns no longer slow the upload.** 1,000 rows of 5,000-character notes took 3.9 s to show the
+  mapping page (30,000 characters: 23 s); now 0.25 s (1 s). When guessing what columns hold, values over 200
+  characters are treated as text.
+- **Too-long values are rejected at once:** a phone cell over 1,000 characters (*too long to be a phone number*;
+  ~40 labelled numbers still fit) or a date over 200 (*too long to be a date*). A specially shaped long value can
+  no longer take seconds.
+- Files with several phone columns convert exactly as before, and all 406 test files give identical results.
+
 ## 0.15.2 — a stray cell can no longer crash the app
 
 - **Fix:** a spreadsheet with a value far away from its table (e.g. one stray value in the sheet's last cell,
