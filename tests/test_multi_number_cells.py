@@ -49,7 +49,7 @@ def phone_field(real_schema):
     # an extension stays with its own number
     ("516-555-0100 x12 917-555-1234", ["516-555-0100 x12", "917-555-1234"]),
     ("516-555-0100 x12, 917-555-1234 ext 3", ["516-555-0100 x12", "917-555-1234 ext 3"]),
-    # a second number without an area code is its own piece (and then skipped as invalid, never completed)
+    # a second number without an area code is its own piece (completed only when the file has a main area code)
     ("516-555-0100 & 555-1212", ["516-555-0100", "555-1212"]),
     # invalid numbers between separators are pieces too, so they are reported instead of disappearing
     ("51655501444 / 917-555-1234", ["51655501444", "917-555-1234"]),
@@ -106,10 +106,11 @@ def one_column_file():
                   "H: 516-555-1212 C: 516-555-0111",   # labelled → 2 rows
                   "516-555-0122 (cell), 516-555-0199 fax",  # fax skipped → 1 row
                   "Fax: 516-555-0177",                 # fax is the only number → bad row
-                  "516-555-0150 / 555-1212",           # second number has no area code → skipped, never completed
-                  "516-555-0160 and 516-555-0160",     # same number twice → 1 row
+                  "516-555-0150 / 555-1212",           # second number has no area code → skipped (no main area
+                                                       # code in this file to complete it with)
+                  "631-555-0160 and 631-555-0160",     # same number twice → 1 row
                   "555-1212 / 555-1213",               # no usable number → bad row
-                  "516-555-0170"],                     # one number → 1 row, as always
+                  "631-555-0170"],                     # one number → 1 row, as always
         "Last Visit": [f"10/{d:02d}/2026" for d in range(1, 9)],
     })
 
@@ -131,8 +132,8 @@ def test_one_row_per_number_in_a_cell(real_schema):
         "5165551212", "5165550111",  # Ben
         "5165550122",                # Cy (fax skipped)
         "5165550150",                # Ed (Di: her only number is a fax, bad row)
-        "5165550160",                # Flo
-        "5165550170",                # Hal
+        "6315550160",                # Flo
+        "6315550170",                # Hal
     ]
     visits = res.output["transactions_last"].str[:10].tolist()
     assert visits == ["10/01/2026"] * 2 + ["10/02/2026"] * 2 + ["10/03/2026", "10/05/2026", "10/06/2026",
