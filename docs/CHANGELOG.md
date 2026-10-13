@@ -3,6 +3,28 @@
 What changed in each version. The running version is shown in the app's sidebar. Each version is tagged in git
 (`vX.Y.Z`).
 
+## 0.21.1 — area code column and number history fixes
+
+Found by testing 0.21.0 with files built to break it.
+- **The 7-digit numbers are found anywhere in the file.** Detection read only the first values of the phone
+  column: when a file started with full numbers, the 7-digit ones further down got the file's main area code
+  instead of the one in their own row (or, with fewer full numbers, the phone field wasn't mapped and every row
+  was a bad row). The whole column is read now.
+- **One odd value no longer switches it off.** One `000` among nine `516` cells meant the area code column
+  wasn't used and every row was a bad row. Cells are now counted by row (80%+ must be area codes in use; zeros
+  count as empty). An area code cell that isn't in use (`999`) makes a bad row that says so.
+- **Several area code columns.** *Home Area Code* + *Home Phone* and *Cell Area Code* + *Cell Phone* used the home
+  area code for both. Each phone column now uses its own (*Cell* = *Mobile*, *(2)* with *(2)*); a phone column
+  with none of its own never takes another line's.
+- **Letters typed for digits (`555-O177`) and a spreadsheet's `.0` (`5550177.0`)** now get the row's area code
+  (`5550177.0` also gets the file's main area code when there is no area code column).
+- *Store Area Code*, *Delivery Area Code* and *Area #* are not taken for the customer's area code.
+- Editing: removing the area code column leaves *One row per phone number*; choosing *Phone + area code column*
+  before the second column no longer turns into *Copy column*; adding a second area code column says so.
+- **Number history:** an import cancelled or failed after its numbers were recorded no longer shows up; looking
+  up two numbers at once says to look them up one at a time.
+- All 406 test files give identical results.
+
 ## 0.21.0 — area code columns; number history
 
 - **Area code in its own column.** Exports with *Area Code* (`516`) and *Phone* (`555-0177`) had no usable phone
