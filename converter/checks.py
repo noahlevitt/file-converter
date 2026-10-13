@@ -245,6 +245,18 @@ def run_checks(schema: TargetSchema, mapping: Mapping, source: pd.DataFrame, aud
         # Check: many values can't be read. Of the cells that had an input value, how many failed validation
         # (left blank or rejected the row)? >= 30 % (with at least 5 values) suggests a wrong format option;
         # >= 80 % means the column almost certainly holds something else -> error.
+        # Excel error codes (#REF!, #VALUE!…) mean a formula in the client's file was broken when it was exported,
+        # not that this is the wrong column: they get their own finding and are left out of the share below.
+        if raw is not None:
+            sheet_err = raw.map(lambda x: bool(x) and N.sheet_error(x) is not None).astype(bool)
+            if n_err := int(sheet_err.sum()):
+                findings.append(Finding(
+                    "warning", f.name, src,
+                    f"{n_err:,} value(s) from '{src}' are Excel errors (e.g. '{raw[sheet_err].iloc[0]}'): a formula "
+                    "in the client's file was broken when it was exported, so those cells hold no data.",
+                    "If this column matters, ask the client for a fresh export."))
+            raw = raw[~sheet_err]
+            st = st[~sheet_err]
         attempted = int((raw != "").sum()) if raw is not None else 0
         failed = int(((raw != "") & st.isin([CELL_BLANKED, CELL_REJECT])).sum()) if raw is not None else 0
         if attempted >= 5 and failed / attempted >= 0.3:
