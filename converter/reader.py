@@ -46,6 +46,7 @@ import pandas as pd
 from charset_normalizer import from_bytes
 
 from .normalizers import DETECT_MAX_LEN, clean_text, looks_like_date, looks_like_email, looks_like_phone
+from .sheeterrors import error_cells
 from .sheetsize import SheetTooBig, check_sheet_size
 
 # Delimited text files (the delimiter is sniffed, except .tsv/.tab which are always tab-separated).
@@ -410,7 +411,7 @@ def _choose_sheet(data: bytes, ext: str, sheets: list[str]) -> tuple[str | None,
     why = dict(pass_over)
     for name in order:
         _check_size(data, ext, name)
-        grid = _read_excel_grid(data, name)
+        grid = _read_excel_grid(data, name, ext)
         if any(_clean_cell(c) for row in grid for c in row):
             break
         why[name] = "is empty"
@@ -434,12 +435,14 @@ def _check_size(data: bytes, ext: str, sheet: str | None) -> None:
         raise ReadError(str(exc)) from None
 
 
-def _read_excel_grid(data: bytes, sheet: str | None) -> list[list[str]]:
+def _read_excel_grid(data: bytes, sheet: str | None, ext: str = "") -> list[list[str]]:
     """Read one sheet (``None`` = the first) as a raw grid of strings, without interpreting any row as header.
 
     ``header=None`` because the header row is detected afterwards like for text files; ``dtype=str`` plus
     ``keep_default_na=False`` / ``na_filter=False`` keep every cell as text, so "NA" or "null" stay literal and
-    empty cells become "" instead of NaN. Raises :class:`ReadError` when the sheet can't be read.
+    empty cells become "" instead of NaN. The grid starts at cell A1. Excel error values (#DIV/0!, #REF!…), which
+    the library reads as empty, are put back from the file (:func:`sheeterrors.error_cells`; ``ext`` picks the
+    format), so they get their own reason like in a CSV. Raises :class:`ReadError` when the sheet can't be read.
     """
     try:
         df = pd.read_excel(
@@ -454,7 +457,16 @@ def _read_excel_grid(data: bytes, sheet: str | None) -> list[list[str]]:
     except Exception as exc:
         raise ReadError(f"Could not read spreadsheet: {exc}") from exc
     # Plain lists of strings, same shape as the text reader's grid.
-    return [["" if v is None else str(v) for v in row] for row in df.values.tolist()]
+    grid = [["" if v is None else str(v) for v in row] for row in df.values.tolist()]
+    errors = error_cells(data, ext, sheet) if ext else {}
+    if errors:
+        width = max([len(grid[0]) if grid else 0] + [c + 1 for _, c in errors])
+        height = max([len(grid)] + [r + 1 for r, _ in errors])
+        grid = [row + [""] * (width - len(row)) for row in grid] + [[""] * width for _ in range(height - len(grid))]
+        for (r, c), code in errors.items():
+            if not grid[r][c]:
+                grid[r][c] = code
+    return grid
 
 
 def _clean_cell(value: str) -> str:
@@ -859,7 +871,7 @@ def read_file(
         if sheet in sheets:  # the sheet the reviewer (or a saved import) chose
             chosen_sheet = sheet
             _check_size(data, ext, chosen_sheet)
-            grid = _read_excel_grid(data, chosen_sheet)
+            grid = _read_excel_grid(data, chosen_sheet, ext)
         else:  # the first visible sheet with data
             chosen_sheet, grid, passed = _choose_sheet(data, ext, sheets)
             read_warnings = [passed] if passed else []
