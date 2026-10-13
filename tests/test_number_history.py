@@ -184,3 +184,57 @@ def test_runner_purges_and_backfills(tmp_path, real_schema):
         time.sleep(0.05)
     assert (st.numbers_logged(old), st.numbers_logged(earlier)) == (0, 3)
     runner.pool.shutdown(wait=True)
+
+
+# --- 0.21.1: found by testing 0.21.0 ------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("how", ["cancel", "fail"])
+def test_import_that_ends_cancelled_or_failed_after_recording_is_not_listed(tmp_path, real_schema, monkeypatch, how):
+    """The numbers are recorded just before the import completes; a cancel noticed (or an error) after that leaves
+    nothing in the history: nothing of that import was imported."""
+    from converter import jobs
+    st = Store(tmp_path / "c.db")
+    iid = make_import(st, real_schema)
+    real_complete = st.complete_import
+
+    def boom(*a, **k):
+        if how == "cancel":
+            raise jobs.ImportCancelled()
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(st, "complete_import", boom)
+    rec = run_import(st, iid)
+    assert rec.status == ("cancelled" if how == "cancel" else "failed")
+    assert st.numbers_logged(iid) == 0
+    assert numberlog.lookup(st, "5165550177", real_schema).entries == []
+    monkeypatch.setattr(st, "complete_import", real_complete)
+
+
+def test_history_only_lists_completed_imports(tmp_path, real_schema):
+    st = Store(tmp_path / "c.db")
+    iid = make_import(st, real_schema)
+    run_import(st, iid)
+    with st._conn() as con:  # e.g. an import whose numbers were recorded before it was marked failed
+        con.execute("UPDATE imports SET status='failed' WHERE id=?", (iid,))
+    assert st.numbers_logged(iid) == 3 and numberlog.lookup(st, "5165550177", real_schema).entries == []
+
+
+def test_lookup_of_two_numbers_at_once(tmp_path, real_schema):
+    res = numberlog.lookup(Store(tmp_path / "c.db"), "516-555-0177 / 917-555-1234", real_schema)
+    assert "one at a time" in res.error and res.number == ""
+
+
+def test_area_code_column_file_in_the_history(tmp_path, real_schema):
+    data = b"Name,Area Code,Phone,Opt In\nAnn,631,555-0177,Y\nBo,516,555-O188,N\n"
+    st = Store(tmp_path / "c.db")
+    m = Mapping(fields={"phone_number": FieldMapping(sources=["Area Code", "Phone"], transform="area_code"),
+                        "consent": FieldMapping(sources=["Opt In"], transform="map_values", origin="user",
+                                                params=CONSENT.params)})
+    iid = st.create_import(username="noah", filename="split.csv", data=data, schema_label=real_schema.label,
+                           schema_json=real_schema.model_dump_json(), mapping=m, read_options={"header_row": "auto"})
+    run_import(st, iid)
+    [ann] = numberlog.lookup(st, "631-555-0177", real_schema).entries
+    assert (ann["file_row"], ann["phone_value"], ann["consent"], ann["consent_value"]) == (2, "(631) 555-0177",
+                                                                                          "true", "Y")
+    [bo] = numberlog.lookup(st, "5165550188", real_schema).entries
+    assert (bo["file_row"], bo["consent"]) == (3, "false")
