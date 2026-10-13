@@ -943,6 +943,7 @@ def prepare_date(field: FieldSpec, values: list[str], params: dict) -> dict:
         serial            True when the column is (almost) all Excel serial numbers
         evidence          vote counts {"month_first": n, "day_first": n} (informational)
         placeholder_year  birthday/anniversary fields only: a year that stands for "unknown" (_placeholder_year)
+        calendar          True for date-only fields: zones written with the values are ignored (see parse_date)
     The engine adds ctx["tz"] (the import's time zone) afterwards.
 
     Why per column: "01/04/2026" alone could be January 4 or April 1. A column that also holds "15/03/2026" and
@@ -985,6 +986,9 @@ def prepare_date(field: FieldSpec, values: list[str], params: dict) -> dict:
     elif dmy_votes >= 2 and dmy_votes > 3 * mdy_votes:
         ctx["order"] = "DMY"  # US default unless the column clearly is day-first
     ctx["evidence"] = {"month_first": mdy_votes, "day_first": dmy_votes}
+    # Date-only fields (birthday, anniversary) hold calendar dates, not moments: a time zone written with the value
+    # ("1985-09-12T00:00:00Z", a system storing the date as UTC midnight) is ignored, so the day can't shift.
+    ctx["calendar"] = field.type == "date"
     # Birthday/anniversary columns only: look for a year used to mean "unknown" (1970, 2000, the year it was typed).
     if field.type == "date" and field.no_year_value is not None:
         ctx["placeholder_year"] = _placeholder_year(sample, ctx)
@@ -1044,7 +1048,8 @@ def parse_date(value: str, ctx: dict, allow_no_year: bool = False) -> tuple[date
     Attempts, in order:
       1. ctx["format"] (params["input_format"]) with datetime.strptime, when the mapping gives one.
       2. dateparse.parse with the column's order, Excel-serial hint and the import's zone (ctx["tz"], default
-         America/New_York). Times that carry a zone come back converted to that zone.
+         America/New_York). Times that carry a zone come back converted to that zone, except in calendar-date
+         columns (ctx["calendar"], birthday/anniversary): there the date is taken as written.
       3. dateutil (_dateutil_parse), only when dateparse failed on an unknown word or an unrecognized layout.
     `allow_no_year` lets month/day-only values through, with year dateparse.NO_YEAR (birthday-type fields).
     Errors are dateparse's messages ("no year", "not a real calendar date", "unrecognized word 'asap'", ...) or
@@ -1059,7 +1064,8 @@ def parse_date(value: str, ctx: dict, allow_no_year: bool = False) -> tuple[date
             pass
     try:
         dt, _ = DP.parse(value, order=ctx.get("order", "MDY"), allow_no_year=allow_no_year,
-                         serial_hint=bool(ctx.get("serial")), target_tz=ctx.get("tz") or DP.DEFAULT_TZ)
+                         serial_hint=bool(ctx.get("serial")), target_tz=ctx.get("tz") or DP.DEFAULT_TZ,
+                         convert_zones=not ctx.get("calendar"))
         return dt, None
     except DP.DateError as exc:
         msg = str(exc)
