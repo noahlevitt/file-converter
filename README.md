@@ -100,6 +100,8 @@ Every value is reduced to the 10-digit US number:
   aren't in use (`433`, `555`, `123`), exchanges that don't exist in an area code, non-US numbers with the country
   and place (`not a US number — Canada (area code 514, Quebec)`), numbers with two country codes that aren't valid
   either way, and Excel scientific notation that already lost digits (`5.163E+09`).
+- Text far longer than any phone number (over 1,000 characters, e.g. notes mapped by mistake): *too long to be a
+  phone number*. Dates over 200 characters likewise (*too long to be a date*).
 - Excel error values (`#VALUE!`, `#REF!`, `#DIV/0!`, `#NAME?`…, any field): reason *Excel error (broken formula in
   the client's file)*. They hold no data, so a phone row is a bad row and any other value is left blank. `#N/A`
   counts as empty. *Check for mistakes* reports a column with such values, and *Suggest fixes* skips them.
