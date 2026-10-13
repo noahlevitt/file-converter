@@ -35,7 +35,7 @@ def schema():
 def real_schema():
     """The real target import format.
 
-    schemas/target_schema.yaml: 10-digit US phone_number, an always-blank consent column, six activity
+    schemas/target_schema.yaml: 10-digit US phone_number, consent (only mapped by a person), six activity
     timestamps and birthday/anniversary with 1600 for "no year". Tests using it lock in what the import receives.
     """
     return load_schema(ROOT / "schemas" / "target_schema.yaml")
