@@ -3,6 +3,26 @@
 What changed in each version. The running version is shown in the app's sidebar. Each version is tagged in git
 (`vX.Y.Z`).
 
+## 0.18.0 — birthdays keep their day and year; dates go to the right field
+
+- **Birthdays stored as UTC midnight no longer move a day.** `1985-09-12T00:00:00Z` (how many systems store a
+  date) was converted to the client's time zone and became September 11. Birthdays and anniversaries are calendar
+  dates now: a zone written with them is ignored. Activity dates and times are still converted.
+- **A complete Birthday column keeps its year.** Files with *Birthday* (09/12/1985) and *Birth Month* + *Birth Day*
+  columns used the parts, so every birthday became 09/12/1600. The complete column is now used when most of its
+  values have a year and it is filled for as many customers. A *Birthday Day of Week* column is never read as the
+  day, and a *Birth Year* of `0` means "no year" (it used to blank the birthday).
+- **Dates go to the right field.** *Birthday Reward Sent*, *Birthday Email Date* and similar dates about a birthday
+  or anniversary were mapped as the birthday itself (high confidence); now they aren't. *Do Not Call*, *Call Opt
+  In*, *Membership Duration* and *Phone Extension* columns made a file count as a call log, so its date went to
+  calls_last; they no longer do. *Date Added*, *Import Date* and *Date Uploaded* are creation dates (used only when
+  there is no other date).
+- **Date columns in machine formats are mapped by name.** A *Last Visit* column of Excel serial numbers, Unix
+  timestamps or `20261009`, or a *Birthday* column of serials, `19850912` or `09/12/1600`, wasn't mapped at all.
+- **Named date and time columns are combined.** *Last Visit Date* + *Last Visit Time* (or *Call Date* + *Call
+  Time*) kept only the date, so every time was 12:00 AM.
+- All 406 test files give identical results.
+
 ## 0.17.0 — fax numbers never imported; better sheet choice; templates take new phone columns
 
 - **Fax numbers are never imported** (a fax line can't receive texts). Columns named *Fax*, *Fax Number*,
