@@ -3,6 +3,19 @@
 What changed in each version. The running version is shown in the app's sidebar. Each version is tagged in git
 (`vX.Y.Z`).
 
+## 0.20.0 — area codes filled in and corrected again (business decision)
+
+Two repairs removed in 0.9.0 are back, decided by the business. Both are imported and marked orange like every
+repair: a filled-in or corrected area code decides whose phone gets the texts, so check them.
+- **A missing area code is filled in** from the file's main area code: a 7-digit number (`555-0177`) gets the area
+  code that 80%+ of the file's valid numbers share (at least 5 of them). In a file with a mix of area codes it
+  stays a bad row (`missing area code (only 7 digits)`). Also for a second number in a cell
+  (`516-555-0150 / 555-1212`).
+- **An area code that doesn't exist is corrected**, only when it is one keystroke (one digit, or two neighbouring
+  digits swapped) from an area code the file uses: `(156) 555-0199` in a 516 file → 516-555-0199. When it is one
+  keystroke from two of the file's area codes, nothing is guessed and both are listed. Unlike before 0.9.0, **a
+  real area code is never changed**: `514-968-9696` in a file of 516 numbers stays a bad row (514 is Quebec).
+
 ## 0.19.0 — Excel errors in spreadsheets; day/month order edge cases
 
 - **Excel error codes in spreadsheets.** The spreadsheet library reads a cell holding `#DIV/0!`, `#REF!`,
