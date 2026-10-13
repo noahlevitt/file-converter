@@ -6,7 +6,8 @@ chance. In a file whose real phone column couldn't be used (7-digit numbers with
 became the phone column: every customer would have been texted at a stranger's number. Such headers now give no
 header evidence for the phone field; a column of them is only used when nearly all its values are phone numbers
 (some loyalty systems use the phone number as the member number). "WhatsApp" was read as the words "whats" + "app"
-and wasn't recognised as a phone header.
+and wasn't recognised as a phone header. Since 0.21.0 the 7-digit phone column of such a file is used together with
+its area code column.
 """
 
 import random
@@ -37,9 +38,14 @@ def seven_digit_file(id_header: str) -> pd.DataFrame:
 @pytest.mark.parametrize("header", ["Account Number", "Card Number", "Customer Number", "Invoice Number",
                                     "Ticket Number", "Order #", "Member No", "Loyalty ID"])
 def test_id_column_is_never_the_phone(real_schema, header):
-    """No usable phone column: the phone stays unmapped (and the area code is never added), the IDs are not used."""
+    """The 7-digit phones get their area code from the Area Code column; the IDs are not used."""
     df = seven_digit_file(header)
-    assert phone_sources(real_schema, df) == []
+    m = initial_mapping(real_schema, df, profile_columns(df), None, None, use_ai=False).mapping
+    assert m.get("phone_number").sources == ["Area Code", "Phone"]
+    assert m.get("phone_number").transform == "area_code"
+    out = convert(df, real_schema, m).output["phone_number"]
+    assert len(out) == 40 and all(v.startswith("516") for v in out)
+    assert set(out) == {"516" + p.replace("-", "") for p in df["Phone"]}
 
 
 def test_number_column_full_of_phone_numbers_is_still_used(real_schema):
