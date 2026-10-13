@@ -97,6 +97,8 @@ SPREADSHEETS = {".xlsx": xlsx_with_errors, ".xls": lambda: (FIXTURES / "excel_er
 def test_spreadsheet_error_cells_keep_their_code(real_schema, ext):
     """The spreadsheet library reads error cells as empty: a phone said "required value is missing" and other
     fields were silently blank. The codes are put back, so .xlsx/.xls/.ods files report them like a CSV."""
+    if ext == ".xls":
+        pytest.importorskip("xlrd")  # in requirements.txt; optional at run time
     rr = read_file("f" + ext, SPREADSHEETS[ext]())
     assert rr.df.values.tolist() == [["#DIV/0!", "10/01/2026", "09/12/1985", "ok"],
                                      ["5165550101", "#VALUE!", "#N/A", "ok"],
@@ -137,5 +139,6 @@ def test_xls_error_records_are_found_before_reading_again():
     formula = b"\x06\x00\x20\x00" + b"\x01\x00\x02\x00\x0f\x00" + b"\x02\x00\x17\x00\x00\x00\xff\xff"  # #REF!
     assert _XLS_ERROR_RECORD.search(b"xx" + boolerr) and _XLS_ERROR_RECORD.search(b"xx" + formula)
     assert not _XLS_ERROR_RECORD.search(b"\x05\x02\x08\x00" + b"\x01\x00\x02\x00\x0f\x00" + b"\x01\x00")  # TRUE
+    pytest.importorskip("xlrd")
     assert error_cells(SPREADSHEETS[".xls"](), ".xls", "Customers") == {(1, 0): "#DIV/0!", (2, 1): "#VALUE!",
                                                                          (2, 2): "#N/A", (3, 2): "#REF!"}
