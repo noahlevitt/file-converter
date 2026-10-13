@@ -198,6 +198,10 @@ def _prep(value: str) -> tuple[str, tzinfo | None]:
         v = f"{m.group(1)[:4]}-{m.group(1)[4:6]}-{m.group(1)[6:]} {t[:2]}:{t[2:4]}" + (f":{t[4:]}" if len(t) > 4 else "") + m.group(3)
     # Regex: a YYYY-M-D date directly followed by "t" and a digit: "2026-10-09t15:45" → "2026-10-09 15:45".
     v = re.sub(r"(\d{4}-\d{1,2}-\d{1,2})t(\d)", r"\1 \2", v)  # ISO "T"
+    # A spreadsheet date cell reads as "2026-03-15 00:00:00"; joined with a separate Time column it is followed by
+    # the real time: "2026-03-15 00:00:00 15:15:00" → "2026-03-15 15:15:00". Regex: an ISO date, its midnight time
+    # (optional seconds and fraction), then another time (H:MM) - only then is the midnight dropped.
+    v = re.sub(r"^(\d{4}-\d{1,2}-\d{1,2}) 00:00(?::00(?:\.0+)?)?\s+(?=\d{1,2}:\d{2})", r"\1 ", v)
     tz: tzinfo | None = None
     # Spelled-out zone (see _ZONE_WORDS_RE); taken out of the text once read.
     m = _ZONE_WORDS_RE.search(v)                            # "Eastern", "Pacific Time", "Central Daylight Time"
@@ -329,6 +333,7 @@ def _compact(digits: str, order: str, today: date, allow_no_year: bool, serial_h
       - 8 digits: YYYYMMDD when that is a real date with a plausible year ("20261009"), else MMDDYYYY (DDMMYYYY
         for day-first columns): "10092026".
       - 6 digits: MMDDYY (DDMMYY for day-first columns), else YYMMDD: "100926" and "261009" → 2026-10-09.
+        Year-month-day columns ("YMD") try YYMMDD first: "101009" → 2010-10-09.
       - 12 or 14 digits: YYYYMMDDHHMM[SS], seconds ignored: "202610091545" → 2026-10-09 15:45.
       - 3–4 digits with allow_no_year that aren't a year 1900–2100: MMDD / MDD, no year: "0912" → Sep 12 (NO_YEAR).
     A 4-digit year alone ("1985") gives "only a year — no month or day"; anything else "number is not a
@@ -358,11 +363,12 @@ def _compact(digits: str, order: str, today: date, allow_no_year: bool, serial_h
                 pass
         m, d = _md(int(digits[:2]), int(digits[2:4]), order)
         return _make(int(digits[4:]), m, d)
-    if n == 6:  # fixed positions: MMDDYY (or DDMMYY for day-first columns), then YYMMDD
+    if n == 6:  # fixed positions: MMDDYY (or DDMMYY for day-first columns), then YYMMDD (YYMMDD first for YMD)
         a, b, c = digits[:2], digits[2:4], digits[4:]
         first = (int(b), int(a)) if order == "DMY" else (int(a), int(b))
         # Try (month, day) in column order with the last 2 digits as the year, then YYMMDD; the first real date wins.
-        for (m, d), ytxt in ((first, c), ((int(b), int(c)), a)):
+        tries = [(first, c), ((int(b), int(c)), a)]
+        for (m, d), ytxt in (tries[::-1] if order == "YMD" else tries):
             try:
                 return _make(_year(ytxt, m, d, today), m, d)
             except DateError:
@@ -428,7 +434,8 @@ def parse(value: str, order: str = "MDY", allow_no_year: bool = False, today: da
 
     The module's public entry point (see the module docstring for the formats):
         value          the raw text, e.g. "Fri, 09 Oct 2026 19:45:00 +0000"
-        order          "MDY" (default) or "DMY": how to read ambiguous numeric dates such as 01/04/2026
+        order          "MDY" (default), "DMY" or "YMD": how to read ambiguous numeric dates such as 01/04/2026
+                       (YMD: a 2-digit year first, 26/10/09; a 4-digit year first is always read that way)
         allow_no_year  accept month and day only ("Sep 12", "9/12") with year NO_YEAR; otherwise "no year" error
         today          reference date for two-digit years (tests pass a fixed date); defaults to date.today()
         serial_hint    the column holds Excel serial numbers, so any bare number in Excel's range is one
@@ -469,9 +476,10 @@ def _parse_prepped(s: str, order: str, allow_no_year: bool, today: date, serial_
            - a trailing HHMM after a complete date is the time: "10/09/2026 1545" → 15:45
            - month name + 1 number: the day, no year ("Sep 12"); + 2 numbers: day and year in either order
              ("oct 9 2026", "9 oct 2026", "2026 oct 9", "09-oct-26")
-           - 3 numbers: year first when the first has 4 digits (2026-10-09), else month/day in column order and
-             the year last (10/09/2026, 10/09/26); a year of 0, 000 or 0000 means "no year" in birthday-type columns
-             (a "Birth Year" column holding 0); "00" stays 2000
+           - 3 numbers: year first when the first has 4 digits (2026-10-09) or the column is year-month-day
+             ("YMD": 26/10/09), else month/day in column order and the year last (10/09/2026, 10/09/26); a year
+             of 0, 000 or 0000 means "no year" in birthday-type columns (a "Birth Year" column holding 0); "00"
+             stays 2000
            - 2 numbers: month and day only ("9/12"); with a 4-digit one it's "month and year but no day"
            - 1 number: _compact
     Errors: "unrecognized word 'x'", "more than one month name", "month name but no day", "month and year but
@@ -561,6 +569,9 @@ def _parse_prepped(s: str, order: str, allow_no_year: bool, today: date, serial_
             if year == 0 and allow_no_year:  # 0000-09-12: month and day only
                 return _make(NO_YEAR, mm, dd), False
             return _make(year, mm, dd, hh, mi), has_time
+        if order == "YMD" and len(a) == 2:  # 26/10/09 in a column set to year-month-day
+            mm, dd = _md(int(b), int(c), "MDY")
+            return _make(_year(a, mm, dd, today), mm, dd, hh, mi), has_time
         # Month/day first, year last: month/day in column order, two-digit years via _year.
         mm, dd = _md(int(a), int(b), order)
         if allow_no_year and _zero_year(c):  # 09/12/0000, "9 12 0" (Birth Month, Day, Year columns)
