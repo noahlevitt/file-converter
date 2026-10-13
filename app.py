@@ -77,7 +77,7 @@ from converter.editor import (FROM_LABEL, LABELS, OPTION_HELP, apply_column_edit
                               row_problem)
 from converter.engine import convert, count_multi_number_cells, preview_values, source_rows
 from converter.jobs import ImportRunner
-from converter.mapping import Mapping, area_code_source, has_generic_columns, profile_columns
+from converter.mapping import Mapping, area_code_pairs, has_generic_columns, profile_columns
 from converter.numberlog import lookup as number_lookup
 from converter.normalizers import sheet_error
 from converter.output import neutralise_csv
@@ -854,10 +854,16 @@ def page_new_import() -> None:
         each_fm = mapping.get(each.name)
         phones = list(each_fm.sources)
         if each_fm.transform == "area_code":
-            # 'Phone + area code column': the area code column holds no numbers of its own.
-            area = phones.pop(area_code_source(phones, df.head(5000).to_dict("records")))
-            st.caption(f"ℹ️ 7-digit numbers in {', '.join(phones)} get the area code from **{area}** (the same "
-                       "row); numbers that already have an area code are kept as they are.")
+            # 'Phone + area code column': area code columns hold no numbers of their own.
+            areas, area_of = area_code_pairs(phones, df.head(5000).to_dict("records"))
+            uses = [f"{', '.join(phones[i] for i in area_of if area_of[i] == a)} from **{phones[a]}**"
+                    for a in areas if a in area_of.values()]
+            if uses:
+                st.caption("ℹ️ 7-digit numbers get the area code of the same row: " + "; ".join(uses)
+                           + ". Numbers that already have an area code are kept as they are.")
+            else:
+                st.caption("⚠️ None of these columns holds area codes, so the numbers are read as they are.")
+            phones = [c for i, c in enumerate(phones) if i not in areas]
         multi = multi_number_cells(df, each, phones)
         if len(phones) > 1 or multi:
             note = (f"ℹ️ A customer with different numbers in {', '.join(phones)} gets one row per number in "
