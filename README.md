@@ -53,8 +53,8 @@ value or row number, and page through large files. The same view downloads as a 
 
 | Step | What happens |
 |---|---|
-| **Read** | Every cell is read as text (no lost ZIP zeros, no phones turned into `5.16E+09`). Header row, encoding (UTF-8 / Windows-1252 / etc.), delimiter and Excel sheets are detected; the user can override. The header row is found below any title or report lines, and files without one are recognised (see [Files without a header row](#files-without-a-header-row)). |
-| **Map** | 1) A saved **template** with the same column headers is applied instantly, including its notes and time zone. 2) Otherwise **rules** match headers, synonyms and value types (phones, dates…), and find every phone column (Phone, Phone 2…, Mobile, Home) — but not columns *about* a phone such as `phone4MarketingPreference`, Phone Type or SMS Opt In. A column only counts as a phone column by its values alone when nearly all of its values are phone numbers, so a stray number typed into e.g. *Occupation* doesn't pull that column into the phone field. 3) Optionally, your **notes on columns** are applied by Claude. |
+| **Read** | Every cell is read as text (no lost ZIP zeros, no phones turned into `5.16E+09`). Header row, encoding (UTF-8 / Windows-1252 / etc.), delimiter and Excel sheets are detected; the user can override. The header row is found below any title or report lines, and files without one are recognised (see [Files without a header row](#files-without-a-header-row)). A quote mark that is never closed in a CSV (`"VIP - comps dessert`) costs only its own row, with a warning naming it, instead of joining the rest of the file into one cell; cells of any size are read. |
+| **Map** | 1) A saved **template** with the same column headers (case, spaces and punctuation ignored: `Last Visit Date` = `Last_Visit_Date`) is applied instantly, including its notes and time zone. 2) Otherwise **rules** match headers, synonyms and value types (phones, dates…), and find every phone column (Phone, Phone 2…, Mobile, Home) — but not columns *about* a phone such as `phone4MarketingPreference`, Phone Type or SMS Opt In. A column only counts as a phone column by its values alone when nearly all of its values are phone numbers, so a stray number typed into e.g. *Occupation* doesn't pull that column into the phone field. 3) Optionally, your **notes on columns** are applied by Claude. |
 | **Review** | A grid shows each target field, its source column(s), how it's built, a sample of converted output, and any problem. Edit it directly, add notes per column, and run **Check for mistakes** before importing. |
 | **Convert** | Runs in a background worker pool (default 2 at a time; more wait in a queue) so users can keep working. Deterministic Python converts every row — Claude never touches the full file. Phones are validated with Google's libphonenumber, dates are interpreted per column (month-first vs day-first decided once for the whole column, Excel serial dates handled), ZIP/state/email normalized. |
 | **Report** | **Bad rows are not imported** and the result is flagged: *"37 bad rows were NOT imported"* with a reason per row in the rejected-rows file. Optional fields with invalid values are left blank (configurable per field). |
@@ -159,10 +159,15 @@ How the numbers in one cell are told apart (no digit is ever added, removed or m
 | `5165550100 9175551234`, `(516)555-0100(917)555-1234`, `516 555 0100 917 555 1234` | one per number |
 | `H: 516-555-1212 C: 516-555-0100`, `516-555-0100 (cell) 516-555-0199 (home)` | one per number; each label stays with its own number |
 | `516-555-0100 x12, 917-555-1234` | one per number; the extension stays with the first |
+| `516.555.0100 917.555.1234`, `1. 516-555-0100 2. 917-555-1234`, `+1 631 555 0199 1-718-555-0142` | one per number (before 0.16.0 one of them, or both, could be lost) |
 | `516-555-0100/0101` (shorthand for a second number) | one row, 516-555-0100; the shorthand is not expanded |
 | `51655501005165551212` (digits run together) | bad row, `too many digits (20)`: digits are never cut apart |
 - Columns that describe a phone (`phone4MarketingPreference`, `Phone Type`, `SMS Opt In`, `Phone Verified`) are
   never used as phone numbers. Marketing-preference columns are treated like consent columns: not imported.
+- Columns named for another kind of number (*Account Number*, *Order #*, *Card Number*, *Customer Number*,
+  *Loyalty ID*) are never taken for the phone column because of their name: ten-digit IDs are often valid phone
+  numbers by chance. Such a column is only used when nearly all its values are phone numbers (some loyalty systems
+  use the phone number as the member number). *WhatsApp* columns are phone columns.
 
 ### Which date goes where
 
