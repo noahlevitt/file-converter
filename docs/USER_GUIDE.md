@@ -36,7 +36,11 @@ here:
   say which row holds the headers (`0` = the file has no header row), then click **Re-read file**. The preview
   shows the first rows exactly as they are in the file, numbered like the box. It opens by itself when something
   needs checking: no header row found, a header below title lines, an unsure guess, a header row that holds a
-  phone number, email or date (usually a customer, not a header), or a quote mark that is never closed.
+  phone number, email or date (usually a customer, not a header), a quote mark that is never closed, or sheets
+  that were passed over.
+- **Which sheet is read:** the first visible sheet that has data. An empty sheet (a leftover *Sheet1*) or a hidden
+  one (a lookup table) in front of it is passed over, and a warning names it. Hidden sheets show as *(hidden)* in
+  the sheet box. A sheet you pick is always read.
 - **"Row N: a quote mark (") is never closed"** (CSV files): someone typed a `"` at the start of a note and never
   closed it. Before 0.16.0 that joined every row after it into one cell and those customers were missing. Now the
   quote is read as an ordinary character and every row imports; check that row's values in the preview.
@@ -199,12 +203,17 @@ The numbers below it are:
   - each **different** number becomes its own row, with the other columns copied from the same file row;
   - the same number twice counts once;
   - an invalid extra number is skipped, and the row still imports with the customer's other number(s);
-  - a number labelled fax is skipped when the customer has another number (a fax can't receive texts);
+  - a number labelled fax is never imported (a fax can't receive texts): skipped when the customer has another
+    number, a bad row when it is their only one;
   - numbers on separate lines of one cell, numbered (`1. … 2. …`) or with an extension on the first
     (`516 555 0100 x12 917-555-1234`) are each found;
   - the mapping page says how many cells hold several numbers, and in *Side by side* the number each row came
     from is underlined.
-- **Columns about a phone** (`phone4MarketingPreference`, Phone Type, SMS Opt In) are never treated as numbers.
+- **Columns about a phone** (`phone4MarketingPreference`, Phone Type, SMS Opt In) or texting activity (*Last SMS
+  Received*, *Last Text Sent*) are never treated as numbers.
+- **Fax columns** (*Fax*, *Fax Number*, *Business Fax*, *Phone/Fax*) are not imported; the mapping page names them.
+  If one actually holds phone numbers, set its **Goes to** to `phone_number` (needed for each file: templates don't
+  keep a fax column).
 - **ID columns** (*Account Number*, *Order #*, *Card Number*, *Customer Number*, *Loyalty ID*) are not taken for
   the phone column because of their name. One is only used when nearly all of its values are phone numbers. If
   the file's real phone column can't be used (e.g. 7-digit numbers), the phone field stays empty: map it yourself
@@ -251,7 +260,9 @@ not Claude, not a default and not a saved template (templates leave them out, so
   - you can view, rename, delete (creator or admin only) or download any template as JSON;
   - a template is applied automatically to files with exactly the same columns, in any order or capitalisation,
     with or without spaces and punctuation (`Last Visit Date` = `Last_Visit_Date`);
-  - a similar layout (75%+ of the same columns) starts from that template's rules.
+  - a similar layout (75%+ of the same columns) starts from that template's rules, and a phone column that is new
+    since the template was saved (e.g. *Mobile*) is added to the phone field. A phone column the template's file
+    already had and the template leaves out stays out.
 - **Target format:** a read-only description of every field of the import format and its rules.
 - **Users** (administrators only, and only while logins are on): add users, reset passwords, make or remove
   administrators, delete users.
