@@ -70,7 +70,7 @@ The output follows `generic-import-format.md`, encoded in [`schemas/target_schem
 | 2 | `consent` | No | `true` / `false` / blank | **Mapped by hand only** (✋). Blank unless a person maps a column to it on the mapping page for that file: the rules, Claude, saved templates and defaults never fill it. Mapped values become `true` (subscribes) or `false` (opts out): Y/N, yes/no, 1/0, opted in/out, subscribed/unsubscribed; anything else stays blank, which changes nobody's consent. |
 | 3–4, 6–8 | `calls_last`, `transactions_last`, `in_sms_last`, `redemptions_last`, `spin_last` | No | `03/07/2026 09:05 AM` | Any date/time format in (see *Dates and times*) → `MM/DD/YYYY HH:MM AM/PM`. Seconds dropped; a date with no time gets `12:00 AM`. Placeholders like `0000-00-00`, `Never`, `N/A` → blank. Which column feeds which field: see [Which date goes where](#which-date-goes-where). |
 | 5 | `last_contacted` | No | `03/07/2026 09:05 AM` / blank | **Mapped by hand only** (✋), like consent: it means the last time *we* texted the customer, which imported files almost never contain. Columns such as *Last Campaign Sent* are not imported unless a person maps them. |
-| 9–10 | `birthday`, `anniversary` | No | `09/12/1985` | Any date format in → `MM/DD/YYYY`. Month and day with no year (`09/12`, `Sep 12`, `12-Sep`, `September 12th`, `0912`, `--09-12`, `Birthday: 9/12`), placeholder years (`0000`, `XXXX`, `YYYY`, `1900` and earlier), a year shared by most of the column (all `1970`, all `2000`, or the year Excel added to dates typed without one), and years in the last two years or the future → year `1600`. Month and day in separate columns (`Birth Month` + `Birth Day` [+ `Birth Year`]) are combined automatically. |
+| 9–10 | `birthday`, `anniversary` | No | `09/12/1985` | Any date format in → `MM/DD/YYYY`. Month and day with no year (`09/12`, `Sep 12`, `12-Sep`, `September 12th`, `0912`, `--09-12`, `Birthday: 9/12`), placeholder years (`0000`, `XXXX`, `YYYY`, a year of `0`, `1900` and earlier), a year shared by most of the column (all `1970`, all `2000`, or the year Excel added to dates typed without one), and years in the last two years or the future → year `1600`. Month and day in separate columns (`Birth Month` + `Birth Day` [+ `Birth Year`]) are combined automatically, unless the file also has a complete *Birthday* column with years filled for as many customers (then that one is used, so the year isn't lost). A time zone written with a birthday (`1985-09-12T00:00:00Z`) is ignored: it is a calendar date, so it can't shift to the day before. Dates *about* a birthday (*Birthday Reward Sent*, *Birthday Email Date*) are never the birthday. |
 
 - Headers are written exactly as above: lowercase, in order, no extra columns, all kept even when empty.
   Source columns with no matching field (names, emails, totals…) are left out and shown as "not imported".
@@ -186,9 +186,16 @@ How the numbers in one cell are told apart (no digit is ever added, removed or m
      *Timestamp*, *Updated*, *End Time*);
   3. only if the file has no other date, a **creation date** (*Date Created*, *Created At*, *Sign Up Date*,
      *Joined*, *Member Since*, *First Visit*): better than no date at all, never alongside a real last date.
+  *Date Added*, *Import Date* and *Date Uploaded* count as creation dates too.
 - Cases 2 and 3 go to `calls_last` in a **call log** (a header like *Caller ID*, *Duration*, *Direction*,
-  *Missed*, or both a *From* and a *To* column) and to `transactions_last` in any other file. Separate *Date* and
-  *Time* columns are combined into one date-time. They are marked *low* confidence for review.
+  *Missed*, or both a *From* and a *To* column) and to `transactions_last` in any other file. Consent columns
+  (*Do Not Call*, *Call Opt In*), *Membership Duration* and *Phone Extension* don't make a file a call log. They
+  are marked *low* confidence for review.
+- **Separate date and time columns are combined** into one date-time: *Date* + *Time*, and a named pair such as
+  *Last Visit Date* + *Last Visit Time* or *Call Date* + *Call Time* (before 0.18.0 the named pair's time was
+  dropped). Not when the date column already holds times.
+- A column named for a date field is mapped even when its values are in a machine format: Excel serial numbers,
+  Unix timestamps, `20261009`, or `09/12/1600` birthdays.
 - **Never used:** expiry, due and opt-in dates (*Expiration Date*, *Due Date*, *Opt-In Date*); birthdays go to
   `birthday`.
 - Every phone number of a call log is imported, the client's own line included (cell-phone validation happens
@@ -220,7 +227,8 @@ Read in any mix within one column:
 - **Time zones:** choose the client's time zone on *New import*; templates remember it. Times that include a zone
   are converted to it: `Z`, `UTC`, `+00:00`, `GMT-4`, `EST`, `PDT`, `(MDT)`, `Eastern`, `Pacific Time`. Unix
   timestamps are converted too. US abbreviations are read as that region's local time, so `EST` in July means
-  Eastern clock time. Times with no zone are kept exactly as written.
+  Eastern clock time. Times with no zone are kept exactly as written. Birthdays and anniversaries are calendar
+  dates: a zone written with them is ignored (`1985-09-12T00:00:00Z` stays September 12).
 - **Incomplete or unreadable values are never guessed:** `October 2026` (no day), `2026`, `today`, `Q4 2026`,
   and `02/30/2026` are left blank. Each one is listed under *What changed* and in the summary.
 
