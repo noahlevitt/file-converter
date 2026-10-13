@@ -3,7 +3,8 @@
 Each number is a separate text recipient, so a second number written into the same cell must get its own row, just
 like a number in a second phone column. The split must never invent or cut digits: a cell is only split where the
 numbers are clearly separate, a single number is never split, labels stay with their own number, and a number
-labelled fax is only used when the row has no other number (a fax line can't receive texts).
+labelled fax is never imported (a fax line can't receive texts): skipped next to another number, and a bad row when
+it is the only one (0.17.0; it used to be imported then).
 """
 
 import pandas as pd
@@ -104,7 +105,7 @@ def one_column_file():
         "Phone": ["516-555-0100 / 917-555-1234",       # two numbers → 2 rows
                   "H: 516-555-1212 C: 516-555-0111",   # labelled → 2 rows
                   "516-555-0122 (cell), 516-555-0199 fax",  # fax skipped → 1 row
-                  "Fax: 516-555-0177",                 # fax is the only number → used
+                  "Fax: 516-555-0177",                 # fax is the only number → bad row
                   "516-555-0150 / 555-1212",           # second number has no area code → skipped, never completed
                   "516-555-0160 and 516-555-0160",     # same number twice → 1 row
                   "555-1212 / 555-1213",               # no usable number → bad row
@@ -129,18 +130,21 @@ def test_one_row_per_number_in_a_cell(real_schema):
         "5165550100", "9175551234",  # Ana
         "5165551212", "5165550111",  # Ben
         "5165550122",                # Cy (fax skipped)
-        "5165550177",                # Di (fax used: her only number)
-        "5165550150",                # Ed
+        "5165550150",                # Ed (Di: her only number is a fax, bad row)
         "5165550160",                # Flo
         "5165550170",                # Hal
     ]
     visits = res.output["transactions_last"].str[:10].tolist()
-    assert visits == ["10/01/2026"] * 2 + ["10/02/2026"] * 2 + ["10/03/2026", "10/04/2026", "10/05/2026",
-                                                                "10/06/2026", "10/08/2026"]
-    assert (res.total_rows, res.imported, res.rejected, res.extra_rows, res.skipped_values) == (8, 9, 1, 2, 2)
-    assert set(res.skipped_counts) == {"phone_number: extra value skipped — labelled as a fax number",
-                                       "phone_number: extra value skipped — missing area code (only 7 digits)"}
-    assert "9 rows ready to import from 8 file rows (2 extra rows" in res.flag_message()
+    assert visits == ["10/01/2026"] * 2 + ["10/02/2026"] * 2 + ["10/03/2026", "10/05/2026", "10/06/2026",
+                                                                "10/08/2026"]
+    assert (res.total_rows, res.imported, res.rejected, res.extra_rows, res.skipped_values) == (8, 8, 2, 2, 2)
+    assert set(res.skipped_counts) == {
+        "phone_number: extra value skipped — labelled as a fax number (a fax can't receive texts)",
+        "phone_number: extra value skipped — missing area code (only 7 digits)"}
+    assert "8 rows ready to import from 8 file rows (2 extra rows" in res.flag_message()
+    di = res.rejects.loc[res.rejects["Name"] == "Di"].iloc[0]
+    assert "labelled as a fax number" in di["Reason"] and di["phone_number"] == "Fax: 516-555-0177"
+    assert "phone_number" not in res.failed_values or "Fax: 516-555-0177" not in res.failed_values["phone_number"]
     assert "2 extra phone numbers skipped" in res.flag_message()
     # Gus: rejected for his first number's reason; the report says which number it was.
     gus = res.rejects.loc[res.rejects["Name"] == "Gus"].iloc[0]
