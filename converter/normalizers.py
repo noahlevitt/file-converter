@@ -22,9 +22,12 @@ prepare(field, values, params) -> ctx
     dict.
 normalize(value, field, params, ctx) -> (output, error)
     Called by the engine for each distinct value (the engine caches results per value). `error is None` means
-    success; ("", None) means blank with no problem. Dispatches on `field.type` through `NORMALIZERS`.
+    success; ("", None) means blank with no problem. Dispatches on `field.type` through `NORMALIZERS`, except for
+    Excel error codes ("#REF!", "#VALUE!"…), which fail with SHEET_ERROR_REASON for every type.
 clean_text(value)
     Shared cleanup (control characters, whitespace, "N/A"/"null" tokens); also used by the engine and transforms.
+sheet_error(value)
+    The Excel error code a cell holds instead of a value, or None (used by normalize, checks.py and app.py).
 looks_like_phone / looks_like_email / looks_like_zip / looks_like_state / looks_like_date
     Cheap yes/no detectors used by column profiling, auto-mapping and the wrong-column checks (mapping.py,
     checks.py).
@@ -120,6 +123,30 @@ def clean_text(value: Any) -> str:
     s = _CTRL_RE.sub("", str(value)).replace(" ", " ")
     s = _WS_RE.sub(" ", s).strip()
     return "" if s.lower() in _NULL_TOKENS else s
+
+
+# Error codes a spreadsheet shows (and exports) instead of a formula's result when the formula is broken: Excel and
+# Google Sheets "#VALUE!", "#REF!", "#DIV/0!", "#NAME?", "#NUM!", "#NULL!", newer Excel "#SPILL!", "#CALC!",
+# "#FIELD!", "#BLOCKED!", "#CONNECT!", "#BUSY!", "#UNKNOWN!", "#PYTHON!", "#GETTING_DATA", Google Sheets "#ERROR!",
+# LibreOffice "Err:502". "#N/A" isn't here: it is a null token (people also type it to mean "not available").
+_SHEET_ERROR_RE = re.compile(
+    r"#(?:VALUE!|REF!|DIV/0!|NAME\?|NUM!|NULL!|SPILL!|CALC!|FIELD!|BLOCKED!|CONNECT!|BUSY!|UNKNOWN!|PYTHON!"
+    r"|GETTING_DATA|ERROR!)|Err:\d{3}", re.I)
+
+
+# The reason given for such a cell, whatever the field type.
+SHEET_ERROR_REASON = "Excel error (broken formula in the client's file)"
+
+
+def sheet_error(value: str) -> str | None:
+    """The spreadsheet error code a cell holds instead of a value, or None.
+
+    Such a cell holds no data: a formula in the client's file was broken when it was exported (e.g. a lookup that
+    found nothing, or a reference to a deleted column). Returns the code as written, without surrounding spaces:
+        "#VALUE!" → "#VALUE!"     " #div/0! " → "#div/0!"     "Err:502" → "Err:502"     "#5 Main St" → None
+    """
+    v = value.strip()
+    return v if _SHEET_ERROR_RE.fullmatch(v) else None
 
 
 def apply_case(value: str, case: str) -> str:
@@ -1271,10 +1298,16 @@ def normalize(value: str, field: FieldSpec, params: dict, ctx: dict) -> tuple[st
         "(516) 555-0100" → ("5165550100", None)
         "N/A"            → ("", None)       the engine then reports the required value as missing
         "555-1234"       → ("", "missing area code (only 7 digits)")
+        "#DIV/0!"        → ("", "Excel error (broken formula in the client's file)")   any field type
     """
     v = clean_text(value)
     if not v:
         return "", None
+    # A spreadsheet error code holds no data. Said plainly, instead of the type's own reason ("too few digits (1)"
+    # for "#DIV/0!" as a phone, "unrecognized word 'value'" as a date). The code itself shows as the value in the
+    # rejects report and side by side; one reason for all codes keeps them on one line of the summary.
+    if sheet_error(v):
+        return "", SHEET_ERROR_REASON
     out, err = NORMALIZERS[field.type](v, field, params, ctx)
     if err is None and field.type != "string" and field.max_length and len(out) > field.max_length:
         return "", f"longer than {field.max_length} characters"
