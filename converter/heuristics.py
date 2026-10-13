@@ -33,12 +33,18 @@ Every rule-made :class:`~converter.mapping.FieldMapping` gets ``origin="rule"``,
 from __future__ import annotations
 
 import re
+from collections import Counter
+from typing import TYPE_CHECKING, Iterator
 
 from rapidfuzz import fuzz
 
 from . import normalizers as N
-from .mapping import ColumnProfile, FieldMapping, Mapping, is_area_code_header, is_fax_column, norm_header
+from .mapping import (ColumnProfile, FieldMapping, Mapping, area_code_pairs, is_area_code_header, is_fax_column,
+                      norm_header)
 from .schema import FieldSpec, TargetSchema
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 # Schema field type -> key in ColumnProfile.shares that gives value-type evidence for it. A "datetime" field is
 # supported by date-looking values. Field types missing here (string, integer, decimal, boolean, enum) are
@@ -402,13 +408,14 @@ def _confidence(s: float, hs: float = 0.0, share: float | None = None) -> str:
     return "high" if s >= 85 else "medium" if s >= 70 else "low"
 
 
-def auto_map(schema: TargetSchema, profiles: list[ColumnProfile]) -> Mapping:
+def auto_map(schema: TargetSchema, profiles: list[ColumnProfile], df: pd.DataFrame | None = None) -> Mapping:
     """Propose a mapping for every schema field from the source column profiles, using rules only.
 
     Inputs: the target schema and one :class:`~converter.mapping.ColumnProfile` per source column (from
-    ``mapping.profile_columns``). Output: a :class:`~converter.mapping.Mapping` with an entry for every schema
-    field; unmatched fields keep the empty ``FieldMapping()`` (transform "none"). Callers run
-    ``Mapping.normalized`` on the result.
+    ``mapping.profile_columns``); optionally the file itself (``df``), which step 2b reads in full when the file has
+    an area code column (otherwise only the profiles' sample values are used). Output: a
+    :class:`~converter.mapping.Mapping` with an entry for every schema field; unmatched fields keep the empty
+    ``FieldMapping()`` (transform "none"). Callers run ``Mapping.normalized`` on the result.
 
     Steps (each step only fills what earlier steps left open, unless stated otherwise):
 
@@ -556,7 +563,7 @@ def auto_map(schema: TargetSchema, profiles: list[ColumnProfile]) -> Mapping:
     # the file, so it comes before any guess (the file's main area code is only a repair for what is left).
     for f in schema.auto_fields:
         if f.type == "phone":
-            _map_area_code_column(f, profiles, fields, used)
+            _map_area_code_column(f, profiles, fields, used, df)
 
     # 3. Email by value type alone (unambiguous).
     # Only when exactly one unused column is 80%+ email addresses; with two candidates (e.g. "Email" and
@@ -666,43 +673,67 @@ def auto_map(schema: TargetSchema, profiles: list[ColumnProfile]) -> Mapping:
     return Mapping(fields=fields)
 
 
-def _seven_digit_share(p: ColumnProfile) -> float:
-    """Share of a column's sample values that are 7-digit numbers (no area code): "555-0177", "5550177"."""
-    if not p.samples:
-        return 0.0
-    return sum(sum(c.isdigit() for c in N._EXT_RE.sub("", v)) == 7 for v in p.samples) / len(p.samples)
+def _cells(name: str, profiles: dict[str, ColumnProfile], df: pd.DataFrame | None) -> Iterator[str]:
+    """The column's filled cells, cleaned like the converter does: every row when the file (`df`) is given, else the
+    profile's sample values."""
+    if df is not None and name in df.columns:
+        return (v for v in map(N.clean_text, df[name].tolist()) if v)
+    return iter(profiles[name].samples if name in profiles else [])
+
+
+def _area_code_share(name: str, profiles: dict[str, ColumnProfile], df: pd.DataFrame | None) -> float:
+    """Share of a column's filled cells (every row, so one odd value among thousands barely counts) that are area
+    codes in use: "516", "(516)", "516.0". Zeros ("0", "000") are left out, like empty cells: exports write them
+    for "no area code"."""
+    counts = Counter(v for v in _cells(name, profiles, df) if not re.fullmatch(r"0+(\.0+)?", v))
+    total = sum(counts.values())
+    good = sum(n for v, n in counts.items() if (code := N.area_code_cell(v)) and N._area_code_in_use(code))
+    return good / total if total else 0.0
 
 
 def _map_area_code_column(f: FieldSpec, profiles: list[ColumnProfile], fields: dict[str, FieldMapping],
-                          used: set[str]) -> None:
-    """Step 2b of :func:`auto_map`: combine an area code column with 7-digit phone numbers (in place).
+                          used: set[str], df: pd.DataFrame | None = None) -> None:
+    """Step 2b of :func:`auto_map`: combine area code columns with 7-digit phone numbers (in place).
 
-    The area code column: named like one (:func:`mapping.is_area_code_header`: "Area Code", "AreaCode", "NPA") and
-    90%+ of its sampled values are area codes in use ("516", "(516)"). The numbers: the phone field's columns from
-    the steps before, plus unused phone-named columns ("Phone", "Cell") whose values are mostly (50%+) 7 digits -
-    those can't be phone columns by value, so the steps before leave them out. Only done when at least one of the
-    numbers' columns holds 7-digit values; numbers that already have an area code are kept as they are.
+    The area code columns: named like one (:func:`mapping.is_area_code_header`: "Area Code", "AreaCode", "NPA",
+    "Home Area Code") with 80%+ of their filled cells area codes in use ("516", "(516)"), counted over every row of
+    the file (``df``; the sampled values when it isn't given). The numbers: the phone field's columns from the steps
+    before, plus unused phone-named columns ("Phone", "Cell") holding any 7-digit value - those may not look like
+    phone columns by value, so the steps before can leave them out. Only done when one of the numbers' columns
+    holds a 7-digit value anywhere in the file (also after thousands of full numbers); numbers that already have
+    an area code are kept as they are. With several area code columns each phone column gets its own
+    (:func:`mapping.area_code_pairs`: "Home Phone" ← "Home Area Code").
 
     Example: ["Name", "Area Code", "Phone"] with 516 and 555-0177 -> phone_number = Phone + area code column of
     ["Area Code", "Phone"]: "(516) 555-0177" -> 5165550177.
     """
-    area = next((p for p in profiles if p.name not in used and is_area_code_header(p.name) and p.samples
-                 and sum(bool(N.area_code_cell(v)) and N._area_code_in_use(N.area_code_cell(v))
-                         for v in p.samples) >= 0.9 * len(p.samples)), None)
-    if area is None:
-        return
+    by_name = {p.name: p for p in profiles}
     fm = fields[f.name]
-    current = list(fm.sources) if fm.transform in ("copy", "each_row") else []
     if fm.transform not in ("none", "copy", "each_row"):
         return  # combined some other way (a person or a template decided)
-    local = [p.name for p in profiles if p.name not in used and p.name != area.name and is_phone_header(p.name)
-             and not is_fax_column(p.name) and _seven_digit_share(p) >= 0.5]
-    by_name = {p.name: p for p in profiles}
-    if not local and not any(_seven_digit_share(by_name[c]) > 0 for c in current if c in by_name):
+    current = list(fm.sources) if fm.transform in ("copy", "each_row") else []
+    # An area code column the steps before took for a phone column ("Phone Area Code") still counts.
+    areas = [p.name for p in profiles if (p.name not in used or p.name in current) and is_area_code_header(p.name)
+             and _area_code_share(p.name, by_name, df) >= 0.8]
+    if not areas:
+        return
+    current = [c for c in current if c not in areas]
+    has_local = {c: any(N.is_local_number(v) for v in _cells(c, by_name, df))
+                 for c in [*current, *(p.name for p in profiles if p.name not in used and p.name not in areas
+                                       and is_phone_header(p.name) and not is_fax_column(p.name))]}
+    local = [c for c in has_local if c not in current and has_local[c]]
+    if not local and not any(has_local.get(c) for c in current):
         return  # every number already has its area code
-    sources = [area.name, *current, *(c for c in local if c not in current)]
+    phones = [*current, *local]
+    # Each area code column followed by the phone columns that take their area code from it; phone columns with no
+    # area code column of their own last.
+    ordered, pairs = area_code_pairs([*areas, *phones], [])
+    sources = []
+    for a in [*ordered, None]:
+        sources += ([areas[a]] if a is not None else []) + [phones[i - len(areas)] for i in sorted(pairs)
+                                                             if pairs[i] == a]
     fields[f.name] = FieldMapping(sources=sources, transform="area_code", origin="rule", confidence="medium",
-                                  reason=f"7-digit numbers get the area code from '{area.name}'")
+                                  reason="7-digit numbers get the area code from " + ", ".join(f"'{a}'" for a in areas))
     used.update(sources)
 
 
