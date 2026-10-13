@@ -63,7 +63,7 @@ All business logic is in `converter/`. Only `app.py` and `converter/auth.py` imp
 | Module | Responsibility |
 |---|---|
 | `app.py` | Streamlit UI: login, navigation, the light/dark toggle and the five pages (New import, Imports, Templates, Target format, Users). Holds no conversion logic; it calls the package. |
-| `converter/reader.py` | Turns uploaded bytes into a DataFrame of text: encoding detection, delimiter sniffing, sheet choice, header-row detection (`detect_header`: compares each row with the rest of its columns, skips title rows, recognises files without a header row, flags unsure cases), unique names for blank/duplicate headers (`Column 3`, `Phone (2)`…), stray spaces and byte-order marks. Excel artifacts in values (`="…"`, `5.16E+09`, serial dates) are handled later by the normalizers. |
+| `converter/reader.py` | Turns uploaded bytes into a DataFrame of text: encoding detection, delimiter sniffing, sheet choice, header-row detection (`detect_header`: compares each row with the rest of its columns, skips title rows, recognises files without a header row, flags unsure cases), unique names for blank/duplicate headers (`Column 3`, `Phone (2)`…), stray spaces and byte-order marks; a CSV quote mark that is never closed costs only its row (`_quote_check`, `_lenient_grid`). Excel artifacts in values (`="…"`, `5.16E+09`, serial dates) are handled later by the normalizers. |
 | `converter/sheetsize.py` | Size check before a spreadsheet is read (`check_sheet_size`): finds where a sheet's values reach from the file structure (.xlsx/.xlsm sheet XML, .ods repeated rows and cells), estimates the memory reading needs, and refuses only sheets that need more than the computer (or container) has. Protects the app from files that made the spreadsheet library abort the process. |
 | `converter/schema.py` | Pydantic models of the target format (`FieldSpec`, `OutputSpec`, `DedupeSpec`, `TargetSchema`) and `load_schema`. Validates the YAML and fills derived defaults. |
 | `converter/mapping.py` | `FieldMapping` / `Mapping` (target field → transform + source columns + params, plus reviewer notes and skipped columns), `normalized()` (makes a mapping fit a file), column profiling, header fingerprints for template matching. |
@@ -111,6 +111,8 @@ Mapping
 
 `Mapping.normalized(schema, columns)` is called before every use. It makes a mapping fit a file:
 - it keeps every schema field and drops unknown sources and skipped columns;
+- it finds the mapping's columns in the file case-insensitively, then ignoring spaces and punctuation when only one
+  column fits (templates are matched that way, so `Last Visit Date` in a template finds `Last_Visit_Date`);
 - it enforces the phone rule (several phone columns → `each_row`);
 - it locks fixed-blank fields;
 - it resets invalid transform/param combinations.
@@ -161,6 +163,9 @@ changes (`Store.purge_drafts`).
 | Phone typo repair (extra digit, foreign country code; never area codes), each repair marked | `normalizers.prepare_phone`, `_repair_phone`; engine `CELL_REPAIRED` |
 | One row per different phone number (several columns, or several numbers in one cell) | `transforms` (`each_row`), `mapping.phone_rule`, `Mapping.row_field`, `normalizers.split_phones`, `engine._expand_rows` |
 | Columns *about* a phone (marketing preference, type, opt-in) never used as numbers | `heuristics.is_phone_header`, `is_consent_column` |
+| ID columns (*Account Number*, *Order #*, *Loyalty ID*) get no header evidence for the phone field; used only when 90%+ of their values are phones. *WhatsApp* is a phone word | `heuristics.names_other_number`, `score`, `_words` |
+| Several numbers in one cell found by the phonenumbers matcher, separators, digit groups, then North American shapes (used only when they find every number the others found, and more) | `normalizers.split_phones`, `_split_phones`, `_NANP_RE`, `_span_pieces` |
+| A CSV quote mark that is never closed costs only its row (warning names it); cells of any size; a quote inside a cell is an ordinary character | `reader._read_text_grid`, `_quote_check`, `_lenient_grid` |
 | Birthday/anniversary without a real year → year 1600 | `dateparse` (`NO_YEAR`), `normalizers.normalize_date`, `_placeholder_year`; schema `no_year_value` |
 | Times with a zone converted to the client's time zone | `dateparse._to_zone`; zone chosen per import on the New import page |
 | Consent and last_contacted only mapped by a person | schema `manual_only`; `Mapping.normalized` drops any mapping of them not made by a person (`origin="user"`); skipped by `heuristics.auto_map`, refused in `ai.parse_mapping_entries`, left out of templates (`Mapping.without_manual`, `services.template_mapping`) |
