@@ -246,6 +246,10 @@ not Claude, not a default and not a saved template (templates leave them out, so
 
 ## Common questions
 
+**"This sheet is too big to read on this computer".** The sheet has a value far away from the table (the message
+names the cell), so reading it would need more memory than the computer has. In Excel, press **Ctrl+End** to jump
+to the last used cell, delete what's there (or copy just the table into a new file), save and upload again.
+
 **A reason says *Excel error (broken formula in the client's file)*.** The cell held `#REF!`, `#VALUE!`,
 `#DIV/0!` or a similar code: a formula in the client's spreadsheet was broken when they exported it, so there is
 no value to import. If that column matters, ask the client for a fresh export.
