@@ -967,20 +967,25 @@ def prepare_date(field: FieldSpec, values: list[str], params: dict) -> dict:
         if all(1 <= n <= 2_958_465 for n in nums) and sum(10_000 <= n <= 80_000 for n in nums) >= 0.8 * len(nums):
             ctx["serial"] = True
 
-    # Evidence for day-first: values like 15/03/2026 (first part > 12) vs month-first 03/15/2026.
+    # Evidence for day-first: values like 15/03/2026 (first part > 12) vs month-first 03/15/2026, also written
+    # without separators (see _first_two_parts).
     mdy_votes = dmy_votes = 0
+    no_year_ok = field.type == "date" and field.no_year_value is not None
     for v in sample:
-        # Regex: two 1–2 digit numbers at the start separated by "/", "-", "." or a space, optionally followed by a
-        # 2–4 digit year: "15/03/2026", "03-15", "15.03.26". Only values where exactly one part is over 12 vote.
-        m = re.match(r"^\s*(\d{1,2})[/\-. ](\d{1,2})(?:[/\-. ](\d{2,4}))?\b", v)
-        if m:
-            a, b = int(m.group(1)), int(m.group(2))
-            if a > 12 >= b:
-                dmy_votes += 1
-            elif b > 12 >= a:
-                mdy_votes += 1
-    # An explicit order from the mapping wins; otherwise switch to day-first only on clear evidence. A value that
-    # only fits one way ("13/10/2026" in a US column) is still read correctly by itself (see dateparse._md).
+        parts = _first_two_parts(v, no_year_ok)
+        if parts is None:
+            continue
+        a, b = parts
+        if a > 12 >= b:
+            dmy_votes += 1
+        elif b > 12 >= a:
+            mdy_votes += 1
+    # An explicit order from the mapping wins (also the order of an input format such as "%d/%m/%Y", used for the
+    # values that don't match the format exactly, e.g. with a time after the date); otherwise switch to day-first
+    # only on clear evidence. A value that only fits one way ("13/10/2026" in a US column) is still read correctly
+    # by itself (see dateparse._md).
+    if requested not in DATE_ORDERS and ctx["format"]:
+        requested = _format_order(ctx["format"]) or requested
     if requested in DATE_ORDERS:
         ctx["order"] = requested
     elif dmy_votes >= 2 and dmy_votes > 3 * mdy_votes:
@@ -993,6 +998,52 @@ def prepare_date(field: FieldSpec, values: list[str], params: dict) -> dict:
     if field.type == "date" and field.no_year_value is not None:
         ctx["placeholder_year"] = _placeholder_year(sample, ctx)
     return ctx
+
+
+def _first_two_parts(value: str, no_year_ok: bool) -> tuple[int, int] | None:
+    """The first two numbers of a date, for the day-first vote, or None when the value can't tell.
+
+    With separators (regex: two 1–2 digit numbers at the start separated by "/", "-", "." or a space, optionally
+    followed by a 2–4 digit year): "15/03/2026" → (15, 3), "03-15" → (3, 15), "15.03.26" → (15, 3).
+    Without separators, only where the reading is certain: 8 digits that aren't a YYYYMMDD date ("15032026" →
+    (15, 3); "20261009" → None), 6 digits that can't be YYMMDD ("150390" → (15, 3); "150326" → None, it could be
+    2015-03-26), and in birthday-type columns 3–4 digits that aren't a year ("1503" → (15, 3); "1985" → None).
+    """
+    m = re.match(r"^\s*(\d{1,2})[/\-. ](\d{1,2})(?:[/\-. ](\d{2,4}))?\b", value)
+    if m:
+        return int(m.group(1)), int(m.group(2))
+    v = value.strip()
+    if not v.isdigit():
+        return None
+    if len(v) == 8 and not _yyyymmdd(v):
+        return int(v[:2]), int(v[2:4])
+    if len(v) == 6 and not (1 <= int(v[2:4]) <= 12 and 1 <= int(v[4:]) <= 31):
+        return int(v[:2]), int(v[2:4])
+    if len(v) in (3, 4) and no_year_ok and not (MIN_YEAR <= int(v) <= MAX_YEAR):
+        v = v.zfill(4)
+        return int(v[:2]), int(v[2:])
+    return None
+
+
+def _yyyymmdd(digits: str) -> bool:
+    """Whether 8 digits read as a real year-month-day date with a year from 1900 to 2100 ("20261009")."""
+    y, m, d = int(digits[:4]), int(digits[4:6]), int(digits[6:])
+    return MIN_YEAR <= y <= MAX_YEAR and 1 <= m <= 12 and 1 <= d <= 31
+
+
+def _format_order(fmt: str) -> str | None:
+    """The date order of a strptime input format: "%d/%m/%Y" → "DMY", "%Y-%m-%d" → "YMD", "%m/%d/%y" → "MDY".
+
+    Used so values that don't match the format exactly (a time after the date, a missing leading zero the format
+    doesn't allow) are still read in the format's order. None when the format has no day or no month.
+    """
+    pos = {k: min((fmt.find(c) for c in codes if c in fmt), default=-1)
+           for k, codes in (("D", ("%d", "%-d")), ("M", ("%m", "%-m", "%b", "%B")), ("Y", ("%Y", "%y")))}
+    if pos["D"] < 0 or pos["M"] < 0:
+        return None
+    if 0 <= pos["Y"] < pos["M"]:
+        return "YMD"
+    return "DMY" if pos["D"] < pos["M"] else "MDY"
 
 
 def _placeholder_year(sample: list[str], ctx: dict) -> int | None:
