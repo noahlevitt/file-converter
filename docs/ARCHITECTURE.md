@@ -71,13 +71,13 @@ All business logic is in `converter/`. Only `app.py` and `converter/auth.py` imp
 | `converter/normalizers.py` | Per-type cleaning and validation: phone (US-only, limited typo repair that never adds or changes digits), date/datetime (via `dateparse`), email, ZIP, state, boolean, enum, numbers, strings. `prepare()` builds a per-column context first (day/month order, placeholder year, the file's own numbers and area codes as evidence). |
 | `converter/dateparse.py` | The date/time parser: every common spelling, Excel serials, Unix timestamps, time zones, two-digit years, no-year dates (`NO_YEAR`). |
 | `converter/engine.py` | `convert()`: applies the mapping to every row, expands one row per phone number (several phone columns, or several numbers in one cell), normalizes, rejects bad rows, removes exact duplicates, builds output + rejects + summary + per-cell audit. Also `preview_values`, `source_rows` and `count_multi_number_cells`. |
-| `converter/output.py` | Writes the import file (CSV/XLSX per `OutputSpec`), the rejected-rows CSV and the text summary; builds download file names. |
+| `converter/output.py` | Writes the import file (CSV/XLSX per `OutputSpec`), the rejected-rows CSV and the text summary; builds download file names. Neutralises would-be spreadsheet formulas in the rejected-rows CSV (`neutralise_formula`, `neutralise_csv`); XLSX output is written as text, never as formulas. |
 | `converter/checks.py` | Rule-based mistake checks (wrong column, future dates, birthdays that look like sign-up dates, mixed day/month order, 7-digit phones…), `column_warnings`, and the sample payload for Claude's review. |
 | `converter/ai.py` | `ClaudeAssistant`: `propose_mapping`, `apply_notes`, `review`, `repair_values`. Structured outputs, prompts built from the schema, strict validation of every answer (`parse_mapping_entries`, `accept_repair`). |
 | `converter/services.py` | Glue used by the UI and CLI: `make_assistant`, `initial_mapping`, `merge`, `check_for_mistakes`, `validate_repairs`. |
 | `converter/editor.py` | Mapping editing for the two grids: field-side (`apply_row_edit`) and column-side (`apply_column_edit`: Goes to / Skip), plus the "Option" cell text. |
 | `converter/compare.py` | Side-by-side HTML table, filters and counts, the "What changed" per-field summary, and the colour-coded comparison workbook. |
-| `converter/storage.py` | SQLite store (users, templates, imports, user preferences) and the per-import file folders; retention purge. |
+| `converter/storage.py` | SQLite store (users, templates, imports, user preferences), the per-import file folders and New import drafts; retention purge. |
 | `converter/jobs.py` | `run_import` (one import, start to finish, with progress and cancel) and `ImportRunner` (thread pool, purge loop). |
 | `converter/auth.py` | Login gate: `AUTH_MODE=none` (the default for now: no login, everyone is the local admin) or password mode with bcrypt accounts. |
 | `converter/config.py` | `Settings` from environment variables / `.env`. |
@@ -146,6 +146,12 @@ Per-import files live in `data/imports/<id>/`:
 
 The files are deleted after `FILE_RETENTION_DAYS`. The database record and its counts are kept.
 
+A file still being mapped on New import is a draft in `data/drafts/<random id>/` (`file`, `meta.json` with the
+uploader, `state.json` with how it was read and the mapping so far). The id is in the page URL (`?draft=…`), so a
+browser refresh, which starts an empty Streamlit session, can restore the work (`app.restore_draft`,
+`Store.load_draft`). Drafts are deleted on Start import, Start over or another upload, and after 24 hours without
+changes (`Store.purge_drafts`).
+
 ## Key behaviours and where they live
 
 | Behaviour | Where |
@@ -159,6 +165,9 @@ The files are deleted after `FILE_RETENTION_DAYS`. The database record and its c
 | Consent and last_contacted only mapped by a person | schema `manual_only`; `Mapping.normalized` drops any mapping of them not made by a person (`origin="user"`); skipped by `heuristics.auto_map`, refused in `ai.parse_mapping_entries`, left out of templates (`Mapping.without_manual`, `services.template_mapping`) |
 | Duplicates only when every column matches | schema `dedupe: keys: ["*"]`; `engine.convert` |
 | Bad rows not imported, counted with reasons | `engine.convert` (`RowIssue.rejected`), `output.write_rejects`, summary |
+| No live spreadsheet formulas in downloads (client values starting with `=`, `+`, `-`, `@` get an apostrophe) | `output.neutralise_formula`, `write_rejects`; `app.rejects_download` for files from older versions |
+| Activity dates imported as written (no placeholder dates outside birthday/anniversary) | `normalizers.normalize_date` (`no_year_value` only on birthday/anniversary) |
+| A browser refresh keeps the mapping in progress | `app.save_draft` / `restore_draft`, `Store` drafts |
 | Skipped columns stay out everywhere | `Mapping.excluded_columns`; `normalized`, `services.merge`, `ai._without_skipped` |
 
 ## Why it is built this way
