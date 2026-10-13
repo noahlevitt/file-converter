@@ -629,8 +629,12 @@ def _us_number(d10: str, countries: tuple[str, ...]) -> bool:
 
 
 # A cell of an "Area Code" column: three digits, the first 2–9 (North American area codes), optionally in
-# parentheses or with a ".0" a spreadsheet added to a number: "516", "(516)", "516.0".
-_AREA_CODE_CELL_RE = re.compile(r"\(?\s*([2-9]\d{2})\s*\)?(?:\.0+)?")
+# parentheses or with a ".0" a spreadsheet added to a number: "516", "(516)", "516.0"; also with the country code 1
+# in front: "1-516", "+1 516", "+1 (516)", "1516", "(1) 516".
+_AREA_CODE_CELL_RE = re.compile(r"(?:\+?\s*\(?\s*1\s*\)?[\s.\-]*)?\(?\s*([2-9]\d{2})\s*\)?(?:\.0+)?")
+# The country code 1 written in front of a 7-digit number: "+1 555-0177", "+15550177", "1-555-0177", "1 555 0177".
+# A bare 1 needs a separator after it ("15550177" is left alone: 8 digits run together may be a typo).
+_CC_BEFORE_LOCAL_RE = re.compile(r"(?:\+\s*1|(?<![\d+])1(?=[\s.\-]))[\s.\-]*(?=\d{3}[\s.\-]?\d{4}(?!\d))")
 # The "(516) " with_area_code puts in front of the number (the side-by-side view finds the file's cell without it).
 ADDED_AREA_CODE_RE = re.compile(r"\(\d{3}\) (?=\d)")
 
@@ -638,20 +642,27 @@ ADDED_AREA_CODE_RE = re.compile(r"\(\d{3}\) (?=\d)")
 def area_code_cell(value: str) -> str:
     """The area code in a cell of an Area Code column, or "" when the cell isn't one.
 
-    "516" → "516", "(516)" → "516", "516.0" → "516", "" → "", "11530" → "", "Nassau" → "", "123" → "".
+    "516" → "516", "(516)" → "516", "516.0" → "516", "1-516" → "516", "+1 (516)" → "516", "" → "", "11530" → "",
+    "Nassau" → "", "123" → "".
     """
     m = _AREA_CODE_CELL_RE.fullmatch(value.strip())
     return m.group(1) if m else ""
 
 
 def _local_form(value: str) -> str | None:
-    """The value with letters typed for digits fixed and a spreadsheet ".0" removed, when it then holds exactly
-    7 digits (an extension not counted): a number without its area code. None otherwise.
-        "555-0177" → "555-0177", "555-O177" → "555-0177", "5550177.0" → "5550177",
-        "555-0177 x12" → "555-0177 x12", "516-555-0177" → None, "" → None
+    """The value with letters typed for digits fixed, a spreadsheet ".0" removed and the country code 1 in front of
+    the number dropped, when it then holds exactly 7 digits (an extension not counted): a number without its area
+    code. None otherwise.
+        "555-0177" → "555-0177", "555-O177" → "555-0177", "5550177.0" → "5550177", "+1 555-0177" → "555-0177",
+        "1-555-0177" → "555-0177", "555-0177 x12" → "555-0177 x12", "516-555-0177" → None, "15550177" → None,
+        "" → None
     """
     v = _fix_lookalikes(_FLOAT_ARTIFACT_RE.sub(r"\1", value.strip()))
-    return v if sum(c.isdigit() for c in _EXT_RE.sub("", v)) == 7 else None
+    n = sum(c.isdigit() for c in _EXT_RE.sub("", v))
+    if n == 8:  # maybe the country code 1 in front of the 7 digits
+        v = _CC_BEFORE_LOCAL_RE.sub("", v, count=1)
+        n = sum(c.isdigit() for c in _EXT_RE.sub("", v))
+    return v if n == 7 else None
 
 
 def is_local_number(value: str) -> bool:
@@ -663,12 +674,14 @@ def with_area_code(phone: str, area: str) -> str:
     """A 7-digit phone value with the area code from the row's Area Code column put in front of the number.
 
     Only when the value is a number without its area code (is_local_number: 7 digits, an extension not counted,
-    also with letters typed for digits or a spreadsheet ".0") and `area` is an area code (see area_code_cell);
+    also with letters typed for digits, a spreadsheet ".0" or the country code in front: "+1 555-0177") and `area`
+    is an area code (see area_code_cell);
     anything else is returned unchanged, so full numbers in the same column stay as written:
         ("555-0177", "516")        → "(516) 555-0177"
         ("Cell: 555-0177", "516")  → "Cell: (516) 555-0177"
         ("555-O177", "516")        → "(516) 555-0177"
         ("5550177.0", "516")       → "(516) 5550177"
+        ("+1 555-0177", "1-516")   → "(516) 555-0177"
         ("516-555-0177", "631")    → "516-555-0177"       already has an area code
         ("555-0177", "")           → "555-0177"           no area code in the row
     Used by the "Phone + area code column" transform (engine._expand_rows, transforms.apply_transform).
@@ -727,7 +740,8 @@ def _repair_phone(value: str, countries: tuple[str, ...], fmt: str, local: tuple
     3. An area code that doesn't exist anywhere in North America (_area_code_in_use: 156, 433) and is one digit
        off, or two neighbouring digits swapped, from an area code this file uses (`local`): 156 → 516. A real
        area code is never changed (514 is Quebec, even in a file of 516 numbers).
-    4. 7 digits (no area code) when one area code makes up 80%+ of the file (`dominant`): 555-0177 → 516-555-0177.
+    4. 7 digits (no area code; also after a country code, +1 555-0177) when one area code makes up 80%+ of the file
+       (`dominant`): 555-0177 → 516-555-0177.
     When several numbers fit, the one that already appears elsewhere in the file wins; otherwise nothing is guessed.
     Rules 3 and 4 were removed in 0.9.0 and restored in 0.20.0 (rule 3 only for area codes that don't exist).
 
@@ -795,8 +809,10 @@ def _repair_phone(value: str, countries: tuple[str, ...], fmt: str, local: tuple
                 if _one_digit_off(seq[:3], code):
                     add(code + seq[3:], f"area code {seq[:3]} doesn't exist; read as {code}, which this file uses")
     # 4. Missing area code: only when one area code covers 80%+ of the file; with a mix there is no safe guess.
-    if not found and dominant and len(digits) == 7:
-        add(dominant + digits, f"no area code; used {dominant}, the area code of most numbers in this file")
+    # "+1 555-0177" counts too: the country code is there, the area code isn't.
+    seven = digits if len(digits) == 7 else re.sub(r"\D", "", _EXT_RE.sub("", _local_form(value) or ""))
+    if not found and dominant and len(seven) == 7:
+        add(dominant + seven, f"no area code; used {dominant}, the area code of most numbers in this file")
     # Several fits: prefer the single one that already appears elsewhere in the file (likely the same person).
     if len(found) > 1:
         seen = [d for d in found if d in known]
