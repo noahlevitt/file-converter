@@ -242,8 +242,9 @@ were cancelled or failed aren't listed.
   already has an area code keeps it. With *Home Area Code* + *Home Phone* and *Cell Area Code* + *Cell Phone*,
   each phone column uses its own area code column; a phone column without one never takes another line's. A row
   whose area code cell is empty (or `000`) is treated like any 7-digit number (the file's main area code, or a bad
-  row). If the column has another name and isn't found, choose *Phone + area code column* under **How** for the
-  phone field and pick both columns (in any order).
+  row). The country code is understood in both columns (`1-516`, `+1 555-0177`). If the column has another name
+  and isn't found, choose *Phone + area code column* under **How** for the phone field and pick both columns (in
+  any order).
 - **ID columns** (*Account Number*, *Order #*, *Card Number*, *Customer Number*, *Loyalty ID*) are not taken for
   the phone column because of their name. One is only used when nearly all of its values are phone numbers. If
   the file's real phone column can't be used (e.g. 7-digit numbers with no area code column), the phone field
