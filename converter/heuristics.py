@@ -131,7 +131,9 @@ def _words(text: str) -> list[str]:
         _words("phone4MarketingPreference") -> ["phone", "4", "marketing", "preference"]
         _words("SMSOptIn")                  -> ["sms", "opt", "in"]
         _words("Cell #")                    -> ["cell"]
+        _words("WhatsApp")                  -> ["whatsapp"]
     """
+    text = re.sub(r"(?i)whats\s*app", "whatsapp", text)  # one word, though written "WhatsApp" (not whats + app)
     text = re.sub(r"([a-z])([A-Z])", r"\1 \2", text)  # camelCase → camel Case
     text = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", text)  # SMSOptIn → SMS OptIn
     text = re.sub(r"([A-Za-z])(\d)", r"\1 \2", text)  # phone4 → phone 4
@@ -273,10 +275,19 @@ def header_score(column: str, f: FieldSpec) -> float:
     return best
 
 
+def names_other_number(column: str) -> bool:
+    """True when the header names a number that isn't a phone: "Account Number", "Order #", "Member No", "Card
+    Number", "Loyalty ID". A phone word wins ("Customer Phone", "Guest Phone": phone headers)."""
+    words = set(_words(column))
+    return bool(words & NOT_PHONE_WORDS) and not (words & PHONE_WORDS)
+
+
 def score(column: ColumnProfile, f: FieldSpec) -> float:
     """Overall fit (roughly 0..100) of a source column for a target field: header evidence + value evidence.
 
     * Consent columns -> 0: never mapped.
+    * A header naming another kind of number ("Account Number", "Order #", "Loyalty ID") gets no header evidence
+      for the phone field (:func:`names_other_number`).
     * Empty column (no values in this file) -> half the header score: no value evidence, so it can't reach the
       step-1 thresholds of :func:`auto_map` on its own (an empty "Phone 4" is handled by the phone step instead).
     * Typed fields (phone, email, date, datetime, zip, state): ``0.55 * header + 45 * share`` where ``share`` is
@@ -295,6 +306,11 @@ def score(column: ColumnProfile, f: FieldSpec) -> float:
     if is_consent_column(column.name):
         return 0.0
     hs = header_score(column.name, f)
+    # "Account Number" looks a lot like "contact number" / "phone number" to a fuzzy comparison, and ten-digit IDs
+    # are often valid phone numbers by chance: without this, an ID column could be taken for the phone. Such a
+    # header gives no header evidence for the phone field; only clear phone values can still make it one (step 2).
+    if f.type == "phone" and names_other_number(column.name):
+        hs = 0.0
     kind = TYPED.get(f.type)
     if column.non_empty == 0:
         return hs * 0.5
