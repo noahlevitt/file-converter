@@ -716,6 +716,14 @@ _ANY_LABEL_RE = re.compile(r"\b(?:mobile|cell|cel|wireless|sms|text|fax|home|wor
 # Characters trimmed from both ends of each piece: spaces and the separators themselves. Parentheses are kept
 # because "(516) 555-0100" starts with one and "(cell)" ends with one.
 _PIECE_TRIM = " \t\n,;/\\|&-"
+# A North American number written the usual ways: optional country code (+1 / 1), area code with or without
+# parentheses, exchange and line, separated by nothing or by up to 3 spaces, dots or dashes. Area code and exchange
+# start with 2–9, as all North American ones do. A match never starts or ends inside a run of digits (look-behind /
+# look-ahead), so "51655501005165551212" holds no match and "516-555-0100/0101" holds one. A "(" may follow a digit
+# directly ("(516)555-0100(917)555-1234"). Matches "516.555.0100", "+1 631 555 0199", "1-718-555-0142",
+# "(516) 555-0100", "5165550100".
+_NANP_RE = re.compile(r"(?:(?<![\d+])(?:\+\s*)?1[\s.\-]{0,3}|(?<![\d+])|(?=\())"
+                      r"(?:\(\s*[2-9]\d\d\s*\)|[2-9]\d\d)[\s.\-]{0,3}[2-9]\d\d[\s.\-]{0,3}\d{4}(?!\d)")
 
 
 def _is_fax_label(text: str) -> bool:
@@ -802,6 +810,11 @@ def split_phones(value: str, field: FieldSpec, params: dict) -> list[tuple[str, 
          so they are reported as skipped instead of disappearing.
       4. If neither finds two numbers, numbers separated only by spaces are found from the digit groups
          ("516 555 0100 516 555 1212"; see _digit_group_spans).
+      5. Finally, numbers written in the usual North American shapes are looked for directly (see _NANP_RE). They
+         replace the result of 2–4 only when they give every valid number that result gave plus at least one more:
+         the matcher misses some ("516 555 0100 x12 917-555-1234", "1. 516-555-0100 2. 917-555-1234",
+         "+1 631 555 0199 1-718-555-0142 1-201-555-0111") and joins others wrongly ("516.555.0100 917.555.1234"),
+         and before 0.16.0 those cells silently lost a number (or both).
     The text around the numbers is shared out so each piece keeps its own label:
       - an extension right after a number stays with it ("516-555-0100 x12, 917-555-1234");
       - between two numbers, a separator (, ; / | & "or" "and" line break) splits the text: what is before it belongs
@@ -838,10 +851,10 @@ def _split_phones(value: str, field: FieldSpec, params: dict) -> list[tuple[str,
     text, err = _fix_numeric_artifacts(_prep_phone(value))
     if err:
         return [(value, _is_fax_label(value))]
+    region = _phone_region(field, params)
     spans: list[list[int]] = []
     try:
-        for m in phonenumbers.PhoneNumberMatcher(text, _phone_region(field, params),
-                                                 leniency=phonenumbers.Leniency.POSSIBLE):
+        for m in phonenumbers.PhoneNumberMatcher(text, region, leniency=phonenumbers.Leniency.POSSIBLE):
             if sum(c.isdigit() for c in m.raw_string) >= 7:
                 spans.append([m.start, m.end])
     # The matcher can raise on unusual input; that counts as "no numbers found" and the digit groups are tried.
@@ -849,11 +862,33 @@ def _split_phones(value: str, field: FieldSpec, params: dict) -> list[tuple[str,
         spans = []
     parts = _separator_pieces(text)
     if len(parts) >= max(2, len(spans)):
-        return [(p, _is_fax_label(p)) for p in parts]
-    if len(spans) < 2:
-        spans = [list(s) for s in _digit_group_spans(text)]
-    if len(spans) < 2:
-        return [(value, _is_fax_label(value))]
+        pieces = parts
+    else:
+        if len(spans) < 2:
+            spans = [list(s) for s in _digit_group_spans(text)]
+        pieces = _span_pieces(text, spans) if len(spans) >= 2 else [value]
+    # Step 5: the usual North American shapes, used only when they find every valid number above and more.
+    nanp = [[m.start(), m.end()] for m in _NANP_RE.finditer(text)]
+    if len(nanp) >= 2:
+        countries, fmt = tuple(c.upper() for c in field.countries), field.format or "E164"
+
+        def numbers(ps: list[str]) -> set[str]:
+            return {out for out, err in (_parse_phone(p, region, countries, fmt) for p in ps) if err is None}
+
+        candidate = _span_pieces(text, nanp)
+        if numbers(candidate) > numbers(pieces):
+            pieces = candidate
+    return [(p, _is_fax_label(p)) for p in pieces]
+
+
+def _span_pieces(text: str, spans: list[list[int]]) -> list[str]:
+    """Cut `text` into one piece per number, given where the numbers are ([start, end] each, in order, at least two).
+
+    The text between numbers is shared out so each piece keeps its own label and extension (see split_phones):
+        "516-555-0100 x12 917-555-1234"   → ["516-555-0100 x12", "917-555-1234"]
+        "H: 516-555-1212 C: 516-555-0100" → ["H: 516-555-1212", "C: 516-555-0100"]
+    `spans` is changed in place (an extension is added to the number before it). Empty pieces are left out.
+    """
     # An extension right after a number belongs to that number.
     for k in range(len(spans) - 1):
         ext = _EXT_AFTER_RE.match(text, spans[k][1], spans[k + 1][0])
@@ -873,7 +908,7 @@ def _split_phones(value: str, field: FieldSpec, params: dict) -> list[tuple[str,
         else:
             ends[k] = starts[k + 1] = gap_start
     pieces = [text[starts[k]:ends[k]].strip(_PIECE_TRIM) for k in range(len(spans))]
-    return [(p, _is_fax_label(p)) for p in pieces if p]
+    return [p for p in pieces if p]
 
 
 # ---------------------------------------------------------------------------
