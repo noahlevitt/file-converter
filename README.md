@@ -104,7 +104,9 @@ Every value is reduced to the 10-digit US number:
   phone number*. Dates over 200 characters likewise (*too long to be a date*).
 - Excel error values (`#VALUE!`, `#REF!`, `#DIV/0!`, `#NAME?`…, any field): reason *Excel error (broken formula in
   the client's file)*. They hold no data, so a phone row is a bad row and any other value is left blank. `#N/A`
-  counts as empty. *Check for mistakes* reports a column with such values, and *Suggest fixes* skips them.
+  counts as empty. *Check for mistakes* reports a column with such values, and *Suggest fixes* skips them. In
+  `.xlsx`, `.xlsm`, `.xls` and `.ods` files too (since 0.19.0; the spreadsheet library reads error cells as empty,
+  so the codes are read from the file itself; `.xls` needs the `xlrd` package, `.xlsb` isn't covered).
 - US territories (Puerto Rico, USVI, Guam, American Samoa, Northern Mariana Islands) count as US. To accept the
   50 states only, set `countries: [US]` in the schema; to also accept Canada, add `CA` to that list.
 
@@ -207,7 +209,8 @@ Read in any mix within one column:
 
 - **Numeric:** `10/9/2026`, `10-09-26`, `10.09.2026`, `10 09 2026`, `2026-10-09`, `2026/10/9`, and day-first
   `9/10/2026` when the column clearly is day-first.
-- **Compact:** `20261009`, `10092026`, `100926`, `202610091545`, `20261009T154500Z`.
+- **Compact:** `20261009`, `10092026`, `100926`, `202610091545`, `20261009T154500Z`; day-first `15032026` in a
+  day-first column.
 - **Month names:** `October 9, 2026`, `October 9th 2026`, `Oct. 9 '26`, `9 October 2026`, `9, October, 2026`,
   `9th of October 2026`, `09-Oct-26`, `Oct-09-2026`, `2026 Oct 9`, `OCTOBER 9`, `Sept 9`, and Spanish
   (`9 de octubre de 2026`).
@@ -220,8 +223,13 @@ Read in any mix within one column:
   leading apostrophe, Unix timestamps in seconds or milliseconds.
 - **Ambiguous day/month:** month-first (US) by default. A column switches to day-first only when at least two
   values prove it (e.g. `15/03/2026`) and they outnumber month-first evidence 3 to 1. A single value that fits
-  only one way (`13/10/2026`) is always read that way. You can force the order per field with the *Option*
-  cell (`MDY` / `DMY` / `YMD`) or by telling Claude.
+  only one way (`13/10/2026`) is always read that way. Values without separators count as evidence when they can
+  only be read one way (`15032026`; not `20261009`, and not 6 digits that could be year-month-day). You can force
+  the order per field with the *Option* cell (`MDY` / `DMY` / `YMD`, where `YMD` also reads `26/10/09` as
+  2026-10-09) or by telling Claude. An input format such as `%d/%m/%Y` sets the order too, also for values that
+  don't match it exactly (`03/10/2026 3:15 PM` → October 3).
+- **Spreadsheet date cells with a separate Time column** (`2026-03-15 00:00:00` + `15:15:00`) give one
+  date-time.
 - **Two-digit years:** 20yy unless that lands more than a year in the future, then 19yy (`08/09/26` → 2026,
   `08/09/85` → 1985).
 - **Time zones:** choose the client's time zone on *New import*; templates remember it. Times that include a zone
