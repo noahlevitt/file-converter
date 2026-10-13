@@ -78,6 +78,7 @@ from converter.editor import (FROM_LABEL, LABELS, OPTION_HELP, apply_column_edit
 from converter.engine import convert, count_multi_number_cells, preview_values, source_rows
 from converter.jobs import ImportRunner
 from converter.mapping import Mapping, has_generic_columns, profile_columns
+from converter.normalizers import sheet_error
 from converter.output import neutralise_csv
 from converter.reader import SUPPORTED_EXTENSIONS, ReadError, read_file
 from converter.schema import TargetSchema, load_schema
@@ -1646,7 +1647,9 @@ def _repair_section(rec: ImportRecord, rec_schema: TargetSchema, audit: pd.DataF
     accepted fixes as overrides ({field: {original: fixed}}) and opens it; this import is never changed, so
     every fix stays traceable.
     """
-    failed = {k: v for k, v in rec.summary.get("failed_values", {}).items() if k in rec_schema.field_names}
+    # Excel error codes (#REF!, #VALUE!…) are left out: they hold no data, so there is nothing to reformat.
+    failed = {k: kept for k, v in rec.summary.get("failed_values", {}).items()
+              if k in rec_schema.field_names and (kept := [x for x in v if not sheet_error(x)])}
     if not failed or not assistant:
         return
     n_vals = sum(len(v) for v in failed.values())
