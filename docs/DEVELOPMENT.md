@@ -20,7 +20,7 @@ cp .env.example .env              # then edit: admin account, optional ANTHROPIC
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest -q            # everything (about 720 tests, about 10 seconds)
+.venv/bin/python -m pytest -q            # everything (about 740 tests, under 20 seconds)
 .venv/bin/python -m pytest -q tests/test_formats.py -k phone     # one area
 ```
 
@@ -48,6 +48,7 @@ The suite needs no network and no API key. Claude is replaced by fake clients. T
 | `test_notes_checks.py` | Notes applied by Claude, rule checks, review payload, phone masking |
 | `test_jobs_compare.py` | Background runner, cancel, retention, side-by-side view and comparison workbook |
 | `test_sheet_errors.py` | Excel error values (`#REF!`, `#VALUE!`…): one clear reason for every field type, mistake-check finding |
+| `test_sheet_size.py` | Sheets too big for memory refused before reading (stray last cell, repeated-row .ods, run in a separate process), formatting ignored, only the chosen sheet checked, unusual files never blocked |
 | `test_formula_injection.py` | No live spreadsheet formulas in the rejected-rows file (also older files on download) or in Excel output |
 | `test_drafts.py` | A browser refresh keeps the mapping in progress: drafts on disk, owner check, expiry; the real app.py driven with Streamlit's AppTest |
 
