@@ -14,6 +14,7 @@ import pytest
 
 from converter.ai import AIError, ClaudeAssistant, accept_repair, parse_mapping_entries
 from converter.editor import apply_row_edit, option_text, parse_option
+from converter.engine import convert
 from converter.heuristics import auto_map
 from converter.mapping import FieldMapping, Mapping, header_fingerprint, profile_columns
 from converter.output import write_output
@@ -240,6 +241,28 @@ def test_template_works_when_headers_differ_in_punctuation(tmp_path, real_schema
         "phone_number": ["Phone"], "transactions_last": ["Last_Visit_Date"], "birthday": ["birth-date"]}
     assert sug.mapping.excluded_columns == ["notes_col"]
     assert sug.mapping.column_notes == {"birth-date": "year is often 1900"}
+
+
+def test_similar_template_takes_new_phone_columns(tmp_path, real_schema):
+    """A phone column that is new since the template was saved is added to the phone field (0.17.0).
+
+    Before, the template's phone field (from a file with "Phone" only) replaced the rules' choice, so a "Mobile"
+    column added to the client's export was silently left out. A phone column the template's file already had and
+    the template doesn't use was left out by a person: it stays out.
+    """
+    s = Store(tmp_path / "t.db")
+    base = {"Guest Name": ["a", "b", "c"], "Phone": ["5165550100", "5165550101", "5165550102"],
+            "Home Phone": ["2125550142", "2125550143", ""], "Last Visit": ["10/01/2026"] * 3, "Email": ["x@y.com"] * 3}
+    m = Mapping(fields={"phone_number": FieldMapping(sources=["Phone"], transform="copy", origin="user"),
+                        "transactions_last": FieldMapping(sources=["Last Visit"], transform="copy")})
+    s.save_template("Client", list(base), m, {}, real_schema.name, "x")
+    df = pd.DataFrame({**base, "Mobile": ["9175551234", "9175551235", "9175551236"]})
+    sug = initial_mapping(real_schema, df, profile_columns(df), s, None, use_ai=False)
+    phone = sug.mapping.get("phone_number")
+    assert sug.similarity < 1 and (phone.sources, phone.transform) == (["Phone", "Mobile"], "each_row")
+    assert phone.origin == "template" and "Mobile" in phone.reason
+    assert any("Phone column 'Mobile' is new since template 'Client'" in n for n in sug.notes)
+    assert convert(df, real_schema, sug.mapping).imported == 6
 
 
 def test_punctuation_fallback_never_guesses_between_two_columns(real_schema):
