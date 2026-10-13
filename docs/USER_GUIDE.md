@@ -250,6 +250,13 @@ not Claude, not a default and not a saved template (templates leave them out, so
 names the cell), so reading it would need more memory than the computer has. In Excel, press **Ctrl+End** to jump
 to the last used cell, delete what's there (or copy just the table into a new file), save and upload again.
 
+**A reason says *couldn't be read (unexpected error…)*.** Something in that one value tripped up the converter.
+Only that value is affected; the rest of the file is imported. Tell whoever looks after the app: the details are
+in the server log.
+
+**Two columns had the same name.** The second gets a number: *Phone*, *Phone (2)*… If the file already has a
+*Phone (2)*, the repeat gets the next free number (*Phone (3)*), so no column is ever lost.
+
 **A reason says *Excel error (broken formula in the client's file)*.** The cell held `#REF!`, `#VALUE!`,
 `#DIV/0!` or a similar code: a formula in the client's spreadsheet was broken when they exported it, so there is
 no value to import. If that column matters, ask the client for a fresh export.
