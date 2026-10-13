@@ -620,6 +620,60 @@ def _us_number(d10: str, countries: tuple[str, ...]) -> bool:
     return not countries or phonenumbers.region_code_for_number(num) in countries
 
 
+# A cell of an "Area Code" column: three digits, the first 2–9 (North American area codes), optionally in
+# parentheses or with a ".0" a spreadsheet added to a number: "516", "(516)", "516.0".
+_AREA_CODE_CELL_RE = re.compile(r"\(?\s*([2-9]\d{2})\s*\)?(?:\.0+)?")
+# The 7-digit number inside a phone value, with its optional separator: "555-0177", "5550177", "555 0177".
+_LOCAL_NUMBER_RE = re.compile(r"(?<!\d)(\d{3}[\s.\-]?\d{4})(?!\d)")
+# The "(516) " with_area_code puts in front of that number (the side-by-side view finds the file's cell without it).
+ADDED_AREA_CODE_RE = re.compile(r"\(\d{3}\) (?=\d{3}[\s.\-]?\d{4}(?!\d))")
+
+
+def area_code_cell(value: str) -> str:
+    """The area code in a cell of an Area Code column, or "" when the cell isn't one.
+
+    "516" → "516", "(516)" → "516", "516.0" → "516", "" → "", "11530" → "", "Nassau" → "", "123" → "".
+    """
+    m = _AREA_CODE_CELL_RE.fullmatch(value.strip())
+    return m.group(1) if m else ""
+
+
+def with_area_code(phone: str, area: str) -> str:
+    """A 7-digit phone value with the area code from the row's Area Code column put in front of the number.
+
+    Only when the value has exactly 7 digits (an extension not counted) and `area` is an area code (see
+    area_code_cell); anything else is returned unchanged, so full numbers in the same column stay as written:
+        ("555-0177", "516")        → "(516) 555-0177"
+        ("Cell: 555-0177", "516")  → "Cell: (516) 555-0177"
+        ("516-555-0177", "631")    → "516-555-0177"       already has an area code
+        ("555-0177", "")           → "555-0177"           no area code in the row
+    Used by the "Phone + area code column" transform (engine._expand_rows, transforms.apply_transform).
+    """
+    code = area_code_cell(area) if area else ""
+    if not code or not phone or sum(c.isdigit() for c in _EXT_RE.sub("", phone)) != 7:
+        return phone
+    return _LOCAL_NUMBER_RE.sub(lambda m: f"({code}) {m.group(1)}", phone, count=1)
+
+
+def split_area_code(values: list[str], at: int | None = None) -> tuple[str, list[int]]:
+    """For one row of a "Phone + area code column" mapping: (the row's area code, positions of the phone cells).
+
+    `at` is the position of the area code column (the engine picks it once for the whole file); every other cell
+    is a phone cell. A cell of the area code column that isn't an area code ("", "N/A", "000") isn't a phone number
+    either, unless it holds a whole one (7+ digits typed into the wrong column). With `at` None the area code is
+    the first cell that is one, whichever column it is in, so the order of the columns doesn't matter:
+        ["516", "555-0177"] → ("516", [1]);  ["555-0177", "516"] → ("516", [0]);  ["", "555-0177"] → ("", [0, 1])
+        ["N/A", "555-0177"], at=0 → ("", [1]);  ["516-555-0177", ""], at=0 → ("", [0, 1])
+    """
+    if at is None:
+        at = next((i for i, v in enumerate(values) if area_code_cell(v)), None)
+        if at is None:
+            return "", list(range(len(values)))
+    area = area_code_cell(values[at])
+    whole = not area and sum(c.isdigit() for c in values[at]) >= 7
+    return area, [i for i in range(len(values)) if i != at or whole]
+
+
 def _fmt_us(d10: str) -> str:
     """Human-readable US format for messages: "5165550100" → "(516) 555-0100" (used in "could be ... or ...")."""
     return f"({d10[:3]}) {d10[3:6]}-{d10[6:]}"
