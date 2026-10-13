@@ -77,10 +77,11 @@ decimal, boolean, enum and string (re-casing and max length).
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
-from functools import lru_cache
+from functools import lru_cache, wraps
 from typing import Any
 
 import phonenumbers
@@ -92,6 +93,22 @@ from nameparser import HumanName
 
 from . import dateparse as DP
 from .schema import FieldSpec
+
+log = logging.getLogger(__name__)
+
+# Length limits. No phone or date cell is anywhere near these; longer values are notes or other text, and some of
+# the parsing steps get slow on very long text (a 30,000-character cell took seconds).
+#   DETECT_MAX_LEN  values longer than this are never taken for a phone, date, email, ZIP or state when guessing
+#                   what a column holds (looks_like_*; header detection). A cell with three labelled numbers is ~60.
+#   PHONE_MAX_LEN   a phone cell longer than this is rejected as "too long to be a phone number" (~40 labelled
+#                   numbers fit).
+#   DATE_MAX_LEN    a date cell longer than this is rejected as "too long to be a date" (the longest real format,
+#                   "Saturday, October 10, 2026 at 3:15:22 PM Eastern Daylight Time", is ~65).
+DETECT_MAX_LEN = 200
+PHONE_MAX_LEN = 1000
+DATE_MAX_LEN = DP.MAX_LEN
+# Reason for a value that hit an unexpected error while being converted (see normalize): only that value is lost.
+UNREADABLE_REASON = "couldn't be read (unexpected error, logged for the developer)"
 
 # ---------------------------------------------------------------------------
 # Shared text cleanup
@@ -428,15 +445,19 @@ def _parse_phone(value: str, region: str, countries: tuple[str, ...], fmt: str) 
     # "+1 +51 63 171059": a system put +1 in front of a number that already had a country code.
     m = _DOUBLE_CC_RE.match(unicodedata.normalize("NFKC", value))
     if m:
-        # Parse the inner number on its own (recursive, and cached too). If it is fine, the extra +1 was just noise.
-        out, err = _parse_phone(m.group(1), region, countries, fmt)
+        # Parse the inner number on its own (cached too). If it is fine, the extra +1 was just noise. Several "+1"s in
+        # a row are all dropped first, in a loop: calling this function again for each one could run out of depth.
+        inner = m.group(1)
+        while more := _DOUBLE_CC_RE.match(inner):
+            inner = more.group(1)
+        out, err = _parse_phone(inner, region, countries, fmt)
         if err is None:
             return out, None
         if err.startswith("not a US number"):
             return "", err + " — the file put +1 in front of its own country code"
         # The inner number failed for another reason: name its country code in the message if it parses at all.
         try:
-            cc = phonenumbers.parse(m.group(1), None).country_code
+            cc = phonenumbers.parse(inner, None).country_code
         except phonenumbers.NumberParseException:
             cc = None
         return "", ("has two country codes (+1 and " + (f"+{cc}" if cc else "another") + ") and isn't a valid "
@@ -798,7 +819,20 @@ def split_phones(value: str, field: FieldSpec, params: dict) -> list[tuple[str, 
         "516-555-0100/0101"                     → [("516-555-0100/0101", False)]   the shorthand isn't expanded
         "51655501005165551212"                  → [("51655501005165551212", False)]   digits are never cut
     Pieces are taken from the cleaned-up text (see _prep_phone), so letters typed for digits are already fixed.
+    A cell over PHONE_MAX_LEN characters isn't split (normalize then rejects it as too long), and an unexpected
+    error while splitting leaves the cell whole, so it is converted - or rejected with a reason - as one value.
     """
+    if len(value) > PHONE_MAX_LEN:
+        return [(value, False)]
+    try:
+        return _split_phones(value, field, params)
+    except Exception:  # noqa: BLE001 - one odd cell must not stop the import
+        log.exception("Unexpected error splitting a phone cell")
+        return [(value, False)]
+
+
+def _split_phones(value: str, field: FieldSpec, params: dict) -> list[tuple[str, bool]]:
+    """The work of :func:`split_phones` (same arguments and result)."""
     if sum(c.isdigit() for c in value) < 14:
         return [(value, _is_fax_label(value))]
     text, err = _fix_numeric_artifacts(_prep_phone(value))
@@ -959,7 +993,7 @@ def _dateutil_parse(value: str, dayfirst: bool) -> datetime | None:
     try:
         a = du_parser.parse(value, dayfirst=dayfirst, default=datetime(2000, 1, 1))
         b = du_parser.parse(value, dayfirst=dayfirst, default=datetime(2004, 2, 2))
-    except (ValueError, OverflowError, TypeError):
+    except (ValueError, OverflowError, TypeError, ArithmeticError):  # ArithmeticError: e.g. "12:1111…" (decimal)
         return None
     if (a.year, a.month, a.day) != (b.year, b.month, b.day):
         return None  # a date part was missing and got filled in by the default
@@ -991,7 +1025,7 @@ def parse_date(value: str, ctx: dict, allow_no_year: bool = False) -> tuple[date
         return dt, None
     except DP.DateError as exc:
         msg = str(exc)
-    except (ValueError, OverflowError, TypeError):  # never let one odd value stop an import
+    except (ValueError, OverflowError, TypeError, ArithmeticError):  # never let one odd value stop an import
         return None, "not a date"
     # Only these two failures mean "layout not understood"; others ("no year", "invalid time") are final.
     if msg.startswith("unrecognized word") or msg == "unrecognized date":
@@ -1299,6 +1333,8 @@ def normalize(value: str, field: FieldSpec, params: dict, ctx: dict) -> tuple[st
         "N/A"            → ("", None)       the engine then reports the required value as missing
         "555-1234"       → ("", "missing area code (only 7 digits)")
         "#DIV/0!"        → ("", "Excel error (broken formula in the client's file)")   any field type
+    A phone value over PHONE_MAX_LEN or a date over DATE_MAX_LEN characters is rejected as too long; a value that
+    makes a normalizer fail unexpectedly gets UNREADABLE_REASON (and is logged) instead of stopping the import.
     """
     v = clean_text(value)
     if not v:
@@ -1308,7 +1344,19 @@ def normalize(value: str, field: FieldSpec, params: dict, ctx: dict) -> tuple[st
     # rejects report and side by side; one reason for all codes keeps them on one line of the summary.
     if sheet_error(v):
         return "", SHEET_ERROR_REASON
-    out, err = NORMALIZERS[field.type](v, field, params, ctx)
+    # Text far longer than any phone or date (notes mapped by mistake, junk): rejected straight away, which also
+    # keeps a single huge cell from taking seconds.
+    if field.type == "phone" and len(v) > PHONE_MAX_LEN:
+        return "", f"too long to be a phone number ({len(v):,} characters)"
+    if field.type in ("date", "datetime") and len(v) > DATE_MAX_LEN:
+        return "", f"too long to be a date ({len(v):,} characters)"
+    # Safety net: an unexpected error on one value (a bug, or a library choking on odd text) costs only that value,
+    # never the whole file. It is logged so it can be fixed.
+    try:
+        out, err = NORMALIZERS[field.type](v, field, params, ctx)
+    except Exception:  # noqa: BLE001
+        log.exception("Unexpected error converting a value for field '%s' (%s)", field.name, field.type)
+        return "", UNREADABLE_REASON
     if err is None and field.type != "string" and field.max_length and len(out) > field.max_length:
         return "", f"longer than {field.max_length} characters"
     return out, err
@@ -1318,6 +1366,22 @@ def normalize(value: str, field: FieldSpec, params: dict, ctx: dict) -> tuple[st
 # Lightweight detectors used for column profiling / auto-mapping
 # ---------------------------------------------------------------------------
 
+def _detector(fn):
+    """Make a looks_like_* detector safe for any cell: False for text over DETECT_MAX_LEN characters (notes,
+    junk: never a phone, date, email…, and slow to search) and False if it fails on an odd value, so guessing what
+    a column holds never stops an upload."""
+    @wraps(fn)
+    def wrapper(v: str) -> bool:
+        if not isinstance(v, str) or len(v) > DETECT_MAX_LEN:
+            return False
+        try:
+            return fn(v)
+        except Exception:  # noqa: BLE001 - a detector answers yes or no, nothing else
+            return False
+    return wrapper
+
+
+@_detector
 def looks_like_phone(v: str) -> bool:
     """Detector: does this look like ONE valid phone number? Used to score columns when profiling/auto-mapping.
 
@@ -1338,6 +1402,7 @@ def looks_like_phone(v: str) -> bool:
 _DETECT_PHONE_FIELD = FieldSpec(name="phone", type="phone")
 
 
+@_detector
 def looks_like_phones(v: str) -> bool:
     """Detector: one valid phone number, or a cell holding several where every one is a valid phone number.
 
@@ -1352,23 +1417,27 @@ def looks_like_phones(v: str) -> bool:
     return len(pieces) > 1 and all(looks_like_phone(p) for p, _ in pieces)
 
 
+@_detector
 def looks_like_email(v: str) -> bool:
     """Detector: something@something.tld with a 2+ letter TLD and no spaces. A fast regex, not full validation."""
     # Regex: non-"@"/space characters, "@", more of them, then "." and 2+ letters at the end: "a@b.com", not "a@b".
     return bool(re.match(r"^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$", v.strip()))
 
 
+@_detector
 def looks_like_zip(v: str) -> bool:
     """Detector: "11801", "07030-1234", or 3–4 digits (a ZIP that lost its leading zeros, "7030")."""
     # Regex 1: 5 digits with an optional "-" and 4 more; regex 2: 3 or 4 digits only.
     return bool(re.fullmatch(r"\d{5}(-\d{4})?", v.strip())) or bool(re.fullmatch(r"\d{3,4}", v.strip()))
 
 
+@_detector
 def looks_like_state(v: str) -> bool:
     """Detector: a US state/territory name or code (reuses normalize_state; the field argument isn't used)."""
     return normalize_state(v, None, {}, {})[1] is None  # type: ignore[arg-type]
 
 
+@_detector
 def looks_like_date(v: str) -> bool:
     """Detector: a value dateparse can read as a date with a plausible year (or month and day only).
 
