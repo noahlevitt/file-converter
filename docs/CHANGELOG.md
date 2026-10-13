@@ -3,6 +3,28 @@
 What changed in each version. The running version is shown in the app's sidebar. Each version is tagged in git
 (`vX.Y.Z`).
 
+## 0.17.0 — fax numbers never imported; better sheet choice; templates take new phone columns
+
+- **Fax numbers are never imported** (a fax line can't receive texts). Columns named *Fax*, *Fax Number*,
+  *Business Fax*, *Facsimile* or *Phone/Fax* were added to the phone field when their values looked like phone
+  numbers, so every customer's fax got a row of its own; a file with only a Fax column imported it as the phone.
+  Now the rules, a template (also one saved earlier) and Claude never use a fax column, and the mapping page names
+  it. A person can still map one by hand, for that file. A number labelled fax in a cell (`Fax: 516-555-0177`) was
+  imported when it was the row's only number; that row is now a bad row (*labelled as a fax number*), and *Suggest
+  fixes* leaves it alone.
+- **Texting-activity columns are not phone columns.** An empty *Last SMS Received*, *SMS Last*, *Last Text Sent* or
+  `in_sms_last` column counted as an extra phone column (a phone word in the header), e.g. when a file in the import
+  format itself was uploaded.
+- **A similar template takes new phone columns.** A template saved from an export with *Phone* only, applied to a
+  later export that also has *Mobile* (75%+ of the same columns), left *Mobile* out silently. A phone column that
+  is new since the template was saved is now added (one row per different number), with a note. Phone columns the
+  template's file already had and the template leaves out stay out.
+- **Which sheet is read.** An empty first sheet (a leftover *Sheet1*) stopped the file with "No data found", and a
+  hidden first sheet (a lookup table) was read instead of the customers. Without a chosen sheet, the first visible
+  sheet with data is now read, with a warning naming the sheets passed over; hidden sheets show as *(hidden)* in
+  the sheet box. A sheet you pick is read as before.
+- All 406 test files give identical results.
+
 ## 0.16.0 — no ID columns as phones; stray quotes, template headers and multi-number cells fixed
 
 - **ID columns are never taken for the phone column because of their name.** *Account Number*, *Card Number*,
