@@ -64,6 +64,7 @@ All business logic is in `converter/`. Only `app.py` and `converter/auth.py` imp
 |---|---|
 | `app.py` | Streamlit UI: login, navigation, the light/dark toggle and the five pages (New import, Imports, Templates, Target format, Users). Holds no conversion logic; it calls the package. |
 | `converter/reader.py` | Turns uploaded bytes into a DataFrame of text: encoding detection, delimiter sniffing, sheet choice, header-row detection (`detect_header`: compares each row with the rest of its columns, skips title rows, recognises files without a header row, flags unsure cases), unique names for blank/duplicate headers (`Column 3`, `Phone (2)`…), stray spaces and byte-order marks. Excel artifacts in values (`="…"`, `5.16E+09`, serial dates) are handled later by the normalizers. |
+| `converter/sheetsize.py` | Size check before a spreadsheet is read (`check_sheet_size`): finds where a sheet's values reach from the file structure (.xlsx/.xlsm sheet XML, .ods repeated rows and cells), estimates the memory reading needs, and refuses only sheets that need more than the computer (or container) has. Protects the app from files that made the spreadsheet library abort the process. |
 | `converter/schema.py` | Pydantic models of the target format (`FieldSpec`, `OutputSpec`, `DedupeSpec`, `TargetSchema`) and `load_schema`. Validates the YAML and fills derived defaults. |
 | `converter/mapping.py` | `FieldMapping` / `Mapping` (target field → transform + source columns + params, plus reviewer notes and skipped columns), `normalized()` (makes a mapping fit a file), column profiling, header fingerprints for template matching. |
 | `converter/transforms.py` | Registry of the allowed transforms (copy, coalesce, one row per phone number, combine, name part, address part, split, translate values, fixed value) and `apply_transform`. Transforms only *extract* a raw value; they never validate. |
@@ -166,6 +167,7 @@ changes (`Store.purge_drafts`).
 | Duplicates only when every column matches | schema `dedupe: keys: ["*"]`; `engine.convert` |
 | Bad rows not imported, counted with reasons | `engine.convert` (`RowIssue.rejected`), `output.write_rejects`, summary |
 | No live spreadsheet formulas in downloads (client values starting with `=`, `+`, `-`, `@` get an apostrophe) | `output.neutralise_formula`, `write_rejects`; `app.rejects_download` for files from older versions |
+| A sheet too big for this computer's memory is refused before reading, instead of crashing the app | `sheetsize.check_sheet_size`, called by `reader.read_file` |
 | Excel error values (`#REF!`, `#VALUE!`…) reported as such for every field type; own mistake-check finding; skipped by *Suggest fixes* | `normalizers.sheet_error`, `normalize`; `checks.run_checks`; `app._repair_section` |
 | Activity dates imported as written (no placeholder dates outside birthday/anniversary) | `normalizers.normalize_date` (`no_year_value` only on birthday/anniversary) |
 | A browser refresh keeps the mapping in progress | `app.save_draft` / `restore_draft`, `Store` drafts |
