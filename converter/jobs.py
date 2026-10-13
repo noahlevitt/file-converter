@@ -263,6 +263,7 @@ class ImportRunner:
         """Delete stored files of finished imports older than ``retention_days``; never raises.
 
         The import records and their counts are kept (marked ``files_purged``); only the folder contents go.
+        Abandoned New import drafts (unchanged for 24 hours, see ``Store.purge_drafts``) are deleted too.
         Errors are logged, not raised, because a purge failure must not break submitting an import.
         """
         with self._lock:
@@ -271,5 +272,8 @@ class ImportRunner:
                 n = self.store.purge_files(self.retention_days)
                 if n:
                     log.info("Deleted stored files of %d import(s) older than %d days", n, self.retention_days)
+                n = self.store.purge_drafts()
+                if n:
+                    log.info("Deleted %d abandoned New import draft(s)", n)
             except Exception:
                 log.exception("File purge failed")
