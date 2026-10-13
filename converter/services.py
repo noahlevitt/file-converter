@@ -147,7 +147,7 @@ def initial_mapping(schema: TargetSchema, df: pd.DataFrame, profiles: list[Colum
             return MappingSuggestion(m, "template", tpl, sim, notes)
 
     # 2. Rules.
-    rules = auto_map(schema, profiles).normalized(schema, columns)
+    rules = auto_map(schema, profiles, df).normalized(schema, columns)
     notes: list[str] = []
     if has_generic_columns(columns):
         notes.append("This file has no header row: templates aren't used for it, and columns can only be "
