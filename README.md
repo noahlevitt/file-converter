@@ -435,6 +435,7 @@ app.py                  Streamlit web UI (new import, imports tracker + detail, 
 converter/
   schema.py             target schema model + YAML loader
   reader.py             file ingest, encoding/delimiter/header detection
+  sheetsize.py          size check before a spreadsheet is read (refuses sheets too big for this computer)
   normalizers.py        phone/date/email/zip/state/number/boolean/enum/string normalization
   dateparse.py          date/time reader (every numeric, written, machine and spreadsheet format)
   checks.py             rule-based mistake checks + sample prepared for Claude's review
@@ -473,5 +474,10 @@ for conventions and how to make common changes.
   stay visible under *Imports*.
 - Imports run inside the web server process. If the server restarts mid-import, that import is marked
   *Interrupted* and can be re-run with one click.
+- A spreadsheet sheet that would need more memory than the computer has is refused before it is read, with a
+  message naming the farthest cell (usually a stray value far from the table, or a formula copied to the bottom;
+  Ctrl+End in Excel finds it). Before 0.15.2 such a file, even a 5 KB one, crashed the whole app. Checked for
+  .xlsx, .xlsm and .ods; .xls can't get that big; .xlsb isn't checked. Everything that fits in memory reads as
+  before.
 - Throughput measured in testing: about 150,000 rows in 25 seconds for a 6-column file on one worker.
 - More quirks found while documenting the code are listed in [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md).
