@@ -13,6 +13,9 @@ tzdata>=2024.1
 python-calamine>=0.3
 openpyxl>=3.1
 xlsxwriter>=3.2
+# Excel error codes (#DIV/0!, #REF!…) in old .xls files, which python-calamine reads as empty (only used when the
+# file holds such cells; without it they stay empty)
+xlrd>=2.0
 # Fallback guess of the text encoding of CSV files that are neither UTF-8/UTF-16 (with BOM) nor Windows-1252
 charset-normalizer>=3.3
 # Typed, validated models for the schema, mappings and Claude's answers; schema file format
