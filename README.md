@@ -26,6 +26,8 @@ New import:  upload → detect header/encoding/delimiter → auto-map columns �
              → Start import (runs in the background; mapping saved as a template for next time)
 Imports:     every import with live progress, elapsed time and time left → open one → results, downloads,
              side-by-side original vs converted, what changed per field, re-run, Claude value fixes
+Numbers:     look up a phone number → every import it was converted in, the file and row it came from, and the
+             consent sent with it (kept after the files are deleted)
 ```
 
 ## Pages
@@ -38,8 +40,9 @@ Every page has a **light/dark mode toggle** at the top right: a small square wit
 | **New import** | Upload a file, check the detected header/sheet and client time zone, review the column mapping (edit the field grid, or under *Columns in your file* pick where each column goes, skip a column, or write notes and apply them with Claude), optionally **Check for mistakes**, then **Start import**. |
 | **Imports** | Every import by everyone (filter: mine, status, search). Running imports show a progress bar, the current step ("Converting Phone — row 41,000 of 150,000"), elapsed time and estimated time left, with Cancel. Select any import to open it. |
 | **Import detail** | Status and timing, the bad-row flag and counts, downloads (converted file, rejected rows, summary, original file, side-by-side Excel), and tabs: **Side by side**, **What changed**, **Converted file**, **Bad & duplicate rows**, **Mapping used** (incl. notes). **Check this import for mistakes**; Re-run and Claude fixes start a new linked import. |
+| **Number history** | Type a phone number to see every import it was converted in (since 0.21.0): when and by whom, the file and its row, the number and consent as written in the file, the consent sent (`true` / `false` / blank) and the column it came from. Kept after the import's files are deleted (`NUMBER_RECORD_DAYS`, default forever). Select a row to open the import; download as CSV. |
 | **Templates** | Saved column mappings per file layout; rename, delete, export. |
-| **Target format** | The current target schema, output file settings, dedupe rule and file retention. |
+| **Target format** | The current target schema, output file settings, dedupe rule, file retention and how long the number history is kept. |
 | **Users** | Only while logins are on: (admins) add users, reset passwords, grant or remove admin, delete users. |
 
 **Side by side** shows the original file (left, exactly as uploaded) and the converted output (right) row by
@@ -54,7 +57,7 @@ value or row number, and page through large files. The same view downloads as a 
 | Step | What happens |
 |---|---|
 | **Read** | Every cell is read as text (no lost ZIP zeros, no phones turned into `5.16E+09`). Header row, encoding (UTF-8 / Windows-1252 / etc.), delimiter and Excel sheets are detected (the first visible sheet with data: an empty *Sheet1* or a hidden lookup sheet is passed over, with a warning); the user can override. The header row is found below any title or report lines, and files without one are recognised (see [Files without a header row](#files-without-a-header-row)). A quote mark that is never closed in a CSV (`"VIP - comps dessert`) costs only its own row, with a warning naming it, instead of joining the rest of the file into one cell; cells of any size are read. |
-| **Map** | 1) A saved **template** with the same column headers (case, spaces and punctuation ignored: `Last Visit Date` = `Last_Visit_Date`) is applied instantly, including its notes and time zone. A similar layout (75%+ of the same columns) starts from the template; a phone column that is new since then (e.g. *Mobile* added to the export) is added to the phone field. 2) Otherwise **rules** match headers, synonyms and value types (phones, dates…), and find every phone column (Phone, Phone 2…, Mobile, Home) — but not columns *about* a phone such as `phone4MarketingPreference`, Phone Type or SMS Opt In. A column only counts as a phone column by its values alone when nearly all of its values are phone numbers, so a stray number typed into e.g. *Occupation* doesn't pull that column into the phone field. 3) Optionally, your **notes on columns** are applied by Claude. |
+| **Map** | 1) A saved **template** with the same column headers (case, spaces and punctuation ignored: `Last Visit Date` = `Last_Visit_Date`) is applied instantly, including its notes and time zone. A similar layout (75%+ of the same columns) starts from the template; a phone column that is new since then (e.g. *Mobile* added to the export) is added to the phone field. 2) Otherwise **rules** match headers, synonyms and value types (phones, dates…), and find every phone column (Phone, Phone 2…, Mobile, Home) — but not columns *about* a phone such as `phone4MarketingPreference`, Phone Type or SMS Opt In. A column only counts as a phone column by its values alone when nearly all of its values are phone numbers, so a stray number typed into e.g. *Occupation* doesn't pull that column into the phone field. An *Area Code* column next to 7-digit numbers is combined with them (see [Area code in its own column](#area-code-in-its-own-column)). 3) Optionally, your **notes on columns** are applied by Claude. |
 | **Review** | A grid shows each target field, its source column(s), how it's built, a sample of converted output, and any problem. Edit it directly, add notes per column, and run **Check for mistakes** before importing. |
 | **Convert** | Runs in a background worker pool (default 2 at a time; more wait in a queue) so users can keep working. Deterministic Python converts every row — Claude never touches the full file. Phones are validated with Google's libphonenumber, dates are interpreted per column (month-first vs day-first decided once for the whole column, Excel serial dates handled), ZIP/state/email normalized. |
 | **Report** | **Bad rows are not imported** and the result is flagged: *"37 bad rows were NOT imported"* with a reason per row in the rejected-rows file. Optional fields with invalid values are left blank (configurable per field). |
@@ -134,6 +137,27 @@ someone's real number. A 7-digit number in a file with a mix of area codes stays
   it), listed under *Problems only*, counted in the summary and in *What changed → Repaired typo*. Check them: a
   wrong guess is someone else's phone.
 - Real US numbers are never changed, even if their area code isn't common in the file.
+
+#### Area code in its own column
+
+Some exports keep the area code in a column of its own (*Area Code* `516`, *Phone* `555-0177`). Since 0.21.0 the
+rules combine them: the phone field's *How* is **Phone + area code column**, with the area code column and the
+phone column(s) as its sources.
+
+- A 7-digit number gets the area code from **the same row**: `555-0177` → 516-555-0177. Several numbers in one
+  cell, labels (`Cell: 555-0177`) and extensions work as usual; with several phone columns each different number
+  still gets its own row.
+- A number that already has an area code is kept as written: `212-555-0188` stays 212, whatever the *Area Code*
+  column says.
+- A row with an empty area code cell is treated like any 7-digit number: it gets the file's main area code when
+  80%+ of the numbers share one (marked orange), otherwise it is a bad row (`missing area code (only 7 digits)`).
+  A cell in the area code column that isn't an area code (`000`, `N/A`) is not read as a phone number.
+- Found automatically when the column is named like one (*Area Code*, *AreaCode*, *Phone Area Code*, *Area*,
+  *NPA*) and nearly all its values are area codes in use. Otherwise choose *Phone + area code column* under
+  *How* in the field grid, with both columns; the column order doesn't matter. Adding an *Area Code* column to
+  the phone field under *Columns in your file* does the same.
+- Not combined when every number already has its area code; *Delivery Area*, *Zone* and store numbers are never
+  taken for area codes.
 
 #### Several phone numbers per customer (several columns, or several in one cell)
 
@@ -413,6 +437,11 @@ Notes are useful without Claude too: they're saved with the template and the imp
 
 - `data/converter.db` (SQLite): user accounts (bcrypt-hashed passwords), templates (column names + mapping
   rules), and one record per import (who, when, status, timings, counts, mapping used).
+- The **number history** (table `number_log` in the same database, since 0.21.0): for every number each import
+  converted, the import, the file row, the phone and consent cells as written in the file, and the consent sent.
+  It is customer data too, kept on purpose after the files are deleted so a complaint about consent can be
+  answered later; **kept forever unless `NUMBER_RECORD_DAYS` is set**. Imports completed before 0.21.0 are added
+  from their stored files when the server starts on 0.21.0 (only those whose files weren't deleted yet).
 - `data/imports/<id>/`: the original upload, the converted file, rejected rows, summary, and the comparison
   data behind the side-by-side view. These contain customer data and are **deleted automatically after
   `FILE_RETENTION_DAYS` (default 30)**; the import record and counts stay. Set `0` to keep them forever.
@@ -436,6 +465,7 @@ Notes are useful without Claude too: they're saved with the template and the imp
 | `AI_MASK_PHONES` | true | partly mask phone digits in rows sent for Claude's mistake check |
 | `IMPORT_WORKERS` | 2 | imports that run at the same time |
 | `FILE_RETENTION_DAYS` | 30 | days to keep each import's files (0 = forever) |
+| `NUMBER_RECORD_DAYS` | 0 | days to keep the number history (each number, its consent and the file row it came from; 0 = forever) |
 | `APP_TIMEZONE` | America/New_York | time zone for displayed times |
 | `DEFAULT_PAGE` | new | first page: `new` or `imports` |
 | `AUTH_MODE` | none | `none` = no login (current default); `password` = per-user logins |
@@ -461,16 +491,18 @@ streamlit run app.py
 ```
 
 ```
-app.py                  Streamlit web UI (new import, imports tracker + detail, templates, target format, users)
+app.py                  Streamlit web UI (new import, imports tracker + detail, number history, templates, target format,
+                        users)
 converter/
   schema.py             target schema model + YAML loader
   reader.py             file ingest, encoding/delimiter/header detection
   sheetsize.py          size check before a spreadsheet is read (refuses sheets too big for this computer)
+  sheeterrors.py        Excel error cells (#DIV/0!…) in .xlsx/.xls/.ods, which the spreadsheet library reads as empty
   normalizers.py        phone/date/email/zip/state/number/boolean/enum/string normalization
   dateparse.py          date/time reader (every numeric, written, machine and spreadsheet format)
   checks.py             rule-based mistake checks + sample prepared for Claude's review
-  transforms.py         how a field's value is built: copy, first non-empty, one row per phone number, combine, name part,
-                        address part, split, translate, fixed
+  transforms.py         how a field's value is built: copy, first non-empty, one row per phone number, phone + area
+                        code column, combine, name part, address part, split, translate, fixed
   mapping.py            mapping spec, column profiling, header fingerprints
   heuristics.py         rule-based auto-mapping
   ai.py                 Claude (optional): apply notes, mistake review, value fixes (+ guards)
@@ -480,7 +512,8 @@ converter/
   jobs.py               background import runner (queue, progress, cancel, retention)
   compare.py            side-by-side view, what-changed summary, comparison Excel
   output.py             converted file, rejects file, summary
-  storage.py            SQLite users/templates/imports + per-import file folders
+  storage.py            SQLite users/templates/imports/number history + per-import file folders
+  numberlog.py          number history: records each import's numbers and consent values, looks a number up
   ui_format.py          time/duration/status display helpers
   services.py           orchestration shared by UI and CLI
   editor.py             mapping-grid helpers
