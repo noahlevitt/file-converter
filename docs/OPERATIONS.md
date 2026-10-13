@@ -120,6 +120,8 @@ data/converter.db            users, templates, import history, display preferenc
                              and -shm files)
 data/imports/<id>/           source.<ext> (uploaded file), converted file, rejected.csv, summary.txt,
                              source.parquet + audit.parquet (for the side-by-side view)
+data/drafts/<random id>/     a file still being mapped on New import, so a browser refresh doesn't lose the work
+                             (deleted on Start import / Start over, or after 24 hours without changes)
 ```
 
 **What to back up:** the whole `data/` folder. Choose one way:
@@ -130,6 +132,7 @@ data/imports/<id>/           source.<ext> (uploaded file), converted file, rejec
 
 **Space:** files of finished imports older than `FILE_RETENTION_DAYS` are deleted automatically when the app
 starts, and then at most once an hour when an import is started. The import record and its counts stay; its page says the files were deleted.
+Abandoned drafts (24 hours without changes) are deleted at the same moments and whenever a file is uploaded.
 
 **Customer data:** uploaded files contain customers' phone numbers. Keep `data/` on an encrypted disk, restrict
 who can sign in, and set a retention period you are comfortable with.
