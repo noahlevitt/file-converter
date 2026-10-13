@@ -20,7 +20,7 @@ cp .env.example .env              # then edit: admin account, optional ANTHROPIC
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest -q            # everything (about 870 tests, about 30 seconds)
+.venv/bin/python -m pytest -q            # everything (about 890 tests, about 30 seconds)
 .venv/bin/python -m pytest -q tests/test_formats.py -k phone     # one area
 ```
 
@@ -51,7 +51,8 @@ The suite needs no network and no API key. Claude is replaced by fake clients. T
 | `test_csv_quotes.py` | A CSV quote mark that is never closed costs one row (also two of them, near the end, Windows line ends, two columns); real multi-line cells kept; cells over 128 KB |
 | `test_notes_checks.py` | Notes applied by Claude, rule checks, review payload, phone masking |
 | `test_jobs_compare.py` | Background runner, cancel, retention, side-by-side view and comparison workbook |
-| `test_sheet_errors.py` | Excel error values (`#REF!`, `#VALUE!`…): one clear reason for every field type, mistake-check finding |
+| `test_sheet_errors.py` | Excel error values (`#REF!`, `#VALUE!`…): one clear reason for every field type, mistake-check finding; codes kept in .xlsx/.xls/.ods (fixtures `excel_errors.xls` / `.ods`, made by LibreOffice) |
+| `test_date_order.py` | Spreadsheet date cells + Time column, input format order with times, `YMD`, day-first values without separators |
 | `test_odd_cells.py` | One odd cell costs only that cell (garbage dates, repeated +1, safety net, safe detectors), unique column names, too-long values, long Notes columns staying fast, several phone columns unchanged |
 | `test_sheet_size.py` | Sheets too big for memory refused before reading (stray last cell, repeated-row .ods, run in a separate process), formatting ignored, only the chosen sheet checked, unusual files never blocked |
 | `test_formula_injection.py` | No live spreadsheet formulas in the rejected-rows file (also older files on download) or in Excel output |
