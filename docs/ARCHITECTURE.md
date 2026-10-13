@@ -167,6 +167,8 @@ changes (`Store.purge_drafts`).
 | Duplicates only when every column matches | schema `dedupe: keys: ["*"]`; `engine.convert` |
 | Bad rows not imported, counted with reasons | `engine.convert` (`RowIssue.rejected`), `output.write_rejects`, summary |
 | No live spreadsheet formulas in downloads (client values starting with `=`, `+`, `-`, `@` get an apostrophe) | `output.neutralise_formula`, `write_rejects`; `app.rejects_download` for files from older versions |
+| One odd value never stops a file: an unexpected error costs only that value (logged); detectors answer False on odd or long text; phone cells over 1,000 and dates over 200 characters are rejected at once | `normalizers.normalize` (safety net, `PHONE_MAX_LEN`), `_detector`, `split_phones`, `dateparse.MAX_LEN` |
+| Unique column names, case-insensitive, never taking a name the file already has (`Phone (3)` when `Phone (2)` exists) | `reader._unique_headers` |
 | A sheet too big for this computer's memory is refused before reading, instead of crashing the app | `sheetsize.check_sheet_size`, called by `reader.read_file` |
 | Excel error values (`#REF!`, `#VALUE!`…) reported as such for every field type; own mistake-check finding; skipped by *Suggest fixes* | `normalizers.sheet_error`, `normalize`; `checks.run_checks`; `app._repair_section` |
 | Activity dates imported as written (no placeholder dates outside birthday/anniversary) | `normalizers.normalize_date` (`no_year_value` only on birthday/anniversary) |
