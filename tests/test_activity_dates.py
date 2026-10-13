@@ -156,3 +156,73 @@ def test_activity_dates_are_imported_as_written(real_schema, value, expected):
                         "transactions_last": FieldMapping(sources=["Last Visit"], transform="copy")})
     res = convert(df, real_schema, m)
     assert res.output["transactions_last"].tolist() == [expected] and res.blanked_values == 0
+
+
+# ---------------------------------------------------------------- 0.18.0
+
+@pytest.mark.parametrize("other", [{"Do Not Call": ["N", "Y", "N"]}, {"Call Opt In": ["Y", "Y", "N"]},
+                                   {"DNC": ["N", "N", "Y"]}, {"Membership Duration": ["3 years", "1 year", "2 years"]},
+                                   {"Phone Extension": ["12", "", "3"]}])
+def test_columns_that_dont_make_a_call_log(real_schema, other):
+    """A consent column about calls, a membership duration or a phone extension isn't a phone system's export."""
+    m = mapped(real_schema, pd.DataFrame({"Phone": PHONES, "Date": DATES, **other}))
+    assert m.get("transactions_last") == ["Date"] and "calls_last" not in m
+
+
+@pytest.mark.parametrize("header", ["Date Added", "Import Date", "Imported On", "Date Uploaded"])
+def test_added_and_import_dates_are_creation_dates(real_schema, header):
+    """Used only when the file has no other date, never instead of one."""
+    assert mapped(real_schema, pd.DataFrame({"Phone": PHONES, header: OLD}))["transactions_last"] == [header]
+    assert mapped(real_schema, pd.DataFrame({"Phone": PHONES, header: OLD, "Date": DATES}))["transactions_last"] == [
+        "Date"]
+
+
+@pytest.mark.parametrize("values,expected", [
+    (["46304.65625", "46305.5", "46306"], "10/09/2026 03:45 PM"),       # Excel serials
+    (["1791575100", "1791661500", "1791747900"], "10/09/2026 03:45 PM"),  # Unix seconds
+    (["1791575100000", "1791661500000", "1791747900000"], "10/09/2026 03:45 PM"),  # Unix milliseconds
+    (["20261009", "20261010", "20261011"], "10/09/2026 12:00 AM"),       # compact
+])
+def test_named_date_column_in_a_machine_format_is_mapped(real_schema, values, expected):
+    """A "Last Visit" column of serial numbers or timestamps scored too low to be mapped before 0.18.0."""
+    df = pd.DataFrame({"Phone": PHONES, "Last Visit": values})
+    m = auto_map(real_schema, profile_columns(df))
+    assert m.get("transactions_last").sources == ["Last Visit"] and m.get("transactions_last").confidence == "high"
+    assert convert(df, real_schema, m, timezone="America/New_York").output["transactions_last"].iloc[0] == expected
+
+
+@pytest.mark.parametrize("values,expected", [(["31302", "33000", "30000"], "09/12/1985"),
+                                             (["09/12/1600", "03/04/1600", "05/06/1600"], "09/12/1600"),
+                                             (["19850912", "19900304", "19700506"], "09/12/1985")])
+def test_named_birthday_column_in_an_unusual_format_is_mapped(real_schema, values, expected):
+    df = pd.DataFrame({"Phone": PHONES, "Birthday": values})
+    m = auto_map(real_schema, profile_columns(df))
+    assert m.get("birthday").sources == ["Birthday"]
+    assert convert(df, real_schema, m).output["birthday"].iloc[0] == expected
+
+
+def test_counts_are_not_dates(real_schema):
+    """A "Visits" count column next to the phone is still not a date column."""
+    df = pd.DataFrame({"Phone": PHONES, "Visits": ["3", "12", "1"], "Last Visits": ["3", "12", "1"]})
+    assert "transactions_last" not in mapped(real_schema, df)
+
+
+@pytest.mark.parametrize("date_col,time_col,field", [
+    ("Last Visit Date", "Last Visit Time", "transactions_last"), ("Visit Date", "Visit Time", "transactions_last"),
+    ("lastOrderDate", "lastOrderTime", "transactions_last"), ("Date of Last Visit", "Time of Last Visit",
+                                                             "transactions_last"),
+    ("Last Call Date", "Last Call Time", "calls_last"),
+])
+def test_named_date_and_time_columns_are_combined(real_schema, date_col, time_col, field):
+    """The time used to be dropped (every row 12:00 AM)."""
+    df = pd.DataFrame({"Phone": PHONES, date_col: ["10/01/2026", "10/02/2026", ""],
+                       time_col: ["3:15 PM", "13:00", "9:30 AM"]})
+    m = auto_map(real_schema, profile_columns(df))
+    assert m.get(field).sources == [date_col, time_col] and m.get(field).transform == "concat"
+    assert convert(df, real_schema, m).output[field].tolist()[:2] == ["10/01/2026 03:15 PM", "10/02/2026 01:00 PM"]
+
+
+def test_date_column_that_has_times_is_not_combined(real_schema):
+    """A date column that already holds the time keeps it; the time column isn't added (it would be read twice)."""
+    df = pd.DataFrame({"Phone": PHONES, "Last Visit Date": DATES, "Last Visit Time": ["3:15 PM", "1:00 PM", "9:30 AM"]})
+    assert mapped(real_schema, df)["transactions_last"] == ["Last Visit Date"]
