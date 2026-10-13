@@ -46,7 +46,7 @@ from .checks import Finding, build_review_payload, run_checks
 from .config import Settings
 from .engine import source_rows
 from .heuristics import auto_map
-from .mapping import ColumnProfile, FieldMapping, Mapping, has_generic_columns
+from .mapping import ColumnProfile, FieldMapping, Mapping, has_generic_columns, is_fax_column, norm_header
 from .schema import TargetSchema
 from .storage import Store, Template
 
@@ -141,8 +141,9 @@ def initial_mapping(schema: TargetSchema, df: pd.DataFrame, profiles: list[Colum
     if store is not None:
         tpl, sim = store.find_template(columns, schema.name)
         if tpl is not None and sim == 1.0:
-            return MappingSuggestion(template_mapping(schema, tpl, columns), "template", tpl, sim,
-                                     [f"Matched saved template '{tpl.name}'."])
+            m = template_mapping(schema, tpl, columns)
+            notes = [f"Matched saved template '{tpl.name}'.", *_fax_note(df, m)]
+            return MappingSuggestion(m, "template", tpl, sim, notes)
 
     # 2. Rules.
     rules = auto_map(schema, profiles).normalized(schema, columns)
@@ -161,20 +162,36 @@ def initial_mapping(schema: TargetSchema, df: pd.DataFrame, profiles: list[Colum
             # unmapped (or whose columns are gone) keep the rule-based mapping.
             tm = near_tpl.mapping.normalized(schema, columns)
             manual = {f.name for f in schema.fields if f.manual_only}
+            # Columns the template's file had: a phone column among them that the template doesn't use was left out
+            # by a person; a phone column the rules find among the NEW columns is added (one row per number).
+            known = {norm_header(h) for h in near_tpl.headers}
+            added: list[str] = []  # notes about phone columns added that way
             for name, fm in tm.fields.items():
                 if fm.transform != "none" and name not in manual:  # a person maps those for each file
                     fm.origin = "template"
+                    found = rules.fields[name]
+                    new = [c for c in found.sources if norm_header(c) not in known and c not in fm.sources]
+                    if schema.field(name).type == "phone" and found.transform != "none" and new:
+                        listed, many = ", ".join(f"'{c}'" for c in new), len(new) > 1
+                        fm.sources = [*fm.sources, *new]
+                        fm.transform = "each_row"
+                        fm.confidence = "medium"
+                        fm.reason = f"template, plus new phone column{'s' if many else ''} {listed}"
+                        added.append(f"Phone column{'s' if many else ''} {listed} {'are' if many else 'is'} new since "
+                                     f"template '{near_tpl.name}' and {'were' if many else 'was'} added to the phone "
+                                     "field: one row per different number.")
                     rules.fields[name] = fm
             # Notes: rule notes win on a clash; the template's general note is used when the rules have none.
             rules.column_notes = {**tm.column_notes, **rules.column_notes}
             rules.general_note = rules.general_note or tm.general_note
             if tm.excluded_columns:
-                # Columns the reviewer marked "skip" in the template stay skipped; re-normalize so any rule that
-                # read from them is dropped.
+                # Columns the reviewer marked "skip" in the template stay skipped; re-normalized below, so any rule
+                # that read from them is dropped.
                 rules.excluded_columns = list(tm.excluded_columns)
-                rules = rules.normalized(schema, columns)
+            rules = rules.normalized(schema, columns)
             notes.append(f"Columns are {near_sim:.0%} similar to saved template '{near_tpl.name}'; "
                          "its rules were applied where the columns still exist.")
+            notes += added
 
     # 3. Claude refines the mapping (only headers + a few sample values are sent).
     # Claude sees the rule/template mapping as a starting point; its answer is validated (unknown fields, columns
@@ -188,11 +205,27 @@ def initial_mapping(schema: TargetSchema, df: pd.DataFrame, profiles: list[Colum
             if res.dropped:
                 # Show at most five so a badly confused answer doesn't flood the page.
                 notes.append("Ignored invalid suggestions: " + "; ".join(res.dropped[:5]))
-            return MappingSuggestion(merged, "rules+ai", near_tpl, near_sim, notes, res.usage)
+            return MappingSuggestion(merged, "rules+ai", near_tpl, near_sim, notes + _fax_note(df, merged), res.usage)
         except AIError as exc:
             # Claude is a nice-to-have: any API/validation failure falls back to the rule-based mapping.
             notes.append(f"AI mapping unavailable ({exc}); using rule-based mapping.")
-    return MappingSuggestion(rules, "rules", near_tpl, near_sim, notes)
+    return MappingSuggestion(rules, "rules", near_tpl, near_sim, notes + _fax_note(df, rules))
+
+
+def _fax_note(df: pd.DataFrame, mapping: Mapping) -> list[str]:
+    """A note naming the fax columns with values that aren't imported (a fax line can't receive texts), or [].
+
+    Fax columns never feed the phone field unless a person maps them (``Mapping.normalized``); the note says so,
+    so a column of phone numbers that happens to be called "Phone/Fax" can still be mapped by hand.
+    """
+    used = mapping.used_sources()
+    fax = [c for c in df.columns if is_fax_column(c) and c not in used and (df[c].astype(str) != "").any()]
+    if not fax:
+        return []
+    many, listed = len(fax) > 1, ", ".join(f"'{c}'" for c in fax)
+    return [f"{'Columns' if many else 'Column'} {listed} {'hold' if many else 'holds'} "
+            "fax numbers, which aren't imported (a fax line can't receive texts). If it holds phone numbers, set its "
+            "Goes to to phone_number under Columns in your file."]
 
 
 def template_mapping(schema: TargetSchema, tpl: Template, columns: list[str]) -> Mapping:
