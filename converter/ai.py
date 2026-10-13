@@ -758,7 +758,7 @@ def parse_mapping_entries(entries: list[dict], schema: TargetSchema, columns: li
         if transform in ("none", "constant"):
             sources = []
         # A multi-column transform left with one column (e.g. after dropping an unknown one) is just a copy.
-        if transform in ("coalesce", "concat", "each_row") and len(sources) == 1:
+        if transform in ("coalesce", "concat", "each_row", "area_code") and len(sources) == 1:
             transform = "copy"
         problem = check_transform(transform, sources, params)
         if problem:
