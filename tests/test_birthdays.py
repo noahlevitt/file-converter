@@ -129,3 +129,69 @@ def test_year_written_without_control_characters():
     # 1600 + 400 = 2000; the second case also covers %y, a literal %% and Feb 29 (2000 is a leap year).
     assert N._strftime_year(StrictMac(1600 + 400, 10, 18), "%m/%d/%Y", "1600") == "10/18/1600"
     assert N._strftime_year(StrictMac(2000, 2, 29), "%Y-%m-%d (%y) 100%%", "1600") == "1600-02-29 (00) 100%"
+
+
+# ---------------------------------------------------------------- 0.18.0
+
+@pytest.mark.parametrize("raw", ["1985-09-12T00:00:00.000Z", "1985-09-12T00:00:00Z", "1985-09-12 00:00:00 UTC",
+                                 "09/12/1985 12:00 AM GMT", "1985-09-12T00:00:00+00:00"])
+@pytest.mark.parametrize("tz", ["America/New_York", "America/Los_Angeles"])
+def test_birthday_stored_as_utc_midnight_keeps_its_day(real_schema, raw, tz):
+    """A birthday is a calendar date, not a moment: a zone written with it is ignored (it used to become Sep 11)."""
+    for field in ("birthday", "anniversary"):
+        f = real_schema.field(field)
+        ctx = N.prepare(f, [raw], {})
+        ctx["tz"] = tz
+        assert N.normalize(raw, f, {}, ctx) == ("09/12/1985", None)
+
+
+def test_activity_times_with_a_zone_are_still_converted(real_schema):
+    f = real_schema.field("transactions_last")
+    ctx = N.prepare(f, ["2026-10-09T19:45:00Z"], {})
+    ctx["tz"] = "America/New_York"
+    assert N.normalize("2026-10-09T19:45:00Z", f, {}, ctx) == ("10/09/2026 03:45 PM", None)
+
+
+def test_full_birthday_column_beats_month_and_day_columns(real_schema):
+    """Exports often have "Birthday" and "Birth Month"/"Birth Day" made from it: the year used to be lost."""
+    df = pd.DataFrame({"Phone": ["5165550100", "9175551234"], "Birthday": ["09/12/1985", "03/04/1990"],
+                       "Birth Month": ["9", "3"], "Birth Day": ["12", "4"]})
+    m = auto_map(real_schema, profile_columns(df)).normalized(real_schema, list(df.columns))
+    assert m.get("birthday").sources == ["Birthday"]
+    assert convert(df, real_schema, m).output["birthday"].tolist() == ["09/12/1985", "03/04/1990"]
+
+
+@pytest.mark.parametrize("birthday", [["09/12", "03/04"], ["", "03/04/1990"]])
+def test_month_and_day_columns_win_when_the_full_column_adds_nothing(real_schema, birthday):
+    """No years in the full column, or it is filled for fewer customers: the parts give more birthdays."""
+    df = pd.DataFrame({"Phone": ["5165550100", "9175551234"], "Birthday": birthday,
+                       "Birth Month": ["9", "3"], "Birth Day": ["12", "4"]})
+    m = auto_map(real_schema, profile_columns(df)).normalized(real_schema, list(df.columns))
+    assert m.get("birthday").sources == ["Birth Month", "Birth Day"]
+    assert convert(df, real_schema, m).output["birthday"].tolist() == ["09/12/1600", "03/04/1600"]
+
+
+def test_day_of_week_column_is_not_the_day(real_schema):
+    """"Birthday Day of Week" (1–7) used to be read as the day of the month."""
+    df = pd.DataFrame({"Phone": ["5165550100", "9175551234"], "Birthday Month": ["9", "3"],
+                       "Birthday Day of Week": ["5", "1"]})
+    assert auto_map(real_schema, profile_columns(df)).get("birthday").transform == "none"
+
+
+@pytest.mark.parametrize("year", ["0", "000", "0000"])
+def test_birth_year_zero_means_no_year(real_schema, year):
+    df = pd.DataFrame({"Phone": ["5165550100", "9175551234"], "Birth Month": ["9", "3"], "Birth Day": ["12", "4"],
+                       "Birth Year": [year, "1990"]})
+    m = auto_map(real_schema, profile_columns(df)).normalized(real_schema, list(df.columns))
+    assert convert(df, real_schema, m).output["birthday"].tolist() == ["09/12/1600", "03/04/1990"]
+    assert bday(real_schema, "Sep 12 0") == ("09/12/1600", None)
+    assert bday(real_schema, "9/12/00") == ("09/12/2000", None)  # "00" is the year 2000
+
+
+@pytest.mark.parametrize("header", ["Birthday Reward Sent", "Birthday Email Date", "Birthday Coupon Redeemed",
+                                    "Anniversary Email Sent", "Birthday Club Points"])
+def test_dates_about_a_birthday_are_not_the_birthday(real_schema, header):
+    """The day a birthday reward went out used to become the customer's birthday (high confidence)."""
+    df = pd.DataFrame({"Phone": ["5165550100", "9175551234"], header: ["10/01/2026", "10/02/2026"]})
+    m = auto_map(real_schema, profile_columns(df))
+    assert m.get("birthday").transform == "none" and m.get("anniversary").transform == "none"
