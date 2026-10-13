@@ -3,6 +3,23 @@
 What changed in each version. The running version is shown in the app's sidebar. Each version is tagged in git
 (`vX.Y.Z`).
 
+## 0.15.0 — refresh keeps your mapping; no live formulas in downloads
+
+- **A browser refresh no longer loses a mapping in progress.** The file being mapped on *New import* is kept as a
+  draft (`data/drafts/`), and its id is in the page address (`?draft=…`). After a refresh the file, how it was
+  read (sheet, header row), every mapping choice, notes, skipped columns, time zone, template name and the
+  *Remember* box come back ("Picked up where you left off…"). Claude answers still waiting for *Accept* are not
+  kept. A draft is only restored for the user who uploaded it, and is deleted on *Start import*, *Start over*,
+  another upload, or after 24 hours without changes.
+- **Security: no live spreadsheet formulas in the rejected-rows file.** It repeats the client's original values;
+  a value starting with `=`, `+`, `-` or `@` (e.g. `=HYPERLINK(…)`) now gets a leading apostrophe so Excel shows
+  it as text instead of running it. Plain numbers and dashes are unchanged. Rejected-rows files of earlier imports
+  are fixed the same way when downloaded. An Excel (`.xlsx`) output file now stores every value as text, never as
+  a formula (the current import format writes CSV, so its converted file is unchanged).
+- **Activity dates stay as written** (decision, no change in behaviour): only birthday and anniversary get the
+  placeholder year `1600`. `01/01/1900`, `01/01/1970` and future dates in activity fields are imported as they are;
+  a test now pins this down.
+
 ## 0.14.0 — consent and last_contacted can be mapped by hand
 
 - **consent** and **last_contacted** are no longer locked blank. A person can map a column to them on the mapping
