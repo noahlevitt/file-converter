@@ -3,6 +3,16 @@
 What changed in each version. The running version is shown in the app's sidebar. Each version is tagged in git
 (`vX.Y.Z`).
 
+## 0.15.1 — Excel error values explained
+
+- A cell holding an Excel error code (`#VALUE!`, `#REF!`, `#DIV/0!`, `#NAME?`, `#NUM!`, `#NULL!`, newer codes such
+  as `#SPILL!`, Google Sheets `#ERROR!`, LibreOffice `Err:502`) now gets the reason *Excel error (broken formula in
+  the client's file)* in every field, instead of misleading ones like *too few digits (1)* or *unrecognized word
+  'value'*. The outcome is unchanged: a phone row is still a bad row, any other value is left blank. `#N/A` still
+  counts as empty.
+- *Check for mistakes* reports a column with such values ("ask the client for a fresh export") instead of calling
+  it the wrong column, and *Suggest fixes* no longer sends them to Claude.
+
 ## 0.15.0 — refresh keeps your mapping; no live formulas in downloads
 
 - **A browser refresh no longer loses a mapping in progress.** The file being mapped on *New import* is kept as a
