@@ -352,7 +352,7 @@ def run_checks(schema: TargetSchema, mapping: Mapping, source: pd.DataFrame, aud
     # (Derived uses such as name parts or address parts legitimately read one column for several fields, so only
     # pass-through transforms are counted.)
     copies = Counter(s for f in schema.mappable_fields for s in mapping.get(f.name).sources
-                     if mapping.get(f.name).transform in ("copy", "coalesce", "each_row"))
+                     if mapping.get(f.name).transform in ("copy", "coalesce", "each_row", "area_code"))
     for col, n in copies.items():
         if n > 1:
             fields = [f.header for f in schema.mappable_fields if col in mapping.get(f.name).sources]
@@ -373,7 +373,8 @@ def run_checks(schema: TargetSchema, mapping: Mapping, source: pd.DataFrame, aud
         if any("missing area code" in r for r in reasons):
             findings.append(Finding("warning", "phone_number" if "phone_number" in schema.field_names else "", "",
                                     "Some phone numbers have 7 digits (no area code).",
-                                    "If the area code is in its own column, use 'Combine columns' for the phone."))
+                                    "If the area code is in its own column, set How to 'Phone + area code column' "
+                                    "for the phone, with that column and the phone column(s)."))
     # Many exact duplicates (>= 30 % of at least 10 rows) often means the same export was pasted in twice.
     dup = (audit["_status"] == "duplicate").sum()
     if n_live >= 10 and dup / n_live >= 0.3:
