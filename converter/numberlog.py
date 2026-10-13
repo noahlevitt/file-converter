@@ -159,6 +159,8 @@ def lookup(store: Store, text: str, schema: TargetSchema) -> Lookup:
     value = N.clean_text(text)
     if pf is None or not value:
         return Lookup(error="type a phone number" if pf else "the import format has no phone field")
+    if len(N.split_phones(value, pf, {})) > 1:
+        return Lookup(error="that is more than one number; look them up one at a time")
     number, err = N.normalize(value, pf, {}, N.prepare(pf, [value], {}))
     if err or not number:
         return Lookup(error=err or "not a phone number")
