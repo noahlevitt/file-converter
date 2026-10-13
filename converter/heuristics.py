@@ -36,6 +36,7 @@ import re
 
 from rapidfuzz import fuzz
 
+from . import normalizers as N
 from .mapping import ColumnProfile, FieldMapping, Mapping, is_fax_column, norm_header
 from .schema import FieldSpec, TargetSchema
 
@@ -64,7 +65,7 @@ FILLER_WORDS = {"date", "time", "datetime", "timestamp", "dt", "last", "latest",
 # A column such as "SMS Opt In" or "Subscribed" is also never taken as a phone, date or other field: score()
 # returns 0 for it and the phone / email steps skip it. Matched as whole header words (see _words).
 CONSENT_WORDS = {"opt", "optin", "optout", "opted", "consent", "consented", "subscribe", "subscribed", "subscriber",
-                 "subscription", "unsubscribe", "unsubscribed", "stop", "stopped", "dnd", "tcpa", "permission"}
+                 "subscription", "unsubscribe", "unsubscribed", "stop", "stopped", "dnd", "dnc", "tcpa", "permission"}
 # Headers too vague to match a field on their own (a column called "Date" could be any date field).
 # header_score() gives such a header 100 only when it is literally a name/synonym of the field, otherwise 0 -
 # no fuzzy or partial matching.
@@ -102,15 +103,27 @@ NOT_PHONE_WORDS = {"order", "account", "acct", "id", "member", "card", "invoice"
 # created, signed up, joined or first visited. Not a last activity, so only used when the file has no other date
 # ("better a creation date than no date at all"), and never together with a real last date.
 CREATION_DATE_WORDS = {"created", "creation", "create", "signup", "signed", "sign", "joined", "join", "registered",
-                       "registration", "enrolled", "enrollment", "since", "first"}
+                       "registration", "enrolled", "enrollment", "since", "first", "added", "add", "imported",
+                       "import", "uploaded", "upload"}
+# Header words of a date ABOUT a birthday or anniversary rather than the date itself: "Birthday Reward Sent",
+# "Birthday Email Date", "Anniversary Coupon Redeemed". Such a column never feeds a birthday/anniversary field (it
+# would put the day the reward went out in place of the birthday). Checked by score() for "date" fields.
+DATE_EVENT_WORDS = {"sent", "send", "reward", "rewards", "email", "emailed", "text", "texted", "sms", "message",
+                    "coupon", "offer", "promo", "promotion", "redeemed", "redemption", "redeem", "campaign",
+                    "reminder", "notification", "notified", "gift", "discount", "points", "bonus", "club", "voucher"}
 # Header words of dates that are never a last activity, not even as a fallback: birthdays and anniversaries (their
 # own fields), expiry and due dates, opt-in / consent dates.
 NEVER_ACTIVITY_DATE_WORDS = {"birth", "birthday", "bday", "dob", "born", "anniversary", "anniv", "wedding", "expires",
                              "expire", "expiration", "expiry", "exp", "due", "opt", "optin", "consent", "subscribed",
                              "unsubscribed"}
 # Header words that show a file is a call log (calls / phone-system export): its date column is the call's date.
+# Consent columns don't count ("Do Not Call", "Call Opt In"), nor does "duration" next to other words ("Membership
+# Duration") or "extension" next to a phone word ("Phone Extension"): see _call_log_header.
 CALL_LOG_WORDS = {"call", "calls", "caller", "callerid", "dialed", "dialled", "duration", "direction", "inbound",
                   "outbound", "incoming", "outgoing", "missed", "voicemail", "answered", "ringing", "extension"}
+# The words a call-length header is made of: "Duration", "Call Duration", "Talk Time (sec)", "Duration Mins".
+_DURATION_HEADER_WORDS = {"duration", "call", "talk", "ring", "time", "length", "total", "sec", "secs", "seconds",
+                          "s", "min", "mins", "minutes", "hh", "mm", "ss", "in"}
 # A time of day on its own ("3:15 PM", "15:15:00"): a separate Time column next to a Date column.
 _TIME_ONLY_RE = re.compile(r"^\s*\d{1,2}:\d{2}(:\d{2})?\s*([ap]\.?m\.?)?\s*$", re.I)
 
@@ -285,16 +298,50 @@ def names_other_number(column: str) -> bool:
     return bool(words & NOT_PHONE_WORDS) and not (words & PHONE_WORDS)
 
 
+def type_share(column: ColumnProfile, f: FieldSpec, hs: float) -> float:
+    """Share (0..1) of the column's sampled values that fit typed field ``f`` (``hs``: its header score for ``f``).
+
+    The profile's share for the field's kind (phone, email, date…). For a date field whose header clearly names it
+    (``hs`` 80+), values are also run through the field's own date reader: the profile's quick date check doesn't
+    count bare numbers (they could be phones or IDs) or years before 1900, so a "Last Visit" column of Excel serial
+    numbers (46304.65625), Unix timestamps or compact dates (20261009), or a "Birthday" column of 09/12/1600 values,
+    scored too low to be mapped before 0.18.0.
+        "Last Visit" ["46304.65625", "46305.5"] → 1.0;  "Visits" ["3", "12"] → 0.0 (not dates either way)
+    """
+    kind = TYPED.get(f.type)
+    share = column.shares.get(kind, 0.0) if kind else 0.0
+    if kind != "date" or share >= 0.8 or hs < 80 or not column.samples:
+        return share
+    dates = _sample_dates(column, f)
+    return max(share, sum(d is not None for d in dates) / len(dates))
+
+
+def _sample_dates(column: ColumnProfile, f: FieldSpec) -> list[str | None]:
+    """The column's sample values converted by date field ``f``'s own reader, with the column's context (day-first,
+    Excel serials, placeholder year); None where a value isn't a date. Placeholder blanks ("0000-00-00") are None.
+    """
+    ctx = N.prepare(f, list(column.samples), {})
+    out: list[str | None] = []
+    for v in column.samples:
+        value, err = N.normalize(v, f, {}, ctx)
+        out.append(value if value and not err else None)
+    return out
+
+
 def score(column: ColumnProfile, f: FieldSpec) -> float:
     """Overall fit (roughly 0..100) of a source column for a target field: header evidence + value evidence.
 
     * Consent columns -> 0: never mapped. Fax columns -> 0 for phone fields: a fax line can't receive texts.
+      A date about a birthday or anniversary ("Birthday Reward Sent", :data:`DATE_EVENT_WORDS`) -> 0 for "date"
+      fields.
     * A header naming another kind of number ("Account Number", "Order #", "Loyalty ID") gets no header evidence
       for the phone field (:func:`names_other_number`).
     * Empty column (no values in this file) -> half the header score: no value evidence, so it can't reach the
       step-1 thresholds of :func:`auto_map` on its own (an empty "Phone 4" is handled by the phone step instead).
     * Typed fields (phone, email, date, datetime, zip, state): ``0.55 * header + 45 * share`` where ``share`` is
-      the fraction of the column's values that look like that type. An exact header with all values matching
+      the fraction of the column's values that look like that type (:func:`type_share`: for a date header that
+      clearly names the field, also values only the field's own date reader understands - Excel serials, Unix
+      timestamps, 20261009, 09/12/1600). An exact header with all values matching
       scores 100; values alone (header 0, share 1.0) give only 45, below the threshold, so values never map a
       typed field in step 1 - the phone and email steps decide those cases with stricter rules.
       Minus 25 when fewer than 20% of the values fit and the header isn't exact (a "Phone Notes" column of text).
@@ -308,6 +355,9 @@ def score(column: ColumnProfile, f: FieldSpec) -> float:
     """
     if is_consent_column(column.name) or (f.type == "phone" and is_fax_column(column.name)):
         return 0.0
+    # "Birthday Reward Sent", "Anniversary Email Date": a date about the birthday, not the birthday.
+    if f.type == "date" and set(_words(column.name)) & DATE_EVENT_WORDS:
+        return 0.0
     hs = header_score(column.name, f)
     # "Account Number" looks a lot like "contact number" / "phone number" to a fuzzy comparison, and ten-digit IDs
     # are often valid phone numbers by chance: without this, an ID column could be taken for the phone. Such a
@@ -318,7 +368,7 @@ def score(column: ColumnProfile, f: FieldSpec) -> float:
     if column.non_empty == 0:
         return hs * 0.5
     if kind:
-        share = column.shares.get(kind, 0.0)
+        share = type_share(column, f, hs)
         # Weights: the header counts a bit more than the values (55 vs 45), both together reach 100.
         s = 0.55 * hs + 45 * share
         if share < 0.2 and hs < 100:
@@ -361,7 +411,8 @@ def auto_map(schema: TargetSchema, profiles: list[ColumnProfile]) -> Mapping:
     Steps (each step only fills what earlier steps left open, unless stated otherwise):
 
     1. Direct matches - every (field, column) pair scored by :func:`score`; pairs above the threshold are
-       assigned best-first, each field and each column at most once.
+       assigned best-first, each field and each column at most once. A date column with a time column named the
+       same way ("Last Visit Date" + "Last Visit Time") is combined with it (:func:`_named_time_partner`).
     2. Phone - collect every phone column (by header, or by clear phone values); several -> "One row per phone
        number" (``each_row``) with mobile columns first; one -> copy. Step 2 never adds phone-setting
        columns such as "phone4MarketingPreference" or a column like "Occupation" with a stray number typed into
@@ -370,7 +421,8 @@ def auto_map(schema: TargetSchema, profiles: list[ColumnProfile]) -> Mapping:
     4. Full name - a whole-name column ("Customer Name") is split into first_name / last_name.
     5. Full address - a one-line address column is parsed into address1 / address2 / city / state / zip.
     6. Birthday / anniversary - a date split over "Birth Month" + "Birth Day" (+ "Birth Year") columns is
-       combined (this step overrides earlier matches of those columns).
+       combined (this step overrides earlier matches of those columns), unless step 1 found a complete date
+       column for the field that gives the year at least as often (:func:`_full_date_wins`).
     7. One last date - when no last-activity column was found by name, ONE date column still gets imported: the
        best generically named one ("Date", "Start Time", "Timestamp", "Updated"), or, failing that, a creation-type
        date ("Date Created", "Sign Up Date", "First Visit"). It goes to the field marked ``generic_date: call_log``
@@ -412,7 +464,7 @@ def auto_map(schema: TargetSchema, profiles: list[ColumnProfile]) -> Mapping:
         f = schema.field(fname)
         hs = header_score(col, f)
         kind = TYPED.get(f.type)
-        share = by_name[col].shares.get(kind, 0.0) if kind else 0.0
+        share = type_share(by_name[col], f, hs) if kind else 0.0
         # Explain the match in the words a reviewer understands: header, values, or a similar header.
         if hs >= 100:
             reason = f"header '{col}' matches"
@@ -423,6 +475,20 @@ def auto_map(schema: TargetSchema, profiles: list[ColumnProfile]) -> Mapping:
         fields[fname] = FieldMapping(sources=[col], transform="copy", origin="rule",
                                      confidence=_confidence(s, hs, share if kind else None), reason=reason)
         used.add(col)
+
+    # 1b. A date column matched above with a time column named the same way ("Last Visit Date" + "Last Visit
+    # Time", "Call Date" + "Call Time"): both are combined, so the time isn't lost (before 0.18.0 every such row got
+    # 12:00 AM). Only for date-and-time fields, and only when the date column holds no times of its own.
+    for f in schema.auto_fields:
+        fm = fields[f.name]
+        if f.type != "datetime" or fm.transform != "copy" or len(fm.sources) != 1:
+            continue
+        time_col = _named_time_partner(by_name[fm.sources[0]], profiles, used)
+        if time_col:
+            fields[f.name] = FieldMapping(sources=[fm.sources[0], time_col], transform="concat",
+                                          params={"separator": " "}, origin="rule", confidence=fm.confidence,
+                                          reason=f"{fm.reason}; times in '{time_col}'")
+            used.add(time_col)
 
     # 2. Phone: prefer mobile columns, fall back to other phone columns.
     # A file can have several phone columns (Toast exports: phone, phone2, phone3, phone4). All of them feed the
@@ -569,6 +635,8 @@ def auto_map(schema: TargetSchema, profiles: list[ColumnProfile]) -> Mapping:
         if target not in fields:
             continue
         parts = _date_part_columns(profiles, keys)
+        if parts and _full_date_wins(fields[target], parts, by_name, schema.field(target)):
+            continue  # a complete "Birthday" column gives the year too; the part columns stay unused
         if parts:
             fields[target] = FieldMapping(sources=parts, transform="concat", params={"separator": " "}, origin="rule",
                                           confidence="medium",
@@ -589,14 +657,27 @@ def auto_map(schema: TargetSchema, profiles: list[ColumnProfile]) -> Mapping:
 
 def _looks_like_call_log(profiles: list[ColumnProfile]) -> bool:
     """Whether the file is a call log: a header with a call word ("Caller ID", "Call Type", "Duration",
-    "Direction", "Missed") or both a From and a To column ("From", "To Number").
+    "Direction", "Missed") or both a From and a To column ("From", "To Number"). Consent columns ("Do Not Call",
+    "Call Opt In") don't count, and see :func:`_call_log_header` for "duration" and "extension".
 
         ["Date", "Direction", "From", "To"] → True;  ["Name", "Phone", "Last Visit"] → False
+        ["Phone", "Do Not Call", "Membership Duration", "Date"] → False
     """
-    words = [set(_words(p.name)) for p in profiles]
-    if any(w & CALL_LOG_WORDS for w in words):
+    words = [set(_words(p.name)) for p in profiles if not is_consent_column(p.name)]
+    if any(_call_log_header(w) for w in words):
         return True
     return any("from" in w for w in words) and any("to" in w for w in words)
+
+
+def _call_log_header(words: set[str]) -> bool:
+    """Whether a header (its words) belongs to a call log. "duration" only in a call-length header ("Duration",
+    "Call Duration", "Talk Time (sec)"; not "Membership Duration"), "extension" only without a phone word (a phone
+    system's "Extension", not a contact's "Phone Extension")."""
+    if words & (CALL_LOG_WORDS - {"duration", "extension"}):
+        return True
+    if "duration" in words and words <= _DURATION_HEADER_WORDS:
+        return True
+    return "extension" in words and not words & PHONE_WORDS
 
 
 def _activity_rank(column: str) -> int:
@@ -619,7 +700,11 @@ def _activity_rank(column: str) -> int:
 
 def _time_partner(date_col: str, profiles: list[ColumnProfile], used: set[str]) -> str | None:
     """A separate time-of-day column to combine with ``date_col``: unused, header contains "time" (but not "date"),
-    and nearly all values are times on their own ("3:15 PM"). E.g. "Date" + "Time" in a phone-system export."""
+    and nearly all values are times on their own ("3:15 PM"). E.g. "Date" + "Time" in a phone-system export.
+    None when the date column already holds times (the time would be written twice)."""
+    by_name = {p.name: p for p in profiles}
+    if date_col in by_name and _has_times(by_name[date_col]):
+        return None
     for p in profiles:
         w = set(_words(p.name))
         if p.name == date_col or p.name in used or "time" not in w or "date" in w or not p.samples:
@@ -627,6 +712,31 @@ def _time_partner(date_col: str, profiles: list[ColumnProfile], used: set[str]) 
         if sum(bool(_TIME_ONLY_RE.match(v)) for v in p.samples) / len(p.samples) >= 0.8:
             return p.name
     return None
+
+
+def _named_time_partner(date_col: ColumnProfile, profiles: list[ColumnProfile], used: set[str]) -> str | None:
+    """The time column named like ``date_col`` with "time" for "date": "Last Visit Date" → "Last Visit Time",
+    "Date of Last Order" → "Time of Last Order", "callDate" → "callTime". It must be unused and nearly all its
+    values times on their own ("3:15 PM", "15:15"), and the date column must hold no times. Else None.
+    """
+    words = _words(date_col.name)
+    if "date" not in words or _has_times(date_col):
+        return None
+    want = [w for w in words if w != "date"]
+    for p in profiles:
+        if p.name == date_col.name or p.name in used or not p.samples:
+            continue
+        w = _words(p.name)
+        if "time" not in w or "date" in w or [x for x in w if x != "time"] != want or not want:
+            continue
+        if sum(bool(_TIME_ONLY_RE.match(v)) for v in p.samples) / len(p.samples) >= 0.8:
+            return p.name
+    return None
+
+
+def _has_times(p: ColumnProfile) -> bool:
+    """Whether a date column's sample values include a time of day ("10/01/2026 3:15 PM", ISO "…T15:15:00")."""
+    return any(":" in v for v in p.samples)
 
 
 def _map_generic_dates(schema: TargetSchema, profiles: list[ColumnProfile], fields: dict[str, FieldMapping],
@@ -689,6 +799,26 @@ def _map_generic_dates(schema: TargetSchema, profiles: list[ColumnProfile], fiel
         used.add(col.name)
 
 
+def _full_date_wins(current: FieldMapping, parts: list[str], by_name: dict[str, ColumnProfile], f: FieldSpec) -> bool:
+    """Whether the complete date column step 1 gave birthday/anniversary field ``f`` beats the split ``parts``.
+
+    Exports often have both: "Birthday" (09/12/1985) and "Birth Month" + "Birth Day" made from it. Before 0.18.0
+    the parts always won, so every birthday lost its year. The complete column is kept when most of its values
+    (sampled) have a real year (not the no-year value 1600) and it is filled at least as often as the parts; the
+    year is what it adds. Otherwise (no years in it, or filled for fewer customers) the parts are used.
+    """
+    if current.transform != "copy" or len(current.sources) != 1 or current.sources[0] in parts:
+        return False
+    full = by_name.get(current.sources[0])
+    if full is None or not full.samples:
+        return False
+    dates = [d for d in _sample_dates(full, f) if d is not None]
+    no_year = str(f.no_year_value) if f.no_year_value is not None else None
+    with_year = sum(no_year is None or no_year not in d for d in dates)
+    filled = min(by_name[c].non_empty for c in parts[:2])  # month and day
+    return with_year >= 0.5 * len(full.samples) and full.non_empty >= filled
+
+
 def _date_part_columns(profiles: list[ColumnProfile], keys: set[str]) -> list[str]:
     """['Birth Month', 'Birth Day'(, 'Birth Year')] when a date is split over separate columns, else [].
 
@@ -697,7 +827,9 @@ def _date_part_columns(profiles: list[ColumnProfile], keys: set[str]) -> list[st
 
     * month - "month" / "mon" / "mo" / "mm"; values may be numbers or names ("9", "Sep", "September").
     * day   - "day" / "dd"; every sample value must be a whole number from 1 to 31.
-    * year  - "year" / "yr" / "yyyy"; optional (may be blank for many rows).
+    * year  - "year" / "yr" / "yyyy"; optional (may be blank for many rows). A year of 0 means "no year".
+    A header about the day of the week ("Birthday Day of Week", "Birth Weekday") is never a part column: its
+    numbers (1–7) would be read as the day of the month.
 
     A month and a day column, and two different ones, are required: a single "Birthday" column holding "9/12"
     is not split (it has no part word), and neither is a "Birth Day" column holding "9/12" (not a day number).
@@ -709,7 +841,7 @@ def _date_part_columns(profiles: list[ColumnProfile], keys: set[str]) -> list[st
         """First column whose header has a key word and a part word (and, optionally, only numbers 1..N)."""
         for p in profiles:
             words = set(_words(p.name))
-            if not (words & keys) or not (words & part_words):
+            if not (words & keys) or not (words & part_words) or words & {"week", "weekday", "dow", "wk"}:
                 continue
             # Value check (day column): every sample must be a whole number from 1 to `numbers_up_to`.
             # A column without samples (empty in this file) passes on the header alone.
