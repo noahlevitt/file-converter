@@ -20,7 +20,7 @@ cp .env.example .env              # then edit: admin account, optional ANTHROPIC
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest -q            # everything (about 625 tests, a few seconds)
+.venv/bin/python -m pytest -q            # everything (about 660 tests, about 10 seconds)
 .venv/bin/python -m pytest -q tests/test_formats.py -k phone     # one area
 ```
 
@@ -34,7 +34,7 @@ The suite needs no network and no API key. Claude is replaced by fake clients. T
 | `test_formats.py` | Hundreds of date, time and phone spellings against the real format, plus every rejection reason |
 | `test_phone_repair.py` | Phone typo repair (allowed repairs only; area codes never changed or filled in), ambiguity, tie-breaking, marking |
 | `test_multi_phone.py` | Several phone columns → one row per different number; phone-setting columns |
-| `test_activity_dates.py` | One last date per row: named, then generic, then creation date; call logs; last_contacted only by hand |
+| `test_activity_dates.py` | One last date per row: named, then generic, then creation date; call logs; last_contacted only by hand; activity dates imported as written (1900, 1970, future) |
 | `test_manual_only.py` | Consent and last_contacted: filled only when a person maps them, never by rules, Claude or templates |
 | `test_multi_number_cells.py` | Several numbers in one cell → one row each; labels, fax, extensions, never splitting a single number |
 | `test_birthdays.py` | No-year birthdays/anniversaries → 1600 (placeholders, Excel-added years, split columns) |
@@ -47,6 +47,8 @@ The suite needs no network and no API key. Claude is replaced by fake clients. T
 | `test_mapping_ai_storage.py` | Auto-mapping, the Claude layer (faked), the grid editor, SQLite store, output |
 | `test_notes_checks.py` | Notes applied by Claude, rule checks, review payload, phone masking |
 | `test_jobs_compare.py` | Background runner, cancel, retention, side-by-side view and comparison workbook |
+| `test_formula_injection.py` | No live spreadsheet formulas in the rejected-rows file (also older files on download) or in Excel output |
+| `test_drafts.py` | A browser refresh keeps the mapping in progress: drafts on disk, owner check, expiry; the real app.py driven with Streamlit's AppTest |
 
 **Rule:** every behaviour change comes with a test that would have failed before it. Several past fixes exist
 only because a test pinned down the exact case (e.g. birthdays losing `1600` on macOS).
