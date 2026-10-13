@@ -87,6 +87,11 @@ configured. It flags things like:
 - **Start import** is enabled once every required field has a source. The import runs in the background; you're
   taken to its page and can leave and come back.
 
+**Refreshing the page** before *Start import* doesn't lose your work: the file, how it was read and every mapping
+choice come back ("Picked up where you left off…"). Only Claude's answers still waiting for *Accept* have to be
+asked for again. The page address carries a code for this (`?draft=…`), so keep using the same tab. A file you
+leave for 24 hours without changes is removed; upload it again.
+
 ## Following imports
 
 **Imports** lists every import, newest first. Filter with **Show** (Everyone / Mine), **Status**, and **Search**
@@ -121,7 +126,9 @@ The numbers below it are:
 
 **Downloads:**
 - **Converted file:** the file to upload to the target system.
-- **Rejected rows:** every bad and duplicate row with its reason and original values.
+- **Rejected rows:** every bad and duplicate row with its reason and original values. A value that Excel would
+  run as a formula (starting with `=`, `+`, `-` or `@`, e.g. `=HYPERLINK(…)`) starts with an apostrophe here, so
+  opening the file never runs anything.
 - **Summary:** counts and reasons as text.
 - **Original file:** exactly what was uploaded.
 - **Prepare side-by-side Excel:** builds the comparison as a colour-coded workbook.
@@ -212,8 +219,10 @@ The numbers below it are:
   - years in the last two years or in the future.
 
   Separate *Birth Month* and *Birth Day* columns are combined automatically.
+- **Only birthday and anniversary get a placeholder year.** Every other date is imported as written, also
+  `01/01/1900`, `01/01/1970` or a date in the future. *Check for mistakes* warns about future activity dates.
 
-### Always blank
+### Mapped by hand only (✋)
 
 `consent` and `last_contacted` (marked ✋) are left blank unless **you** map a column to them for this file, in
 the field grid or with **Goes to** under **Columns in your file**. Nothing automatic fills them: not the rules,
