@@ -56,6 +56,12 @@ def phone_field(real_schema):
     # a mix: the separator alone would give 2 pieces, the labels show 3 numbers
     ("Cell 516-555-0100 Home 516-555-1212, Work 631-555-0188",
      ["Cell 516-555-0100", "Home 516-555-1212", "Work 631-555-0188"]),
+    # 0.16.0: cells that used to lose a number (or both) - the matcher missed one or joined two wrongly
+    ("516 555 0100 x12 917-555-1234", ["516 555 0100 x12", "917-555-1234"]),
+    ("1. 516-555-0100 2. 917-555-1234", ["1. 516-555-0100", "2. 917-555-1234"]),
+    ("+1 631 555 0199 1-718-555-0142 1-201-555-0111", ["+1 631 555 0199", "1-718-555-0142", "1-201-555-0111"]),
+    ("516.555.0100 917.555.1234", ["516.555.0100", "917.555.1234"]),
+    ("516.555.0100 917.555.1234 fax", ["516.555.0100", "917.555.1234 fax"]),
 ])
 def test_split(real_schema, cell, pieces):
     """Each number of the cell becomes its own piece, with its own label or extension."""
@@ -143,6 +149,16 @@ def test_one_row_per_number_in_a_cell(real_schema):
     a = res.audit
     assert a["_row"].tolist()[:4] == [2, 2, 3, 3] and a["_extra"].tolist()[:4] == [False, True, False, True]
     assert a["raw.phone_number"].tolist()[2:4] == ["H: 516-555-1212", "C: 516-555-0111"]
+
+
+def test_numbers_on_separate_lines_of_a_cell(real_schema):
+    """Each number of a multi-line cell gets its row (0.16.0: these lost one number, or both)."""
+    df = pd.DataFrame({"Phone": ["516 555 0100 x12\n917-555-1234", "516.555.0101\n917.555.1235",
+                                 "+1 631 555 0199\n1-718-555-0142\n1-201-555-0111"]})
+    res = convert(df, real_schema, Mapping(fields={"phone_number": FieldMapping(sources=["Phone"], transform="copy")}))
+    assert res.output["phone_number"].tolist() == ["5165550100", "9175551234", "5165550101", "9175551235",
+                                                   "6315550199", "7185550142", "2015550111"]
+    assert res.rejected == 0
 
 
 def test_cells_and_columns_together(real_schema):
