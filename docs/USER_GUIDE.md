@@ -224,7 +224,8 @@ The numbers below it are:
 - **Any common format works:** `10/9/2026 3:45 PM`, `2026-10-09T15:45:00Z`, `Oct 9, 2026`, `9-Oct-26`, Excel
   serial numbers, Unix timestamps and more.
 - **Ambiguous order:** `03/04` is read month-first unless the column is clearly day-first. You can force it with
-  **Option** = `DMY`.
+  **Option** = `DMY` (or `YMD` for year-first values such as `26/10/09`). Day-first values without separators
+  (`15032026`) count too.
 - **Activity fields:** a date with no time becomes `12:00 AM`. Seconds are dropped.
 - **Which field a date goes to (one last date per row):** a column that names its activity goes to that field
   (*Last Visit* → transactions_last, *Last Call* → calls_last). If there is none, a column named only *Date*,
@@ -291,7 +292,9 @@ in the server log.
 
 **A reason says *Excel error (broken formula in the client's file)*.** The cell held `#REF!`, `#VALUE!`,
 `#DIV/0!` or a similar code: a formula in the client's spreadsheet was broken when they exported it, so there is
-no value to import. If that column matters, ask the client for a fresh export.
+no value to import. If that column matters, ask the client for a fresh export. This works for CSV, `.xlsx`, `.xls`
+and `.ods` files (before 0.19.0 such cells in a spreadsheet arrived empty, so a phone said "required value is
+missing").
 
 **A birthday shows `1600`.** That's intended: it means "month and day known, year unknown". The target system
 expects this.
