@@ -3,6 +3,16 @@
 What changed in each version. The running version is shown in the app's sidebar. Each version is tagged in git
 (`vX.Y.Z`).
 
+## 0.21.2 — the country code next to an area code column
+
+- **Area code cells with the country code** (`1-516`, `+1 516`, `+1 (516)`, `1516`) were not recognised, so the
+  column could be missed and its rows had no area code. They are read as area code 516 now.
+- **`+1 555-0177` or `1-555-0177` in the phone column** (country code, but no area code) was a bad row (`too few
+  digits (8)`). It now counts as a 7-digit number: it gets the row's area code from an area code column, or the
+  file's main area code (the 0.20.0 rule, marked orange). `15550177`, 8 digits run together, is still a bad row:
+  the 1 may be a typo.
+- All 406 test files give identical results.
+
 ## 0.21.1 — area code column and number history fixes
 
 Found by testing 0.21.0 with files built to break it.
