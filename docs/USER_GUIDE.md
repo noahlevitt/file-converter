@@ -196,8 +196,9 @@ every import the number was converted in, newest first:
 | Consent in file / Consent from | the consent cell as written in the file, and the column (and translation) it came from; *not mapped* when nobody mapped consent |
 
 Select a row to open that import. **Download (CSV)** saves the table with exact times (UTC), e.g. to answer a
-complaint. Numbers are recorded since version 0.21.0; earlier imports are included when their files still existed
-at the update. Rows that weren't imported (bad rows, duplicates) aren't recorded.
+complaint. Look up one number at a time. Numbers are recorded since version 0.21.0; earlier imports are included
+when their files still existed at the update. Rows that weren't imported (bad rows, duplicates) and imports that
+were cancelled or failed aren't listed.
 
 ## How values are converted
 
@@ -238,9 +239,11 @@ at the update. Rows that weren't imported (bad rows, duplicates) aren't recorded
   keep a fax column).
 - **Area code in its own column** (*Area Code* `516`, *Phone* `555-0177`): combined automatically, and *How*
   shows *Phone + area code column*. Each 7-digit number gets the area code from its own row; a number that
-  already has an area code keeps it. A row whose area code cell is empty is treated like any 7-digit number (the
-  file's main area code, or a bad row). If the column has another name and isn't found, choose *Phone + area code
-  column* under **How** for the phone field and pick both columns (in any order).
+  already has an area code keeps it. With *Home Area Code* + *Home Phone* and *Cell Area Code* + *Cell Phone*,
+  each phone column uses its own area code column; a phone column without one never takes another line's. A row
+  whose area code cell is empty (or `000`) is treated like any 7-digit number (the file's main area code, or a bad
+  row). If the column has another name and isn't found, choose *Phone + area code column* under **How** for the
+  phone field and pick both columns (in any order).
 - **ID columns** (*Account Number*, *Order #*, *Card Number*, *Customer Number*, *Loyalty ID*) are not taken for
   the phone column because of their name. One is only used when nearly all of its values are phone numbers. If
   the file's real phone column can't be used (e.g. 7-digit numbers with no area code column), the phone field
