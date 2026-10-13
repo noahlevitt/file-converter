@@ -290,6 +290,18 @@ _LABEL_FAX_RE = re.compile(r"(fax|\bf\b)\W*$", re.I)
 _LABEL_OTHER_RE = re.compile(r"(home|work|office|business|land\s*line|main|\bh\b|\bw\b|\bo\b)\W*$", re.I)
 
 
+def _fix_lookalikes(value: str) -> str:
+    """Letters typed for digits inside a number: O/o → 0, I/l → 1. "516-555-O1OO" → "516-555-0100".
+
+    Regex: runs of 4+ characters made only of digits, O/o/I/l, parentheses, dots and dashes ("516-555-O1OO",
+    "5l6-555-0100"). A run is translated only if it holds at least 3 real digits, so runs that are mostly letters
+    (initials such as "I.O.O.I") are left alone.
+    """
+    return re.sub(r"[\dOoIl().\-]{4,}",
+                  lambda m: m.group(0).translate(_LOOKALIKE) if sum(c.isdigit() for c in m.group(0)) >= 3
+                  else m.group(0), value)
+
+
 def _prep_phone(value: str) -> str:
     """Clean a raw phone value into text the phonenumbers matcher can read. Never fails; returns a string.
 
@@ -318,11 +330,7 @@ def _prep_phone(value: str) -> str:
     v = _PHONE_PREFIX_RE.sub("", v)  # tel:, sms:, Phone:
     # Letters typed for digits inside a number (516-555-O1OO, 5l6…): O→0, I/l→1. Done before vanity
     # conversion, which would otherwise read O as 6 on a keypad.
-    # Regex: runs of 4+ characters made only of digits, O/o/I/l, parentheses, dots and dashes ("516-555-O1OO",
-    # "5l6-555-0100"). A run is translated only if it holds at least 3 real digits, so runs that are mostly
-    # letters (initials such as "I.O.O.I") are left alone.
-    v = re.sub(r"[\dOoIl().\-]{4,}",
-               lambda m: m.group(0).translate(_LOOKALIKE) if sum(c.isdigit() for c in m.group(0)) >= 3 else m.group(0), v)
+    v = _fix_lookalikes(v)
     # International exit codes before the US country code: 011 1 …, 00 1 …, +011 1 …
     # Regex: optional "+", then "011" (the US exit code) or "00" (most other countries), optional separators, and only
     # when "1" plus a digit comes next (lookahead, not consumed), i.e. the US country code follows. The exit code is
@@ -623,10 +631,8 @@ def _us_number(d10: str, countries: tuple[str, ...]) -> bool:
 # A cell of an "Area Code" column: three digits, the first 2–9 (North American area codes), optionally in
 # parentheses or with a ".0" a spreadsheet added to a number: "516", "(516)", "516.0".
 _AREA_CODE_CELL_RE = re.compile(r"\(?\s*([2-9]\d{2})\s*\)?(?:\.0+)?")
-# The 7-digit number inside a phone value, with its optional separator: "555-0177", "5550177", "555 0177".
-_LOCAL_NUMBER_RE = re.compile(r"(?<!\d)(\d{3}[\s.\-]?\d{4})(?!\d)")
-# The "(516) " with_area_code puts in front of that number (the side-by-side view finds the file's cell without it).
-ADDED_AREA_CODE_RE = re.compile(r"\(\d{3}\) (?=\d{3}[\s.\-]?\d{4}(?!\d))")
+# The "(516) " with_area_code puts in front of the number (the side-by-side view finds the file's cell without it).
+ADDED_AREA_CODE_RE = re.compile(r"\(\d{3}\) (?=\d)")
 
 
 def area_code_cell(value: str) -> str:
@@ -638,21 +644,41 @@ def area_code_cell(value: str) -> str:
     return m.group(1) if m else ""
 
 
+def _local_form(value: str) -> str | None:
+    """The value with letters typed for digits fixed and a spreadsheet ".0" removed, when it then holds exactly
+    7 digits (an extension not counted): a number without its area code. None otherwise.
+        "555-0177" → "555-0177", "555-O177" → "555-0177", "5550177.0" → "5550177",
+        "555-0177 x12" → "555-0177 x12", "516-555-0177" → None, "" → None
+    """
+    v = _fix_lookalikes(_FLOAT_ARTIFACT_RE.sub(r"\1", value.strip()))
+    return v if sum(c.isdigit() for c in _EXT_RE.sub("", v)) == 7 else None
+
+
+def is_local_number(value: str) -> bool:
+    """Whether a phone value is a number without its area code (7 digits; see _local_form): "555-0177" → True."""
+    return bool(value) and _local_form(value) is not None
+
+
 def with_area_code(phone: str, area: str) -> str:
     """A 7-digit phone value with the area code from the row's Area Code column put in front of the number.
 
-    Only when the value has exactly 7 digits (an extension not counted) and `area` is an area code (see
-    area_code_cell); anything else is returned unchanged, so full numbers in the same column stay as written:
+    Only when the value is a number without its area code (is_local_number: 7 digits, an extension not counted,
+    also with letters typed for digits or a spreadsheet ".0") and `area` is an area code (see area_code_cell);
+    anything else is returned unchanged, so full numbers in the same column stay as written:
         ("555-0177", "516")        → "(516) 555-0177"
         ("Cell: 555-0177", "516")  → "Cell: (516) 555-0177"
+        ("555-O177", "516")        → "(516) 555-0177"
+        ("5550177.0", "516")       → "(516) 5550177"
         ("516-555-0177", "631")    → "516-555-0177"       already has an area code
         ("555-0177", "")           → "555-0177"           no area code in the row
     Used by the "Phone + area code column" transform (engine._expand_rows, transforms.apply_transform).
     """
     code = area_code_cell(area) if area else ""
-    if not code or not phone or sum(c.isdigit() for c in _EXT_RE.sub("", phone)) != 7:
+    local = _local_form(phone) if code and phone else None
+    if local is None:
         return phone
-    return _LOCAL_NUMBER_RE.sub(lambda m: f"({code}) {m.group(1)}", phone, count=1)
+    # In front of the first digit, so any spacing inside the number ("555 - 0177") is kept.
+    return re.sub(r"(?=\d)", f"({code}) ", local, count=1)
 
 
 def split_area_code(values: list[str], at: int | None = None) -> tuple[str, list[int]]:
@@ -719,7 +745,8 @@ def _repair_phone(value: str, countries: tuple[str, ...], fmt: str, local: tuple
     typo of this file's area codes (516, 631)" for an area code that doesn't exist, or "" when no rule applied (the
     caller then reports the parser's own reason).
     """
-    body = _EXT_RE.sub("", _prep_phone(value))
+    # A ".0" a spreadsheet added ("5550177.0") isn't a digit of the number.
+    body = _EXT_RE.sub("", _prep_phone(_FLOAT_ARTIFACT_RE.sub(r"\1", value.strip())))
     digits = re.sub(r"\D", "", body)
     # Digit sequences to try: as typed, and without a leading 1 (US country code) when there are 11+ digits.
     seqs = [digits] + ([digits[1:]] if digits[:1] == "1" and len(digits) >= 11 else [])
