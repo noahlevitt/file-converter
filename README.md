@@ -124,7 +124,7 @@ only when exactly **one** US number fits (each repair below was approved one by 
 | `+1` added to a number that already had a `+` | `+1 +51 63 171059` | 516-317-1059 |
 | One digit too many (typed twice, extra at the end or start) | `51655501444` | 516-555-0144 |
 | An area code that doesn't exist anywhere, one keystroke (one digit, or two swapped) from an area code the file uses | `(156) 555-0199` in a file of 516 numbers | 516-555-0199 |
-| No area code (7 digits), when 80%+ of the file's numbers (at least 5) share one area code | `555-0177` in a file of 516 numbers | 516-555-0177 |
+| No area code (7 digits, also after a country code: `+1 555-0177`), when 80%+ of the file's numbers (at least 5) share one area code | `555-0177` in a file of 516 numbers | 516-555-0177 |
 
 The last two were removed in 0.9.0 and restored in 0.20.0. **A real area code is never changed:** `514-968-9696`
 in a file of 516 numbers stays a bad row (`not a US number — Canada (area code 514, Quebec)`), because it may be
@@ -147,6 +147,9 @@ phone column(s) as its sources.
 - A 7-digit number gets the area code from **the same row**: `555-0177` → 516-555-0177. Several numbers in one
   cell, labels (`Cell: 555-0177`), extensions, letters typed for digits (`555-O177`) and a spreadsheet's `.0`
   (`5550177.0`) work as usual; with several phone columns each different number still gets its own row.
+- **The country code 1** is read in both columns: an area code cell `1-516`, `+1 516`, `+1 (516)` or `1516` is
+  area code 516, and `+1 555-0177` or `1-555-0177` in the phone column is a 7-digit number (it gets the row's area
+  code). `15550177`, 8 digits run together, is not read that way (it stays a bad row).
 - **Several area code columns** (*Home Area Code* + *Home Phone*, *Cell Area Code* + *Cell Phone*; *Area Code (2)*
   + *Phone (2)*): each phone column uses the area code column named for the same line (*Cell* = *Mobile*). A plain
   *Area Code* column serves the phone columns without one of their own. A phone column that has neither (*Work
