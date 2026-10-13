@@ -30,6 +30,8 @@ ADMIN_USERNAME         ""                              First admin, created on s
 ADMIN_PASSWORD         ""                              Password for that first admin (8+ characters).
 IMPORT_WORKERS         2 (minimum 1)                   Imports that run at the same time; more wait queued.
 FILE_RETENTION_DAYS    30                              Days to keep each import's files; 0 = keep forever.
+NUMBER_RECORD_DAYS     0                               Days to keep the record of each import's numbers and
+                                                       consent values (Number history page); 0 = keep forever.
 APP_TIMEZONE           America/New_York                Time zone for times shown in the app and the default
                                                        client time zone for conversions.
 =====================  ==============================  ==========================================================
@@ -135,6 +137,10 @@ class Settings:
     # FILE_RETENTION_DAYS (default 30): files of finished imports older than this are deleted (records and counts
     # are kept); 0 or negative = keep forever.
     file_retention_days: int = field(default_factory=lambda: int(os.getenv("FILE_RETENTION_DAYS", "30")))
+    # NUMBER_RECORD_DAYS (default 0 = forever, since 0.21.0): how long the record of each import's numbers, their
+    # consent values and the file rows they came from is kept (Number history page). It outlives the files on
+    # purpose: where a customer's consent came from can be asked long after the file is gone.
+    number_record_days: int = field(default_factory=lambda: int(os.getenv("NUMBER_RECORD_DAYS", "0")))
     # APP_TIMEZONE (default America/New_York): IANA zone for displaying times and the default client time zone
     # for conversions (times that carry their own zone are converted to it).
     timezone: str = field(default_factory=lambda: os.getenv("APP_TIMEZONE", "America/New_York"))
@@ -154,7 +160,7 @@ def get_settings() -> Settings:
     """Return a new :class:`Settings` built from the current environment.
 
     Not cached: the object is cheap to build, and re-reading the environment keeps tests and scripts simple.
-    May raise ``ValueError`` if an integer variable (AI_SAMPLE_VALUES, IMPORT_WORKERS, FILE_RETENTION_DAYS) is
-    not a whole number.
+    May raise ``ValueError`` if an integer variable (AI_SAMPLE_VALUES, IMPORT_WORKERS, FILE_RETENTION_DAYS,
+    NUMBER_RECORD_DAYS) is not a whole number.
     """
     return Settings()
