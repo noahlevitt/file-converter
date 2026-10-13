@@ -11,7 +11,8 @@ progress to the database so every user's browser can watch it. Results are writt
     rejected.csv      rejected + duplicate rows with reasons
     summary.txt       human-readable summary
 
-The folder is ``DATA_DIR/imports/<id>/`` (see ``Store.import_dir``).
+The folder is ``DATA_DIR/imports/<id>/`` (see ``Store.import_dir``). The numbers it converted, with their consent
+values, are also recorded in the database (``numberlog.record``), where they stay after the files are deleted.
 
 Import lifecycle (the ``imports.status`` column)
 ------------------------------------------------
@@ -35,7 +36,8 @@ every 0.5 s unless forced) and checks the cancel flag at most once a second; can
 :class:`ImportCancelled` from inside the progress callback, which unwinds the engine wherever it is.
 
 Retention: :meth:`ImportRunner.purge` deletes the stored files of finished imports older than
-``FILE_RETENTION_DAYS`` (records and counts stay), at start-up and then at most once an hour, piggy-backing on
+``FILE_RETENTION_DAYS`` (records and counts stay), and the recorded numbers of imports older than
+``NUMBER_RECORD_DAYS`` (default: kept forever), at start-up and then at most once an hour, piggy-backing on
 :meth:`ImportRunner.submit`.
 
 Main entry points: :class:`ImportRunner` (web app, one per server process) and :func:`run_import` (also called
@@ -52,6 +54,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from . import __version__
+from . import numberlog
 from .engine import convert
 from .output import output_filename, rejects_filename, timestamp, write_output, write_rejects, write_summary
 from .reader import read_file
@@ -121,6 +124,8 @@ def run_import(store: Store, import_id: int) -> ImportRecord:
     0.08        file read; ``source.parquet`` written (used by the side-by-side comparison)
     0.08–0.92   ``engine.convert`` (its own 0–1 progress is scaled into this range)
     0.93        write the output file, ``rejected.csv``, ``summary.txt`` and ``audit.parquet``
+    0.97        record the converted numbers and their consent values (``numberlog.record``; a failure there is
+                logged and doesn't fail the import, and the server's next start records them from the audit file)
     0.99        finishing; then ``complete_import`` stores counts, summary and file names (progress 1.0)
     ==========  ==========================================================================================
 
@@ -191,6 +196,11 @@ def run_import(store: Store, import_id: int) -> ImportRecord:
         (folder / files["summary"]).write_bytes(
             write_summary(result, schema, rec.filename, rec.username, __version__))
         result.audit.to_parquet(folder / files["audit"], index=False)
+        track(0.97, "Recording numbers", force=True)
+        try:
+            numberlog.record(store, import_id, result.audit, schema, rr.df, rec.mapping)
+        except Exception:  # noqa: BLE001 - the import itself is fine; numberlog.backfill retries on the next start
+            log.exception("Recording the numbers of import %s failed", import_id)
         track(0.99, "Finishing", force=True)
         # The summary dict is stored as JSON on the import row; failed values are capped at 500 per field to keep
         # the row small.
@@ -217,7 +227,8 @@ class ImportRunner:
     Creating a runner has side effects (see :meth:`__init__`), which is why there must be only one.
     """
 
-    def __init__(self, store: Store, workers: int = 2, retention_days: int = 30):
+    def __init__(self, store: Store, workers: int = 2, retention_days: int = 30, record_days: int = 0,
+                 backfill: bool = True):
         """Start the pool, recover from a previous run and purge old files.
 
         Args:
@@ -225,13 +236,18 @@ class ImportRunner:
             workers: Number of worker threads (thread names "import_0", "import_1", …).
             retention_days: ``FILE_RETENTION_DAYS``; files of finished imports older than this are deleted
                 (0 or less = keep forever).
+            record_days: ``NUMBER_RECORD_DAYS``; recorded numbers of imports older than this are deleted (0 or
+                less = keep forever).
+            backfill: record the numbers of earlier imports that have none recorded yet (``numberlog.backfill``),
+                in a background thread so the server starts right away.
 
         Side effects: marks every import still "queued"/"running" in the database as "interrupted" — they belonged
-        to a previous server process whose threads are gone — logs a warning with the count, and runs
-        :meth:`purge` once.
+        to a previous server process whose threads are gone — logs a warning with the count, runs :meth:`purge`
+        once and starts the backfill thread ("number-log-backfill").
         """
         self.store = store
         self.retention_days = retention_days
+        self.record_days = record_days
         self.pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="import")
         self._lock = threading.Lock()  # serializes purge() runs
         self._last_purge = 0.0
@@ -239,6 +255,17 @@ class ImportRunner:
         if interrupted:
             log.warning("Marked %d import(s) as interrupted after restart", interrupted)
         self.purge()
+        if backfill:
+            threading.Thread(target=self._backfill, name="number-log-backfill", daemon=True).start()
+
+    def _backfill(self) -> None:
+        """Record the numbers of imports from before 0.21.0 whose files still exist; never raises."""
+        try:
+            n = numberlog.backfill(self.store, self.record_days)
+            if n:
+                log.info("Recorded the numbers of %d earlier import(s) for the Number history page", n)
+        except Exception:
+            log.exception("Recording the numbers of earlier imports failed")
 
     def submit(self, import_id: int) -> None:
         """Queue an already-created import to run on the pool, and purge old files if the last purge was > 1 h ago.
@@ -263,7 +290,8 @@ class ImportRunner:
         """Delete stored files of finished imports older than ``retention_days``; never raises.
 
         The import records and their counts are kept (marked ``files_purged``); only the folder contents go.
-        Abandoned New import drafts (unchanged for 24 hours, see ``Store.purge_drafts``) are deleted too.
+        Abandoned New import drafts (unchanged for 24 hours, see ``Store.purge_drafts``) are deleted too, and so are
+        the recorded numbers of imports older than ``record_days`` (``Store.purge_number_log``).
         Errors are logged, not raised, because a purge failure must not break submitting an import.
         """
         with self._lock:
@@ -275,5 +303,8 @@ class ImportRunner:
                 n = self.store.purge_drafts()
                 if n:
                     log.info("Deleted %d abandoned New import draft(s)", n)
+                n = self.store.purge_number_log(self.record_days)
+                if n:
+                    log.info("Deleted %d recorded number(s) of imports older than %d days", n, self.record_days)
             except Exception:
                 log.exception("File purge failed")
