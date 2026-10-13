@@ -145,19 +145,27 @@ rules combine them: the phone field's *How* is **Phone + area code column**, wit
 phone column(s) as its sources.
 
 - A 7-digit number gets the area code from **the same row**: `555-0177` → 516-555-0177. Several numbers in one
-  cell, labels (`Cell: 555-0177`) and extensions work as usual; with several phone columns each different number
-  still gets its own row.
+  cell, labels (`Cell: 555-0177`), extensions, letters typed for digits (`555-O177`) and a spreadsheet's `.0`
+  (`5550177.0`) work as usual; with several phone columns each different number still gets its own row.
+- **Several area code columns** (*Home Area Code* + *Home Phone*, *Cell Area Code* + *Cell Phone*; *Area Code (2)*
+  + *Phone (2)*): each phone column uses the area code column named for the same line (*Cell* = *Mobile*). A plain
+  *Area Code* column serves the phone columns without one of their own. A phone column that has neither (*Work
+  Phone* next to only *Home Area Code*) never borrows another line's area code: its 7-digit numbers are treated
+  like any number without an area code.
 - A number that already has an area code is kept as written: `212-555-0188` stays 212, whatever the *Area Code*
   column says.
-- A row with an empty area code cell is treated like any 7-digit number: it gets the file's main area code when
-  80%+ of the numbers share one (marked orange), otherwise it is a bad row (`missing area code (only 7 digits)`).
-  A cell in the area code column that isn't an area code (`000`, `N/A`) is not read as a phone number.
+- A row with an empty area code cell, or `000` / `N/A`, is treated like any 7-digit number: it gets the file's
+  main area code when 80%+ of the numbers share one (marked orange), otherwise it is a bad row (`missing area code
+  (only 7 digits)`). An area code cell that looks like one but isn't in use (`999`) makes a bad row naming it.
+  Nothing in an area code column is read as a phone number, unless a whole number was typed into it.
 - Found automatically when the column is named like one (*Area Code*, *AreaCode*, *Phone Area Code*, *Area*,
-  *NPA*) and nearly all its values are area codes in use. Otherwise choose *Phone + area code column* under
-  *How* in the field grid, with both columns; the column order doesn't matter. Adding an *Area Code* column to
-  the phone field under *Columns in your file* does the same.
-- Not combined when every number already has its area code; *Delivery Area*, *Zone* and store numbers are never
-  taken for area codes.
+  *NPA*, *Home Area Code*) and 80%+ of its filled cells, counted over the whole file, are area codes in use
+  (zeros count as empty); the 7-digit numbers may be anywhere in the file, also after thousands of full numbers.
+  Otherwise choose *Phone + area code column* under *How* in the field grid, with both columns; the column order
+  doesn't matter. Adding an *Area Code* column to the phone field under *Columns in your file* does the same.
+- Not combined when every number already has its area code. *Delivery Area*, *Zone*, store numbers, and area
+  codes of something else (*Store Area Code*, *Delivery Area Code*, *Area #*) are never taken for the customer's
+  area code.
 
 #### Several phone numbers per customer (several columns, or several in one cell)
 
@@ -437,8 +445,9 @@ Notes are useful without Claude too: they're saved with the template and the imp
 
 - `data/converter.db` (SQLite): user accounts (bcrypt-hashed passwords), templates (column names + mapping
   rules), and one record per import (who, when, status, timings, counts, mapping used).
-- The **number history** (table `number_log` in the same database, since 0.21.0): for every number each import
-  converted, the import, the file row, the phone and consent cells as written in the file, and the consent sent.
+- The **number history** (table `number_log` in the same database, since 0.21.0): for every number each completed
+  import converted, the import, the file row, the phone and consent cells as written in the file, and the consent
+  sent (an import that ends cancelled or failed keeps nothing there).
   It is customer data too, kept on purpose after the files are deleted so a complaint about consent can be
   answered later; **kept forever unless `NUMBER_RECORD_DAYS` is set**. Imports completed before 0.21.0 are added
   from their stored files when the server starts on 0.21.0 (only those whose files weren't deleted yet).
