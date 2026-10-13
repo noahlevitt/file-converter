@@ -231,14 +231,23 @@ The numbers below it are:
   *Start Time* or *Timestamp* is used; if there is none of those either, a creation date (*Date Created*, *Sign Up
   Date*, *First Visit*) - better than no date. That one date goes to **calls_last** in a call log (*From*/*To*,
   *Caller ID*, *Duration*…), otherwise to **transactions_last**. Expiry and opt-in dates are never used. These are
-  marked *low*: check them, and change them under **Columns in your file** if needed.
+  marked *low*: check them, and change them under **Columns in your file** if needed. *Date Added* and *Import
+  Date* count as creation dates; *Do Not Call*, *Membership Duration* or *Phone Extension* columns don't make a
+  file a call log.
+- **Date and time in two columns** (*Date* + *Time*, *Last Visit Date* + *Last Visit Time*) are combined.
+- **Unusual date formats** (Excel serial numbers, Unix timestamps, `20261009`) are recognised when the column's
+  name says which date it is (*Last Visit*, *Birthday*).
 - **Birthday / anniversary** become `MM/DD/1600` when there is no real year. That includes:
   - month and day only: `09/12`, `Sep 12`, `12-Sep`, `--09-12`;
   - placeholder years: `0000`, `XXXX`, `1900`;
   - a year shared by most of the column, e.g. a year Excel added to dates typed without one;
-  - years in the last two years or in the future.
+  - years in the last two years or in the future;
+  - a *Birth Year* of `0`.
 
-  Separate *Birth Month* and *Birth Day* columns are combined automatically.
+  Separate *Birth Month* and *Birth Day* columns are combined automatically. When the file also has a complete
+  *Birthday* column with years, filled for as many customers, that column is used instead (the parts would lose the
+  year). A *Day of Week* column is never read as the day. Birthdays written with a time zone
+  (`1985-09-12T00:00:00Z`) keep their day. Dates about a birthday (*Birthday Reward Sent*) are not the birthday.
 - **Only birthday and anniversary get a placeholder year.** Every other date is imported as written, also
   `01/01/1900`, `01/01/1970` or a date in the future. *Check for mistakes* warns about future activity dates.
 
