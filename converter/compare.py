@@ -49,7 +49,7 @@ import pandas as pd
 from .engine import (CELL_BLANKED, CELL_DEFAULT, CELL_DERIVED, CELL_FIXED, CELL_FORMAT, CELL_REJECT, CELL_REPAIRED,
                      CELL_SAME)
 from .mapping import Mapping
-from .normalizers import clean_text
+from .normalizers import ADDED_AREA_CODE_RE, clean_text
 from .schema import TargetSchema
 
 # Cell statuses that count as "the converted value differs from (or doesn't simply copy) the original". Used by
@@ -468,6 +468,10 @@ def build_compare_html(source: pd.DataFrame, audit: pd.DataFrame, rows: list[int
         # underlined, so the rows made from one cell can be told apart.
         underline = plan.each_field and (several_columns or arow.get("_src") in expanded)
         used_value = str(arow.get(f"raw.{plan.each_field}", "")) if underline else ""
+        if used_value and not any(used_value in clean_text(srow.get(c, "")) for c in plan.each_sources):
+            # 'Phone + area code column' put the row's area code in front of a 7-digit number: "(516) 555-0177"
+            # was "555-0177" in the file.
+            used_value = ADDED_AREA_CODE_RE.sub("", used_value, count=1)
         marked = False
         for c in cols:
             v = srow.get(c, "")
