@@ -20,7 +20,7 @@ cp .env.example .env              # then edit: admin account, optional ANTHROPIC
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest -q            # everything (about 820 tests, about 25 seconds)
+.venv/bin/python -m pytest -q            # everything (about 870 tests, about 30 seconds)
 .venv/bin/python -m pytest -q tests/test_formats.py -k phone     # one area
 ```
 
@@ -34,10 +34,10 @@ The suite needs no network and no API key. Claude is replaced by fake clients. T
 | `test_formats.py` | Hundreds of date, time and phone spellings against the real format, plus every rejection reason |
 | `test_phone_repair.py` | Phone typo repair (allowed repairs only; area codes never changed or filled in), ambiguity, tie-breaking, marking |
 | `test_multi_phone.py` | Several phone columns → one row per different number; phone-setting and texting-activity columns |
-| `test_activity_dates.py` | One last date per row: named, then generic, then creation date; call logs; last_contacted only by hand; activity dates imported as written (1900, 1970, future) |
+| `test_activity_dates.py` | One last date per row: named, then generic, then creation date; call logs (and what doesn't make one); last_contacted only by hand; activity dates imported as written (1900, 1970, future); machine-format date columns mapped by name; named date + time pairs |
 | `test_manual_only.py` | Consent and last_contacted: filled only when a person maps them, never by rules, Claude or templates |
 | `test_multi_number_cells.py` | Several numbers in one cell → one row each; labels, fax, extensions, numbers on separate lines or numbered, never splitting a single number |
-| `test_birthdays.py` | No-year birthdays/anniversaries → 1600 (placeholders, Excel-added years, split columns) |
+| `test_birthdays.py` | No-year birthdays/anniversaries → 1600 (placeholders, Excel-added years, split columns, year 0); time zones never shift a birthday; full column vs split columns; dates about a birthday |
 | `test_real_schema.py` | The real import format end to end: headers, consent only by hand, dedupe, sample exports |
 | `test_engine.py` | End-to-end conversion with the generic example schema |
 | `test_normalizers.py` | Normalizers in isolation |
