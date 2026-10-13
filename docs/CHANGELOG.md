@@ -3,6 +3,25 @@
 What changed in each version. The running version is shown in the app's sidebar. Each version is tagged in git
 (`vX.Y.Z`).
 
+## 0.21.0 — area code columns; number history
+
+- **Area code in its own column.** Exports with *Area Code* (`516`) and *Phone* (`555-0177`) had no usable phone
+  column: the phone field stayed unmapped, and mapping *Phone* by hand made every row a bad row (`missing area
+  code`). The rules now combine them with the new *How* **Phone + area code column**: each 7-digit number gets
+  the area code from its own row. Numbers that already have an area code are kept as written; several phone
+  columns and several numbers per cell still give one row per number. A row with an empty area code cell is
+  treated like any 7-digit number (the file's main area code from 0.20.0, or a bad row). Found when the column is
+  named like an area code (*Area Code*, *AreaCode*, *Area*, *NPA*) and nearly all its values are area codes in use;
+  otherwise choose it under *How*. A similar template takes a new *Area Code* column the same way it takes a new
+  phone column. *Check for mistakes* now points to this option for 7-digit numbers.
+- **Number history** (new page). Type a phone number to see every import it was converted in: when and by whom,
+  the client's file and row, the number and consent as written in the file, the consent sent (`true` / `false` /
+  blank) and the column it came from. Each completed import records its numbers in the database, where they stay
+  after the files are deleted, so "where did this opt-in come from?" can be answered months later. Download as
+  CSV. Kept forever unless the new setting `NUMBER_RECORD_DAYS` is set. On the first start of 0.21.0, earlier
+  imports whose files still exist are recorded in the background.
+- All 406 test files give identical results.
+
 ## 0.20.0 — area codes filled in and corrected again (business decision)
 
 Two repairs removed in 0.9.0 are back, decided by the business. Both are imported and marked orange like every
