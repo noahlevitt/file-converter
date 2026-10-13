@@ -37,7 +37,7 @@ import re
 from rapidfuzz import fuzz
 
 from . import normalizers as N
-from .mapping import ColumnProfile, FieldMapping, Mapping, is_fax_column, norm_header
+from .mapping import ColumnProfile, FieldMapping, Mapping, is_area_code_header, is_fax_column, norm_header
 from .schema import FieldSpec, TargetSchema
 
 # Schema field type -> key in ColumnProfile.shares that gives value-type evidence for it. A "datetime" field is
@@ -416,9 +416,11 @@ def auto_map(schema: TargetSchema, profiles: list[ColumnProfile]) -> Mapping:
        assigned best-first, each field and each column at most once. A date column with a time column named the
        same way ("Last Visit Date" + "Last Visit Time") is combined with it (:func:`_named_time_partner`).
     2. Phone - collect every phone column (by header, or by clear phone values); several -> "One row per phone
-       number" (``each_row``) with mobile columns first; one -> copy. Step 2 never adds phone-setting
-       columns such as "phone4MarketingPreference" or a column like "Occupation" with a stray number typed into
-       it (a phone-setting column whose values look like phone numbers can still be picked in step 1).
+       number" (``each_row``) with mobile columns first; one -> copy. Step 2 never adds phone-setting columns
+       such as "phone4MarketingPreference" or a column like "Occupation" with a stray number typed into it (a
+       phone-setting column whose values look like phone numbers can still be picked in step 1). Then (2b) an
+       "Area Code" column next to 7-digit numbers -> "Phone + area code column" (``area_code``,
+       :func:`_map_area_code_column`).
     3. Email - by values alone, when exactly one unused column is 80%+ email addresses.
     4. Full name - a whole-name column ("Customer Name") is split into first_name / last_name.
     5. Full address - a one-line address column is parsed into address1 / address2 / city / state / zip.
@@ -549,6 +551,13 @@ def auto_map(schema: TargetSchema, profiles: list[ColumnProfile]) -> Mapping:
                                           reason=f"values in '{phone_cols[0]}' look like phone numbers")
             used.update(phone_cols)
 
+    # 2b. Phone numbers without their area code, which sits in a column of its own ("Area Code": 516, "Phone":
+    # 555-0177): 'Phone + area code column' gives each 7-digit number its row's area code (0.21.0). Real data from
+    # the file, so it comes before any guess (the file's main area code is only a repair for what is left).
+    for f in schema.auto_fields:
+        if f.type == "phone":
+            _map_area_code_column(f, profiles, fields, used)
+
     # 3. Email by value type alone (unambiguous).
     # Only when exactly one unused column is 80%+ email addresses; with two candidates (e.g. "Email" and
     # "Work Email" with unclear headers) the choice is left to Claude or the reviewer.
@@ -655,6 +664,46 @@ def auto_map(schema: TargetSchema, profiles: list[ColumnProfile]) -> Mapping:
     _map_generic_dates(schema, profiles, fields, used)
 
     return Mapping(fields=fields)
+
+
+def _seven_digit_share(p: ColumnProfile) -> float:
+    """Share of a column's sample values that are 7-digit numbers (no area code): "555-0177", "5550177"."""
+    if not p.samples:
+        return 0.0
+    return sum(sum(c.isdigit() for c in N._EXT_RE.sub("", v)) == 7 for v in p.samples) / len(p.samples)
+
+
+def _map_area_code_column(f: FieldSpec, profiles: list[ColumnProfile], fields: dict[str, FieldMapping],
+                          used: set[str]) -> None:
+    """Step 2b of :func:`auto_map`: combine an area code column with 7-digit phone numbers (in place).
+
+    The area code column: named like one (:func:`mapping.is_area_code_header`: "Area Code", "AreaCode", "NPA") and
+    90%+ of its sampled values are area codes in use ("516", "(516)"). The numbers: the phone field's columns from
+    the steps before, plus unused phone-named columns ("Phone", "Cell") whose values are mostly (50%+) 7 digits -
+    those can't be phone columns by value, so the steps before leave them out. Only done when at least one of the
+    numbers' columns holds 7-digit values; numbers that already have an area code are kept as they are.
+
+    Example: ["Name", "Area Code", "Phone"] with 516 and 555-0177 -> phone_number = Phone + area code column of
+    ["Area Code", "Phone"]: "(516) 555-0177" -> 5165550177.
+    """
+    area = next((p for p in profiles if p.name not in used and is_area_code_header(p.name) and p.samples
+                 and sum(bool(N.area_code_cell(v)) and N._area_code_in_use(N.area_code_cell(v))
+                         for v in p.samples) >= 0.9 * len(p.samples)), None)
+    if area is None:
+        return
+    fm = fields[f.name]
+    current = list(fm.sources) if fm.transform in ("copy", "each_row") else []
+    if fm.transform not in ("none", "copy", "each_row"):
+        return  # combined some other way (a person or a template decided)
+    local = [p.name for p in profiles if p.name not in used and p.name != area.name and is_phone_header(p.name)
+             and not is_fax_column(p.name) and _seven_digit_share(p) >= 0.5]
+    by_name = {p.name: p for p in profiles}
+    if not local and not any(_seven_digit_share(by_name[c]) > 0 for c in current if c in by_name):
+        return  # every number already has its area code
+    sources = [area.name, *current, *(c for c in local if c not in current)]
+    fields[f.name] = FieldMapping(sources=sources, transform="area_code", origin="rule", confidence="medium",
+                                  reason=f"7-digit numbers get the area code from '{area.name}'")
+    used.update(sources)
 
 
 def _looks_like_call_log(profiles: list[ColumnProfile]) -> bool:
