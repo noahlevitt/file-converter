@@ -33,7 +33,7 @@ Entry points
 parse(value, order="MDY", allow_no_year=False, today=None, serial_hint=False, target_tz=DEFAULT_TZ)
     -> (datetime, has_time). The only public parser. Month/day-only values (accepted with allow_no_year) get the
     marker year NO_YEAR (4). Raises DateError, a ValueError subclass.
-DateError, NO_YEAR, MIN_YEAR, MAX_YEAR, DEFAULT_TZ
+DateError, NO_YEAR, MIN_YEAR, MAX_YEAR, MAX_LEN, DEFAULT_TZ
     Shared with normalizers.py and checks.py.
 
 How it is called: normalizers.prepare_date samples the column once to choose `order` and `serial_hint`;
@@ -69,6 +69,9 @@ from zoneinfo import ZoneInfo
 NO_YEAR = 4  # marker year for "month and day only" (a leap year, so Feb 29 is valid)
 # Plausible years for contact data; a 4-digit number outside this range is not taken as a year.
 MIN_YEAR, MAX_YEAR = 1900, 2100
+# Longest value parse() looks at: no date is longer (the longest real format, "Saturday, October 10, 2026 at 3:15:22 PM
+# Eastern Daylight Time", has ~65 characters); longer text is notes or junk and is refused at once.
+MAX_LEN = 200
 # Day 0 of Excel serial dates. Excel numbers days from 1900-01-01 = 1 but wrongly treats 1900 as a leap year, so
 # counting from 1899-12-30 gives the dates Excel shows for every serial from 61 (1900-03-01) on: 46304 → 2026-10-09.
 _EXCEL_EPOCH = datetime(1899, 12, 30)
@@ -186,7 +189,7 @@ def _prep(value: str) -> tuple[str, tzinfo | None]:
         v = v.replace(",", ".")
     # Zone in parentheses: "(EST)", "(Eastern Daylight Time)" → keep the zone, drop the brackets.
     # Regex: "(", anything but ")", ")". Zone names are kept without the brackets; any other text ("(cell)") goes.
-    v = re.sub(r"\(([^)]*)\)", lambda m: f" {m.group(1)} " if _is_zone_text(m.group(1)) else " ", v)
+    v = re.sub(r"\(([^()]*)\)", lambda m: f" {m.group(1)} " if _is_zone_text(m.group(1)) else " ", v)
     # Regex: 8 digits, "t" (the lower-cased ISO "T"), 4 or 6 digits, then the rest ("z", an offset...). Rebuilt as
     # "2026-10-09 19:45:00" + rest: "20261009t194500z" → "2026-10-09 19:45:00z".
     m = re.match(r"^(\d{8})t(\d{4}(?:\d{2})?)(.*)$", v)    # basic ISO 20261009T154500Z
@@ -432,6 +435,8 @@ def parse(value: str, order: str = "MDY", allow_no_year: bool = False, today: da
         parse("October 2026")               → DateError("month and year but no day")
     """
     today = today or date.today()
+    if len(value) > MAX_LEN:  # notes or junk, not a date; and some of the patterns below are slow on long text
+        raise DateError(f"too long to be a date ({len(value):,} characters)")
     s, src_tz = _prep(value)
     if not s:
         raise DateError("empty")
