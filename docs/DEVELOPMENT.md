@@ -20,7 +20,7 @@ cp .env.example .env              # then edit: admin account, optional ANTHROPIC
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest -q            # everything (about 790 tests, about 20 seconds)
+.venv/bin/python -m pytest -q            # everything (about 820 tests, about 25 seconds)
 .venv/bin/python -m pytest -q tests/test_formats.py -k phone     # one area
 ```
 
@@ -33,7 +33,7 @@ The suite needs no network and no API key. Claude is replaced by fake clients. T
 |---|---|
 | `test_formats.py` | Hundreds of date, time and phone spellings against the real format, plus every rejection reason |
 | `test_phone_repair.py` | Phone typo repair (allowed repairs only; area codes never changed or filled in), ambiguity, tie-breaking, marking |
-| `test_multi_phone.py` | Several phone columns → one row per different number; phone-setting columns |
+| `test_multi_phone.py` | Several phone columns → one row per different number; phone-setting and texting-activity columns |
 | `test_activity_dates.py` | One last date per row: named, then generic, then creation date; call logs; last_contacted only by hand; activity dates imported as written (1900, 1970, future) |
 | `test_manual_only.py` | Consent and last_contacted: filled only when a person maps them, never by rules, Claude or templates |
 | `test_multi_number_cells.py` | Several numbers in one cell → one row each; labels, fax, extensions, numbers on separate lines or numbered, never splitting a single number |
@@ -44,8 +44,10 @@ The suite needs no network and no API key. Claude is replaced by fake clients. T
 | `test_reader.py` | Encodings, delimiters, header detection, Excel files |
 | `test_headers.py` | Header row below titles/report lines, files without a header row, unsure cases, no templates for headerless files, 1,000 generated files (no customer ever dropped) |
 | `test_column_edits.py` | Goes to / Skip edits, wrong-column warnings |
-| `test_mapping_ai_storage.py` | Auto-mapping, the Claude layer (faked), the grid editor, SQLite store (templates found despite punctuation differences), output |
+| `test_mapping_ai_storage.py` | Auto-mapping, the Claude layer (faked), the grid editor, SQLite store (templates found despite punctuation differences; a similar template takes new phone columns), output |
 | `test_number_columns.py` | ID columns (*Account Number*, *Order #*…) never taken for the phone; a member number full of phones still used; *WhatsApp* is a phone header |
+| `test_fax.py` | Fax numbers never imported: fax columns (rules, templates, Claude), a fax-only cell is a bad row, a person can still map one |
+| `test_sheets.py` | Which sheet is read: empty, hidden and chart sheets passed over with a warning; a chosen sheet always read |
 | `test_csv_quotes.py` | A CSV quote mark that is never closed costs one row (also two of them, near the end, Windows line ends, two columns); real multi-line cells kept; cells over 128 KB |
 | `test_notes_checks.py` | Notes applied by Claude, rule checks, review payload, phone masking |
 | `test_jobs_compare.py` | Background runner, cancel, retention, side-by-side view and comparison workbook |
