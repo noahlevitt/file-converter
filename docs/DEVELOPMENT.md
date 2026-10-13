@@ -20,7 +20,7 @@ cp .env.example .env              # then edit: admin account, optional ANTHROPIC
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest -q            # everything (about 960 tests, about 30 seconds)
+.venv/bin/python -m pytest -q            # everything (about 1,000 tests, about 30 seconds)
 .venv/bin/python -m pytest -q tests/test_formats.py -k phone     # one area
 ```
 
