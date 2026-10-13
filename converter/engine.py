@@ -301,9 +301,10 @@ def convert(
     each_raw: list[str] = []  # raw value of the each_row field per working row (only used when each_field is set)
     early_issues: dict[int, list[RowIssue]] = {}  # "extra value skipped" notes found while expanding, per work row
     each_ctx: dict = {}  # normalizer context built from ALL the each_row source columns
+    fax_rows: set[int] = set()  # working rows whose only number is labelled fax: rejected (N.FAX_REASON)
     if each_field is not None:
-        src, each_raw, early_issues, each_ctx = _expand_rows(src_records, src_blank, each_field, mapping, overrides,
-                                                             timezone)
+        src, each_raw, early_issues, each_ctx, fax_rows = _expand_rows(src_records, src_blank, each_field, mapping,
+                                                                       overrides, timezone)
     # Re-index everything per working row. Without expansion `src` is 0..n-1 and these are plain copies.
     records = [src_records[k] for k in src]
     blank = [src_blank[k] for k in src]
@@ -396,12 +397,15 @@ def convert(
             if v not in cache:
                 cache[v] = (fixes[v], None) if v in fixes else N.normalize(v, f, params, ctx)
             out, err = cache[v]
+            if f is each_field and i in fax_rows:
+                out, err = "", N.FAX_REASON  # the row's only number is a fax line
             # Cell status, in order of precedence: invalid (rejected or blanked, per the field's on_invalid) >
             # approved fix > repaired typo > fixed value > derived > unchanged/reformatted.
             if err:
                 rejected = f.on_invalid == "reject"
                 issues[i].append(RowIssue(f.name, v, err, rejected))
-                failed_values.setdefault(f.name, set()).add(v)
+                if err != N.FAX_REASON:  # nothing to fix: Suggest fixes must not turn a fax into a phone
+                    failed_values.setdefault(f.name, set()).add(v)
                 out = ""
                 statuses.append(CELL_REJECT if rejected else CELL_BLANKED)
             elif v in fixes:
@@ -580,18 +584,18 @@ def convert(
 
 def _expand_rows(records: list[dict[str, str]], blank: list[bool], f, mapping: Mapping,
                  overrides: dict[str, dict[str, str]], timezone: str | None
-                 ) -> tuple[list[int], list[str], dict[int, list[RowIssue]], dict]:
+                 ) -> tuple[list[int], list[str], dict[int, list[RowIssue]], dict, set[int]]:
     """Work out the rows for 'One row per phone number' on field f.
 
     Returns (source index per working row, the raw value each working row uses, early issues per working row,
-    the normalizer context) - details under "Returns" below.
+    the normalizer context, the working rows whose only number is labelled fax) - details under "Returns" below.
     A file row gets one row per different valid value (different after formatting, so 516-555-0100 and
     (516) 555-0100 count once). For a phone field, a cell holding several numbers is first split into one value
     per number (``normalizers.split_phones``), so "516-555-0100 / 917-555-1234" in one cell works exactly like two
-    phone columns. Invalid extra values are skipped and noted on the row. A number labelled fax is skipped the same
-    way when the row has another valid number (a fax line can't receive texts); when it is the row's only number it
-    is used. A file row with no valid value keeps one row with its first value (or blank), which is then rejected
-    the normal way.
+    phone columns. Invalid extra values are skipped and noted on the row. A number labelled fax is never imported (a
+    fax line can't receive texts): skipped the same way when the row has another valid number, and when it is the
+    row's only number the row is rejected with N.FAX_REASON (before 0.17.0 it was used). A file row with no valid
+    value keeps one row with its first value (or blank), which is then rejected the normal way.
 
     Inputs:
         records: every source row as {column: text}, in file order.
@@ -602,7 +606,7 @@ def _expand_rows(records: list[dict[str, str]], blank: list[bool], f, mapping: M
         timezone: stored in the normalizer context as ``ctx["tz"]``, like in :func:`convert` (only the date/time
                   normalizers read it).
 
-    Returns a 4-tuple (``src`` and ``raw`` are lists indexed by *working* row; ``early`` and ``ctx`` are dicts):
+    Returns a 5-tuple (``src`` and ``raw`` are lists indexed by *working* row; ``early`` and ``ctx`` are dicts):
         src: the source row index of each working row. Rows from one file row are contiguous and in file order,
              which is what :func:`convert` relies on to compute ``_extra``.
         raw: the raw value of field f for each working row: the first spelling of each different number, in
@@ -613,6 +617,8 @@ def _expand_rows(records: list[dict[str, str]], blank: list[bool], f, mapping: M
         ctx: the normalizer context built from the values of ALL the source columns together, e.g. the area
              codes the file uses (evidence for repairing typos). :func:`convert` reuses it, together with any
              ``ctx["repairs"]`` recorded here, when it converts field f.
+        fax_only: the working rows whose only valid number is labelled fax; :func:`convert` rejects them with
+                  ``N.FAX_REASON`` (their raw value is that number, so the rejects report shows it).
 
     Why validate here: deciding how many rows a file row becomes needs to know which values are valid and which
     are the same number written differently. The values are normalized again in :func:`convert` (same context
@@ -647,6 +653,7 @@ def _expand_rows(records: list[dict[str, str]], blank: list[bool], f, mapping: M
     src: list[int] = []
     raw: list[str] = []
     early: dict[int, list[RowIssue]] = {}
+    fax_only: set[int] = set()
     for k, vals in enumerate(per_row):
         good: dict[str, str] = {}  # formatted output → first raw value that produced it
         fax: dict[str, str] = {}  # the same, for valid numbers labelled fax
@@ -659,12 +666,15 @@ def _expand_rows(records: list[dict[str, str]], blank: list[bool], f, mapping: M
                 fax.setdefault(out.lower(), v)
             elif out.lower() not in good:
                 good[out.lower()] = v
-        # Fax numbers are the last choice: skipped when the row has another valid number (unless it is the same
-        # number), used when they are all the row has.
+        # Fax numbers are never imported: skipped when the row has another valid number (unless it is the same
+        # number); a row with nothing else is rejected (in convert, via fax_only).
         if good:
-            bad += [(v, "labelled as a fax number") for out, v in fax.items() if out not in good]
-        else:
-            good = fax
+            bad += [(v, N.FAX_REASON) for out, v in fax.items() if out not in good]
+        elif fax:
+            fax_only.add(len(src))
+            src.append(k)
+            raw.append(next(iter(fax.values())))
+            continue
         # No valid number (or no number at all, or a blank row): keep a single working row with the first value so
         # that convert() rejects it with the normal reason ("too few digits", "required value is missing"…).
         if not good:
@@ -680,7 +690,7 @@ def _expand_rows(records: list[dict[str, str]], blank: list[bool], f, mapping: M
         if bad:
             early[first] = [RowIssue(f.name, v, f"extra value skipped — {why}", rejected=False, skipped=True)
                             for v, why in bad]
-    return src, raw, early, ctx
+    return src, raw, early, ctx, fax_only
 
 
 def source_rows(source: pd.DataFrame, audit: pd.DataFrame) -> pd.DataFrame:
