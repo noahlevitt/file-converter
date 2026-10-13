@@ -172,17 +172,191 @@ def _sniff_delimiter(text: str, ext: str) -> str:
         return max(counts, key=counts.get) if any(counts.values()) else ","
 
 
-def _read_text_grid(data: bytes, ext: str) -> tuple[list[list[str]], str, str]:
-    """Parse a delimited text file into a raw grid; returns (rows of cell strings, encoding, delimiter).
+# A quoted cell may span lines (a multi-line address or note). A quote mark that is never closed makes the csv
+# reader join the following lines into that cell, silently: up to the next quote mark in the file, or to the end.
+# A multi-line cell is taken for such a stray quote when (see _quote_check)
+#   - it is still open at the end of the file;
+#   - it ends at a quote mark followed by more text (in a real cell the closing quote is followed by a delimiter
+#     or a line break; a stray quote "closes" at the opening quote of a later cell: `,"Smith, John"`), and its
+#     lines look like rows swallowed by it (see _rows_inside);
+#   - or it is still open after MAX_CELL_LINES further lines that look like rows (the same number of delimiters).
+# A cell that closes properly is kept, but gets a warning when it has 3+ lines that each look exactly like a row
+# (a stray quote closed by a `"` ditto mark or `55"` looks like that).
+MAX_CELL_LINES = 20
+# Cells of any size are allowed (the csv module's default of 128 KB ended in an error instead of the file).
+csv.field_size_limit(2**31 - 1)
+
+
+class _RunOn(Exception):
+    """Raised inside _lenient_grid's line feed to stop a cell that runs on into rows of the file."""
+
+
+def _row_like(lines: list[str], delimiter: str, n_sep: int) -> bool:
+    """True when at least 80% of `lines` have exactly `n_sep` delimiters, i.e. look like rows of the file."""
+    return bool(lines) and sum(ln.count(delimiter) == n_sep for ln in lines) >= 0.8 * len(lines)
+
+
+def _rows_inside(cont: list[str], delimiter: str, n_sep: int) -> bool:
+    """Whether the lines after the first line of a multi-line cell (`cont`) look like rows swallowed by a stray quote.
+
+    The lines fully inside the cell look like rows of the file (`n_sep` delimiters; up to MAX_CELL_LINES are
+    checked). A cell of two lines has none: then its last line must start like a row, with a delimiter (or
+    nothing) before the quote mark that ended the cell.
+        ["n10,5165500010,ok", 'n11,5165500011,"Smith, John"'] → True
+        ['n11,5165500011,"Smith, John"']                       → True
+        ["Apt 4", "Garden City NY 11530"]                       → False
+    """
+    inner, last = cont[:-1][:MAX_CELL_LINES], cont[-1].split('"')[0]
+    if inner:
+        return _row_like(inner, delimiter, n_sep)
+    return last.strip("\r\n") == "" or delimiter in last
+
+
+def _csv_error(record: str, delimiter: str) -> str | None:
+    """What the csv module's strict mode says is wrong with `record` (one row's text), or None when it is well formed.
+
+    "unexpected end of data": a quoted cell is still open at the end; "',' expected after '\"'": a quoted cell's
+    closing quote is followed by more text.
+    """
+    try:
+        for _ in csv.reader(io.StringIO(record, newline=""), delimiter=delimiter, strict=True):
+            pass
+    except csv.Error as e:
+        return str(e)
+    return None
+
+
+def _quote_check(record: list[str], delimiter: str, n_sep: int) -> str | None:
+    """Whether a row read over several lines (`record`, its lines) began at a quote mark that is never closed.
+
+    Returns "stray" when it did, "check" when it may have, None for an ordinary multi-line cell:
+    - "stray": the quoted cell is still open at the end of the file; or it ends at a quote followed by more text
+      (a stray quote "closes" at the opening quote of a later cell, as in `,"Smith, John"`) and its lines look like
+      rows it swallowed (:func:`_rows_inside`).
+    - "check": it ends properly, at a quote followed by a delimiter or line break, but has 3+ lines that each have
+      exactly as many delimiters as a row (2+): a stray quote closed by a `"` typed as a ditto mark or `55"` looks
+      like that, and so does, rarely, a real note with that many commas on every line. The row is kept as it is.
+    A row on one line is only a stray quote when it is still open at the end of the file.
+    """
+    why = _csv_error("".join(record), delimiter)
+    if why and "end of data" in why:
+        return "stray"
+    if len(record) < 2:
+        return None
+    if why:
+        return "stray" if _rows_inside(record[1:], delimiter, n_sep) else None
+    if n_sep >= 2 and len(record) >= 3 and all(ln.count(delimiter) == n_sep for ln in record):
+        return "check"
+    return None
+
+
+def _read_text_grid(data: bytes, ext: str) -> tuple[list[list[str]], str, str, list[str]]:
+    """Parse a delimited text file into a raw grid; returns (rows of cell strings, encoding, delimiter, warnings).
 
     Rows may have different lengths (ragged files); :func:`build_frame` pads them later. ``newline=""`` lets the
     csv module keep line breaks that are inside quoted cells (e.g. a multi-line address) in one cell.
+
+    A quote mark that is never closed (``x,516...,"VIP - comps dessert``) would join the following rows into one
+    cell, silently. When a multi-line cell may be one (it spans two lines, its lines look like rows of the file, or
+    it is in the last row), or the last line opens a quote, the file is read again (:func:`_lenient_grid`): such a
+    quote is read as a plain character, the rows after it come out as rows, and a warning names the row. Files
+    without multi-line cells are read once, as before.
     """
     text, encoding = _decode(data)
     delimiter = _sniff_delimiter(text, ext)
     reader = csv.reader(io.StringIO(text, newline=""), delimiter=delimiter)
     grid = [[c if c is not None else "" for c in row] for row in reader]
-    return grid, encoding, delimiter
+    # Only a file with more lines than rows has multi-line cells, so the cells are only searched then. The last row
+    # is checked too: a quote opened on the last line swallows the rest of that line (or file).
+    end = len(text)
+    while end and text[end - 1] in "\r\n":
+        end -= 1
+    last_line = text[text.rfind("\n", 0, end) + 1:end]
+    at_end = bool(grid) and (any("\n" in c or "\r" in c for c in grid[-1])
+                             or ('"' in last_line and "end of data" in (_csv_error(last_line, delimiter) or "")))
+    if text.count("\n") + (not text.endswith("\n")) <= len(grid) and not at_end:  # lines <= rows
+        return grid, encoding, delimiter, []
+    # Delimiters on the line of a row, as the lines inside a stray quote's cell are counted: from the rows that are
+    # one line long (the first 1,000), including delimiters inside their quoted cells ("Smith, John").
+    counts = Counter(len(r) - 1 + sum(c.count(delimiter) for c in r) for r in grid[:1000]
+                     if r and not any("\n" in c or "\r" in c for c in r))
+    n_sep = counts.most_common(1)[0][0] if counts else 0
+
+    def may_be_stray(cell: str) -> bool:
+        """A multi-line cell of two lines, or whose middle lines look like rows (its last line was cut where the
+        cell ended, so it can't be judged here)."""
+        cont = cell.split("\n")[1:]
+        return len(cont) == 1 or _row_like(cont[:-1][:MAX_CELL_LINES], delimiter, n_sep)
+
+    if not at_end and not any("\n" in c and may_be_stray(c) for row in grid for c in row):
+        return grid, encoding, delimiter, []
+    lenient, stray, check = _lenient_grid(text, delimiter, n_sep)
+
+    def rows(idx: list[int]) -> str:
+        """ "Row 5" / "Rows 5, 9 and 3 more" (file row numbers)."""
+        listed = ", ".join(str(r + 1) for r in idx[:5]) + (f" and {len(idx) - 5:,} more" if len(idx) > 5 else "")
+        return f"Row{'s' if len(idx) > 1 else ''} {listed}"
+
+    warnings = []
+    if stray:
+        warnings.append(f"{rows(stray)}: a quote mark (\") is never closed, which would have joined the rows after "
+                        "it into one cell. It was read as a plain character, so every row after it is read normally. "
+                        "Check that row.")
+    if check:
+        warnings.append(f"{rows(check)}: one cell holds several lines that each look like a row of the file. If "
+                        "customers are missing after it, a quote mark (\") there is never closed: fix it in the "
+                        "client's file.")
+    return (lenient if stray else grid), encoding, delimiter, warnings
+
+
+def _lenient_grid(text: str, delimiter: str, n_sep: int) -> tuple[list[list[str]], list[int], list[int]]:
+    """Read a delimited text like the csv module, but end a quoted cell that is really a quote never closed.
+
+    The csv reader is fed one line at a time. A row that began at a stray quote (:func:`_quote_check`, or still
+    open after MAX_CELL_LINES lines that look like rows of the file, `n_sep` delimiters each) is dropped; its first
+    line is read on its own with quote marks as plain characters, and reading continues with the next line.
+    Everything else is read exactly as the csv module reads it (a quote inside a cell, as in ``5" tall``, is an ordinary character
+    there too). Each stray quote costs at most MAX_CELL_LINES lines of extra reading.
+    Returns (grid, the grid row indexes read that way, row indexes of cells to check: see _quote_check).
+    """
+    lines = list(io.StringIO(text, newline=""))  # each line keeps its own line break (\n, \r\n or \r)
+    grid: list[list[str]] = []
+    stray: list[int] = []
+    check: list[int] = []
+    start = 0
+    while start < len(lines):
+        at = {"next": start, "first": start}  # next line to hand out; first line of the row being read
+
+        def feed():
+            while at["next"] < len(lines):
+                k = at["next"]
+                if k - at["first"] == MAX_CELL_LINES and _row_like(lines[at["first"] + 1:k + 1], delimiter, n_sep):
+                    raise _RunOn
+                at["next"] = k + 1
+                yield lines[k]
+
+        bad = None
+        try:
+            for row in csv.reader(feed(), delimiter=delimiter):
+                first, after = at["first"], at["next"]
+                kind = (_quote_check(lines[first:after], delimiter, n_sep)
+                        if after - first > 1 or after == len(lines) else None)
+                if kind == "stray":
+                    bad = first
+                    break
+                if kind == "check":
+                    check.append(len(grid))
+                grid.append([c if c is not None else "" for c in row])
+                at["first"] = after
+        except _RunOn:
+            bad = at["first"]
+        if bad is None:
+            break
+        stray.append(len(grid))
+        line = lines[bad].rstrip("\r\n")
+        grid.append(next(csv.reader([line], delimiter=delimiter, quoting=csv.QUOTE_NONE), []))
+        start = bad + 1
+    return grid, stray, check
 
 
 def list_sheets(data: bytes, ext: str) -> list[str]:
@@ -586,7 +760,8 @@ def read_file(
     spreadsheet: sheet choice) -> clean cells -> detect or apply the header row -> :func:`build_frame` ->
     warnings.
 
-    Warnings (``ReadResult.warnings``): rows with more values than header columns (text files only - usually an
+    Warnings (``ReadResult.warnings``): a quote mark that is never closed (text files; the rows after it are still
+    read, see :func:`_read_text_grid`), rows with more values than header columns (text files only - usually an
     unquoted comma such as ``Smith, John``), header found below the first row, no header row, detection unsure,
     a header row holding a phone number / email / date (likely a customer row, e.g. picked by hand), no data rows.
 
@@ -605,11 +780,12 @@ def read_file(
 
     result_kwargs: dict = {}
     if ext in TEXT_EXTENSIONS:
-        grid, encoding, delimiter = _read_text_grid(data, ext)
+        grid, encoding, delimiter, read_warnings = _read_text_grid(data, ext)
         result_kwargs.update(encoding=encoding, delimiter=delimiter)
         sheets: list[str] = []
         chosen_sheet = None
     else:
+        read_warnings = []
         sheets = list_sheets(data, ext)
         # The requested sheet if it exists, else the first one.
         chosen_sheet = sheet if sheet in sheets else (sheets[0] if sheets else None)
@@ -636,7 +812,7 @@ def read_file(
         raise ReadError(f"Header row {hr + 1} is past the end of the file ({len(cleaned)} rows).")
 
     df = build_frame(cleaned, hr)
-    warnings = []
+    warnings = list(read_warnings)  # e.g. a quote mark that is never closed (text files)
     if isinstance(hr, int) and ext in TEXT_EXTENSIONS:
         # Ragged rows: data rows with values past the number of named header columns. In a CSV that almost always
         # means a value with an unquoted delimiter, which shifts every later value of the row one column right.
