@@ -20,8 +20,9 @@ Modules
     * ``checks``      — rule-based mistake checks on a mapping/conversion.
     * ``ai``          — optional Claude assistant (mapping, notes, mistake review, value repairs).
     * ``services``    — orchestration shared by the web app and the CLI.
-    * ``storage``     — SQLite storage for users, templates and imports.
+    * ``storage``     — SQLite storage for users, templates, imports and the number history.
     * ``jobs``        — background import runner (thread pool, progress, cancellation, file retention).
+    * ``numberlog``   — number history: each import's numbers and consent values, kept after its files.
     * ``output``      — writing the converted file, rejected rows and summary.
     * ``compare`` / ``editor`` / ``ui_format`` — helpers for the web UI.
     * ``auth``        — Streamlit login gate.
@@ -32,4 +33,4 @@ Modules
 ``summary.txt``; bump it with each release.
 """
 
-__version__ = "0.20.0"
+__version__ = "0.21.0"
