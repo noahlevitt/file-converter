@@ -20,7 +20,7 @@ cp .env.example .env              # then edit: admin account, optional ANTHROPIC
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest -q            # everything (about 890 tests, about 30 seconds)
+.venv/bin/python -m pytest -q            # everything (about 960 tests, about 30 seconds)
 .venv/bin/python -m pytest -q tests/test_formats.py -k phone     # one area
 ```
 
@@ -46,6 +46,8 @@ The suite needs no network and no API key. Claude is replaced by fake clients. T
 | `test_column_edits.py` | Goes to / Skip edits, wrong-column warnings |
 | `test_mapping_ai_storage.py` | Auto-mapping, the Claude layer (faked), the grid editor, SQLite store (templates found despite punctuation differences; a similar template takes new phone columns), output |
 | `test_number_columns.py` | ID columns (*Account Number*, *Order #*…) never taken for the phone; a member number full of phones still used; *WhatsApp* is a phone header |
+| `test_area_code_column.py` | Phone + area code column: detection by header and values, full numbers kept, several columns and numbers per cell, empty or odd area code cells, column order, templates, the editor, side-by-side marking |
+| `test_number_history.py` | Number history: what an import records (imported rows only, consent cell from the file), lookup, kept after the file purge, `NUMBER_RECORD_DAYS`, backfill of earlier imports, a recording failure never fails the import |
 | `test_fax.py` | Fax numbers never imported: fax columns (rules, templates, Claude), a fax-only cell is a bad row, a person can still map one |
 | `test_sheets.py` | Which sheet is read: empty, hidden and chart sheets passed over with a warning; a chosen sheet always read |
 | `test_csv_quotes.py` | A CSV quote mark that is never closed costs one row (also two of them, near the end, Windows line ends, two columns); real multi-line cells kept; cells over 128 KB |
@@ -155,7 +157,8 @@ Add a test in `test_notes_checks.py`.
 ## Database changes
 
 `storage.py` creates tables with `CREATE TABLE IF NOT EXISTS` and has no migration framework. New data is easiest
-to add as a new table (like `user_prefs` in 0.10.0), which existing databases get automatically on the next start. Adding a column to
+to add as a new table (like `user_prefs` in 0.10.0 or `number_log` in 0.21.0), which existing databases get
+automatically on the next start. Adding a column to
 an existing table needs an explicit `ALTER TABLE` in `Store.__init__`, guarded so it runs once (check
 `PRAGMA table_info`). Import records store JSON snapshots (mapping, schema, summary), so new optional keys can be
 added there without a database change. Read them with `.get(...)` and a default, because old imports won't have
