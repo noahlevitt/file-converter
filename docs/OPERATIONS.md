@@ -134,6 +134,11 @@ data/drafts/<random id>/     a file still being mapped on New import, so a brows
 starts, and then at most once an hour when an import is started. The import record and its counts stay; its page says the files were deleted.
 Abandoned drafts (24 hours without changes) are deleted at the same moments and whenever a file is uploaded.
 
+**Memory and very large spreadsheets:** a sheet whose values span more cells than the computer's memory can hold
+is refused when it is uploaded ("This sheet is too big to read on this computer…"), instead of crashing the app.
+The limit follows the machine (80% of its memory, or of the container's memory limit when Docker sets one), so a
+server with more memory accepts bigger sheets.
+
 **Customer data:** uploaded files contain customers' phone numbers. Keep `data/` on an encrypted disk, restrict
 who can sign in, and set a retention period you are comfortable with.
 
