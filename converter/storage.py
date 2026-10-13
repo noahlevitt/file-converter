@@ -1030,11 +1030,12 @@ class Store:
 
     def number_history(self, phone: str, limit: int = 1000) -> list[dict[str, Any]]:
         """Every recorded row for this number (exactly as written to the import, e.g. "5165550177"), newest import
-        first, as dicts with the number_log columns. At most ``limit`` rows."""
+        first, as dicts with the number_log columns. Only completed imports (one cancelled or failed after its
+        numbers were recorded imported nothing). At most ``limit`` rows."""
         with self._conn() as con:
             rows = con.execute(
                 "SELECT n.import_id, n.file_row, n.phone_value, n.consent, n.consent_value FROM number_log n "
-                "JOIN imports i ON i.id = n.import_id WHERE n.phone=? "
+                "JOIN imports i ON i.id = n.import_id WHERE n.phone=? AND i.status='completed' "
                 "ORDER BY COALESCE(i.finished_at, i.created_at) DESC, n.import_id DESC, n.file_row LIMIT ?",
                 (phone, limit)).fetchall()
         return [dict(r) for r in rows]
