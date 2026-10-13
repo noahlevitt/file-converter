@@ -32,7 +32,7 @@ The suite needs no network and no API key. Claude is replaced by fake clients. T
 | Test module | Covers |
 |---|---|
 | `test_formats.py` | Hundreds of date, time and phone spellings against the real format, plus every rejection reason |
-| `test_phone_repair.py` | Phone typo repair (allowed repairs only; area codes never changed or filled in), ambiguity, tie-breaking, marking |
+| `test_phone_repair.py` | Phone typo repair (approved repairs only; real area codes never changed; area codes that don't exist and missing ones), ambiguity, tie-breaking, marking |
 | `test_multi_phone.py` | Several phone columns → one row per different number; phone-setting and texting-activity columns |
 | `test_activity_dates.py` | One last date per row: named, then generic, then creation date; call logs (and what doesn't make one); last_contacted only by hand; activity dates imported as written (1900, 1970, future); machine-format date columns mapped by name; named date + time pairs |
 | `test_manual_only.py` | Consent and last_contacted: filled only when a person maps them, never by rules, Claude or templates |
