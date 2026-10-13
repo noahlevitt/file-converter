@@ -3,6 +3,29 @@
 What changed in each version. The running version is shown in the app's sidebar. Each version is tagged in git
 (`vX.Y.Z`).
 
+## 0.16.0 — no ID columns as phones; stray quotes, template headers and multi-number cells fixed
+
+- **ID columns are never taken for the phone column because of their name.** *Account Number*, *Card Number*,
+  *Customer Number*, *Invoice Number*, *Ticket Number* look like "contact number" / "phone number" to the header
+  comparison, and ten-digit IDs are often valid phone numbers by chance: in a file whose real phone column couldn't
+  be used (7-digit numbers), the IDs became the phone numbers. Such a column is now only used when nearly all its
+  values are phone numbers (some loyalty systems use the phone as the member number). *WhatsApp* columns are now
+  recognised as phone columns.
+- **A quote mark that is never closed in a CSV costs one row, not the rest of the file.** `"VIP - comps dessert`
+  with no closing quote joined every later row into that cell: a 1,000-row file came out as 3 rows, with no
+  warning. Now the quote is read as an ordinary character, every row imports, and a warning names the row. Real
+  multi-line cells (addresses, notes) are kept, and a quote inside a cell (`5" tall`) is an ordinary character, as
+  in Excel. A cell over 128 KB no longer stops the file. Limits: KNOWN_ISSUES #30.
+- **Templates find their columns despite punctuation.** A template made on *Last Visit Date* matched a file with
+  *Last_Visit_Date* (templates ignore spaces and punctuation), but then lost that column, so its dates were
+  silently left out. Columns are now found the same way, when only one column of the file fits.
+- **Several numbers in one cell: none lost any more** in cells such as `516 555 0100 x12 917-555-1234`,
+  `1. 516-555-0100 2. 917-555-1234`, `+1 631 555 0199 1-718-555-0142 1-201-555-0111` (one number was dropped) and
+  `516.555.0100 917.555.1234` (both were rejected). Numbers in the usual North American shapes are now found
+  directly, and used only when that finds every number found before plus more. Nothing is guessed; run-together
+  digits and `516-555-0100/0101` stay as before.
+- All 406 test files give identical results.
+
 ## 0.15.3 — one odd cell can't stop a file; long notes no longer slow uploads
 
 - **One value never stops a file.** A garbage date such as `10/09/2026 12:1111…` used to stop the mapping page and
