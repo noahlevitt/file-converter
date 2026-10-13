@@ -32,7 +32,7 @@ from functools import lru_cache
 import usaddress
 from nameparser import HumanName
 
-from .normalizers import clean_text
+from .normalizers import clean_text, split_area_code, with_area_code
 
 
 @dataclass(frozen=True)
@@ -87,6 +87,12 @@ TRANSFORMS: dict[str, TransformInfo] = {
         TransformInfo("each_row", "One row per phone number", "Phone field only, and always used when it has "
                       "several columns (e.g. Phone, Phone 2, Phone 3): each different number gets its own output row, "
                       "with every other field copied from the original row.", 2, None, ("region",)),
+        # area_code: Area Code="516", Phone="555-0177" -> "(516) 555-0177"; numbers that already have an area code
+        # are kept. On the phone field the engine expands rows like each_row (engine._expand_rows).
+        TransformInfo("area_code", "Phone + area code column", "Phone field only: one column holds area codes (516) "
+                      "and the other column(s) phone numbers; a 7-digit number gets its row's area code, numbers "
+                      "that already have one are kept. Several phone columns give one row per number.", 2, None,
+                      ("region",)),
         # concat: join non-empty values, e.g. First="Ana", Last="Garcia" -> "Ana Garcia" (separator " " default).
         TransformInfo("concat", "Combine columns", "Join several columns with a separator (default a space).", 2, None,
                       ("separator",)),
@@ -222,6 +228,8 @@ def apply_transform(transform: str, row: dict[str, str], sources: list[str], par
         * copy:         "  Ana " -> "Ana" (if several sources are ever given, non-empty values are space-joined)
         * coalesce:     ["", "2024-01-15"] -> "2024-01-15" (first non-empty, in source order)
         * each_row:     same as coalesce here; engine._expand_rows creates the extra rows before this is used
+        * area_code:    ["516", "555-0177"] -> "(516) 555-0177" (first phone cell, with the row's area code; the
+                        engine expands rows for the phone field and applies the area code to every number)
         * concat:       ["516", "555-0100"] + separator "-" -> "516-555-0100"; empty values are skipped
         * name_part:    "SMITH, JOHN" + part "last" -> "SMITH" (default part "first")
         * address_part: "12 Main St Apt 4B, Hicksville, NY 11801" + part "city" -> "Hicksville" (default "line1")
@@ -236,6 +244,9 @@ def apply_transform(transform: str, row: dict[str, str], sources: list[str], par
         return " ".join(v for v in vals if v)
     if transform in ("coalesce", "each_row"):  # each_row: the engine expands rows; alone it acts like coalesce
         return next((v for v in vals if v), "")
+    if transform == "area_code":
+        area, phones = split_area_code(vals)
+        return with_area_code(next((vals[i] for i in phones if vals[i]), ""), area)
     if transform == "concat":
         # A missing separator means a space. (Mapping.normalized drops empty-string params via clean_params, so a
         # blank separator chosen in the UI also ends up as a space.)
