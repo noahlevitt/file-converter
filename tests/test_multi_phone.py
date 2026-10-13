@@ -114,3 +114,22 @@ def test_first_non_empty_cannot_be_picked_for_phones(real_schema):
     # one row per phone number on another field is turned into first non-empty
     other = Mapping(fields={"birthday": FieldMapping(sources=["a", "b"], transform="each_row")})
     assert other.normalized(real_schema, ["a", "b"]).get("birthday").transform == "coalesce"
+
+
+def test_texting_activity_columns_are_not_phone_columns(real_schema):
+    """Empty "Last SMS Received" / "SMS Last" / "Last Text Sent" columns are dates, not extra phone columns (0.17.0).
+
+    A phone word made them phone headers, and an empty phone header is kept for templates ("Phone 4"), so a file
+    in the import format itself (in_sms_last empty) had its in_sms_last column fed to the phone field.
+    """
+    for h in ["Last SMS Received", "SMS Last", "Last Text", "Last Text Sent", "in_sms_last", "Recent SMS",
+              "First Text Date", "Text Received Timestamp"]:
+        assert not is_phone_header(h), h
+        df = pd.DataFrame({"Phone": ["5165550100", "9175551234"], h: ["", ""]})
+        assert auto_map(real_schema, profile_columns(df)).get("phone_number").sources == ["Phone"], h
+    for h in ["Mobile", "Cell Phone", "Phone 4", "Text Number", "SMS Phone"]:
+        assert is_phone_header(h), h
+    # The import format's own file, read back in: only phone_number feeds the phone field.
+    df = pd.DataFrame({f.header: ["", ""] for f in real_schema.fields})
+    df["phone_number"] = ["5165550100", "9175551234"]
+    assert auto_map(real_schema, profile_columns(df)).get("phone_number").sources == ["phone_number"]
