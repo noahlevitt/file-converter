@@ -3,7 +3,7 @@
 Overview
 --------
 This module is the only code that reads or writes the application database (``DATA_DIR/converter.db``) and the
-per-import file folders next to it. It owns four tables:
+per-import file folders next to it. It owns five tables:
 
 * ``users``     -- login accounts: bcrypt password hash, admin flag, created / last-login timestamps.
 * ``templates`` -- saved column mappings. Each is stored with a *fingerprint* of the file's header row so a file
@@ -12,6 +12,8 @@ per-import file folders next to it. It owns four tables:
   (target schema, mapping, read options, approved value fixes), the live status / progress written by the
   background worker, and the final counts and summary.
 * ``user_prefs`` -- small per-user display preferences such as the light/dark ``theme`` (since 0.10.0).
+* ``number_log`` -- every number each import converted, with its consent value and file row (since 0.21.0), kept
+  after the import's files are deleted, for the Number history page (``converter.numberlog``).
 
 Main entry points
 -----------------
@@ -29,6 +31,8 @@ Data flow of an import
 3. A user can ``request_cancel``; the worker polls ``is_cancel_requested`` and stops at the next check.
 4. On server start ``mark_interrupted`` closes imports a previous process left ``queued`` / ``running``.
 5. ``purge_files`` is called periodically to delete the folders of old finished imports (file retention).
+6. ``log_numbers`` records the converted numbers just before ``complete_import`` (``numberlog.record``);
+   ``purge_number_log`` removes them after NUMBER_RECORD_DAYS (default: kept forever).
 
 Files and retention
 -------------------
@@ -135,6 +139,19 @@ from .mapping import Mapping, has_generic_columns, header_fingerprint, header_si
 #   key            preference name, e.g. "theme"
 #   value          preference value as text, e.g. "light" / "dark"
 #   updated_at     time of the last change
+#
+# number_log -- one row per number an import converted (0.21.0; a new table, so existing databases need no ALTER
+#   TABLE). It is kept after the import's files are deleted (FILE_RETENTION_DAYS), so the Number history page can
+#   say where a number and its consent came from months later; NUMBER_RECORD_DAYS limits how long (default forever).
+#   Written by numberlog.record when an import completes. The file name, who imported it and when, and the column
+#   the consent came from are read from the import's own row (import_id), which is never deleted.
+#   id             surrogate key
+#   phone          the number as written to the import (the phone field's output, e.g. 5165550177). Indexed.
+#   import_id      the import it came from (imports.id; not a foreign key). Indexed.
+#   file_row       the row in the client's file, numbered as Excel shows it
+#   phone_value    the phone cell as it was in the file ("(516) 555-0177", "Cell: 555-0177")
+#   consent        the consent value written to the import: "true", "false" or "" (no change)
+#   consent_value  the consent cell as it was in the file ("Y", "Opted in"); "" when consent wasn't mapped
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS users (
     username      TEXT PRIMARY KEY,
@@ -198,6 +215,17 @@ CREATE TABLE IF NOT EXISTS user_prefs (
     updated_at    TEXT NOT NULL,
     PRIMARY KEY (username, key)
 );
+CREATE TABLE IF NOT EXISTS number_log (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    phone         TEXT NOT NULL,
+    import_id     INTEGER NOT NULL,
+    file_row      INTEGER,
+    phone_value   TEXT NOT NULL DEFAULT '',
+    consent       TEXT NOT NULL DEFAULT '',
+    consent_value TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_number_log_phone ON number_log(phone);
+CREATE INDEX IF NOT EXISTS idx_number_log_import ON number_log(import_id);
 """
 
 
@@ -987,3 +1015,57 @@ class Store:
                 shutil.rmtree(self.files_root / str(r["id"]), ignore_errors=True)
                 con.execute("UPDATE imports SET files_purged=1 WHERE id=?", (r["id"],))
             return len(rows)
+
+    # ------------------------------------------------------------------ number history (number_log)
+
+    def log_numbers(self, import_id: int, rows: list[tuple[str, int | None, str, str, str]]) -> int:
+        """Record the numbers an import converted: ``rows`` of (phone, file_row, phone_value, consent,
+        consent_value), see the number_log table. Replaces what was recorded for this import before, so recording
+        twice (a backfill after a crash) never doubles it. Returns the number of rows written."""
+        with self._conn() as con:
+            con.execute("DELETE FROM number_log WHERE import_id=?", (import_id,))
+            con.executemany("INSERT INTO number_log (phone, import_id, file_row, phone_value, consent, consent_value) "
+                            "VALUES (?,?,?,?,?,?)", ((r[0], import_id, *r[1:]) for r in rows))
+        return len(rows)
+
+    def number_history(self, phone: str, limit: int = 1000) -> list[dict[str, Any]]:
+        """Every recorded row for this number (exactly as written to the import, e.g. "5165550177"), newest import
+        first, as dicts with the number_log columns. At most ``limit`` rows."""
+        with self._conn() as con:
+            rows = con.execute(
+                "SELECT n.import_id, n.file_row, n.phone_value, n.consent, n.consent_value FROM number_log n "
+                "JOIN imports i ON i.id = n.import_id WHERE n.phone=? "
+                "ORDER BY COALESCE(i.finished_at, i.created_at) DESC, n.import_id DESC, n.file_row LIMIT ?",
+                (phone, limit)).fetchall()
+        return [dict(r) for r in rows]
+
+    def numbers_logged(self, import_id: int) -> int:
+        """How many numbers are recorded for an import (0 before 0.21.0, or after NUMBER_RECORD_DAYS)."""
+        with self._conn() as con:
+            return con.execute("SELECT COUNT(*) FROM number_log WHERE import_id=?", (import_id,)).fetchone()[0]
+
+    def imports_to_log(self, finished_since: str | None = None) -> list[int]:
+        """Ids of completed imports that converted numbers, still have their files, and have nothing recorded in
+        number_log (imports from before 0.21.0): what numberlog.backfill records. ``finished_since`` (an ISO time
+        as written by _now) leaves out older imports, so records removed after NUMBER_RECORD_DAYS don't come back.
+        """
+        sql = ("SELECT id FROM imports i WHERE status='completed' AND files_purged=0 AND COALESCE(imported, 0) > 0 "
+               "AND NOT EXISTS (SELECT 1 FROM number_log n WHERE n.import_id = i.id)")
+        args: tuple = ()
+        if finished_since:
+            sql += " AND finished_at >= ?"
+            args = (finished_since,)
+        with self._conn() as con:
+            return [r["id"] for r in con.execute(sql + " ORDER BY id", args).fetchall()]
+
+    def purge_number_log(self, older_than_days: int) -> int:
+        """Delete the recorded numbers of imports that finished more than N days ago (``NUMBER_RECORD_DAYS``; 0 or
+        less keeps them forever). The import rows themselves stay, like with purge_files. Returns the rows deleted.
+        """
+        if older_than_days <= 0:
+            return 0
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=older_than_days)).isoformat(timespec="seconds")
+        with self._conn() as con:
+            cur = con.execute("DELETE FROM number_log WHERE import_id IN (SELECT id FROM imports "
+                              "WHERE COALESCE(finished_at, created_at) < ?)", (cutoff,))
+            return cur.rowcount
