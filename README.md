@@ -383,6 +383,12 @@ Notes are useful without Claude too: they're saved with the template and the imp
 - `data/imports/<id>/`: the original upload, the converted file, rejected rows, summary, and the comparison
   data behind the side-by-side view. These contain customer data and are **deleted automatically after
   `FILE_RETENTION_DAYS` (default 30)**; the import record and counts stay. Set `0` to keep them forever.
+- `data/drafts/<random id>/`: a file still being mapped on *New import* and the mapping so far, so a browser
+  refresh doesn't lose the work. Deleted on *Start import*, *Start over* or another upload, and after 24 hours
+  without changes.
+- The rejected-rows file repeats the client's original values. A value that a spreadsheet would run as a formula
+  (starting with `=`, `+`, `-` or `@`, e.g. `=HYPERLINK(…)`) gets a leading apostrophe there, so opening the file
+  in Excel never runs anything. Plain numbers and dashes are left as they are.
 - Back up `data/` to keep templates and history.
 
 ## Settings (`.env`)
@@ -458,8 +464,10 @@ for conventions and how to make common changes.
 
 - Phone validation confirms a number is a real, dialable US number; it cannot tell mobile from landline.
   That needs a carrier lookup (e.g. Twilio Lookup, paid per number) and can be added as an optional step.
-- Refreshing the browser tab signs the user out and clears a mapping in progress on *New import*. Imports
-  already started keep running and stay visible under *Imports*.
+- Refreshing the browser tab keeps a mapping in progress on *New import* (since 0.15.0: the file, how it was
+  read and every mapping choice come back). Claude's answers still waiting for *Accept* aren't kept, and with
+  logins on (`AUTH_MODE=password`) a refresh signs the user out first. Imports already started keep running and
+  stay visible under *Imports*.
 - Imports run inside the web server process. If the server restarts mid-import, that import is marked
   *Interrupted* and can be re-run with one click.
 - Throughput measured in testing: about 150,000 rows in 25 seconds for a 6-column file on one worker.
