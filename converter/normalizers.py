@@ -55,10 +55,14 @@ Phone rules (real target: 10 US digits, "(516) 555-0100" → "5165550100"), in t
      another country is rejected with where it's from: "not a US number — Canada (area code 514, Quebec)".
   8. Typo repair (_repair_phone, US region only) when exactly one US number fits: a foreign country code in
      front of a US number, one digit too many, an area code that doesn't exist one keystroke from an area code the
-     file uses, or a missing area code when 80%+ of the file shares one (the last two restored in 0.20.0). A real
-     area code is never changed. Every repair is recorded in ctx["repairs"] so it can be checked.
+     file uses, or a missing area code when 80%+ of the file shares one (the last two restored in 0.20.0; the
+     last also for "+1 555-0177" since 0.21.2). A real area code is never changed. Every repair is recorded in
+     ctx["repairs"] so it can be checked.
   9. Anything else is rejected with the most specific reason found (too few/many digits, area code not in
      use, exchange not in use, ...).
+Before any of this, a "Phone + area code column" mapping (0.21.0) puts the row's area code in front of a number
+without one (with_area_code: "555-0177" + "516" → "(516) 555-0177"; also "555-O177", "5550177.0", "+1 555-0177");
+area_code_cell reads an area code cell ("516", "(516)", "1-516").
 
 Date rules (the text parsing itself is dateparse.py; its docstring lists every supported format):
   - Ambiguous numeric dates are month-first (US) unless the column clearly is day-first or the mapping sets
@@ -697,10 +701,12 @@ def with_area_code(phone: str, area: str) -> str:
 def split_area_code(values: list[str], at: int | None = None) -> tuple[str, list[int]]:
     """For one row of a "Phone + area code column" mapping: (the row's area code, positions of the phone cells).
 
-    `at` is the position of the area code column (the engine picks it once for the whole file); every other cell
-    is a phone cell. A cell of the area code column that isn't an area code ("", "N/A", "000") isn't a phone number
-    either, unless it holds a whole one (7+ digits typed into the wrong column). With `at` None the area code is
-    the first cell that is one, whichever column it is in, so the order of the columns doesn't matter:
+    Used by transforms.apply_transform, which sees one row at a time; the engine instead pairs each phone column
+    with its own area code column once for the whole file (mapping.area_code_pairs). `at` is the position of the
+    area code column; every other cell is a phone cell. A cell of the area code column that isn't an area code
+    ("", "N/A", "000") isn't a phone number either, unless it holds a whole one (7+ digits typed into the wrong
+    column). With `at` None the area code is the first cell that is one, whichever column it is in, so the order
+    of the columns doesn't matter:
         ["516", "555-0177"] → ("516", [1]);  ["555-0177", "516"] → ("516", [0]);  ["", "555-0177"] → ("", [0, 1])
         ["N/A", "555-0177"], at=0 → ("", [1]);  ["516-555-0177", ""], at=0 → ("", [0, 1])
     """
