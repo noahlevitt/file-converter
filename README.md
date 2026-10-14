@@ -439,7 +439,8 @@ Notes are useful without Claude too: they're saved with the template and the imp
 - Columns mixing month-first and day-first dates.
 - Times that carried a zone and were converted.
 - One column used for several fields.
-- A high bad-row rate and its top reason, including 7-digit phones (area code in another column?).
+- A high bad-row rate and its top reason, including 7-digit phones (pointing to *Phone + area code column* when
+  the area code is in its own column).
 - Many exact duplicates.
 - Unused columns that contain dates or phone numbers.
 - Consent-type columns, noted as not imported unless you map them to consent yourself.
