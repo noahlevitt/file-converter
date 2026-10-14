@@ -23,7 +23,8 @@ Data flow
     :func:`apply_column_edit` -> new ``Mapping`` (the input mapping is never modified) -> grid is redrawn.
 
 Every edit marks the touched fields as the reviewer's choice (``origin="user"``, reason "set by reviewer").
-Phone fields follow the "several phone columns -> one row per number" rule (see ``mapping.phone_rule``).
+Phone fields follow the "several phone columns -> one row per number" rule (see ``mapping.phone_rule``); an area
+code column added to the phone field makes it 'Phone + area code column'.
 """
 
 from __future__ import annotations
