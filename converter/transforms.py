@@ -89,9 +89,10 @@ TRANSFORMS: dict[str, TransformInfo] = {
                       "with every other field copied from the original row.", 2, None, ("region",)),
         # area_code: Area Code="516", Phone="555-0177" -> "(516) 555-0177"; numbers that already have an area code
         # are kept. On the phone field the engine expands rows like each_row (engine._expand_rows).
-        TransformInfo("area_code", "Phone + area code column", "Phone field only: one column holds area codes (516) "
+        TransformInfo("area_code", "Phone + area code column", "Phone field only: a column holds area codes (516) "
                       "and the other column(s) phone numbers; a 7-digit number gets its row's area code, numbers "
-                      "that already have one are kept. Several phone columns give one row per number.", 2, None,
+                      "that already have one are kept. With several area code columns each phone column uses its "
+                      "own (Home Phone ← Home Area Code). Several phone columns give one row per number.", 2, None,
                       ("region",)),
         # concat: join non-empty values, e.g. First="Ana", Last="Garcia" -> "Ana Garcia" (separator " " default).
         TransformInfo("concat", "Combine columns", "Join several columns with a separator (default a space).", 2, None,
