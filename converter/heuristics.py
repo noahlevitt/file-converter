@@ -14,8 +14,9 @@ Responsibilities
     * Recognise columns that must be treated specially: consent / opt-in columns (never mapped,
       :func:`is_consent_column`) and phone columns vs. columns that only describe a phone
       (:func:`is_phone_header`, :func:`enough_evidence`).
-    * Build the mapping in :func:`auto_map` in six ordered steps (direct matches, phone columns, email by
-      values, full-name split, full-address split, birthday/anniversary split over month/day columns).
+    * Build the mapping in :func:`auto_map` in ordered steps (direct matches, phone columns, area code columns
+      next to 7-digit numbers, email by values, full-name split, full-address split, birthday/anniversary split
+      over month/day columns).
 
 Main entry points
     * :func:`auto_map` - used by ``services.initial_mapping``.
@@ -23,8 +24,9 @@ Main entry points
       ``checks.py`` to warn about values that were typed into the wrong column.
 
 Data flow
-    ``reader.read_file`` -> DataFrame -> ``mapping.profile_columns`` -> ``auto_map(schema, profiles)``
-    -> ``Mapping`` -> ``Mapping.normalized(...)`` -> (template / Claude / reviewer edits) -> ``engine.convert``.
+    ``reader.read_file`` -> DataFrame -> ``mapping.profile_columns`` -> ``auto_map(schema, profiles, df)`` (the
+    DataFrame only for area code columns) -> ``Mapping`` -> ``Mapping.normalized(...)`` -> (template / Claude /
+    reviewer edits) -> ``engine.convert``.
 
 Every rule-made :class:`~converter.mapping.FieldMapping` gets ``origin="rule"``, a confidence
 (high / medium / low) and a human-readable ``reason`` that the review grid shows next to the field.
