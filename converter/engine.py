@@ -37,10 +37,11 @@ Data flow inside :func:`convert`
 1. Normalize the mapping against the file (unknown fields/columns dropped, every schema field present) and turn
    every cell into text. A row whose cells are all empty is an "empty" row: it is skipped, never rejected.
 2. Expand the rows for the phone field (:func:`_expand_rows`; the field comes from ``Mapping.row_field``: the one
-   using ``each_row`` / 'One row per phone number', else a phone field copied from one column): a file row with
-   several *different* valid phone numbers - in separate columns or several in one cell - becomes one working row
-   per number, every other field copied. From here on the engine works on "working rows"; ``src`` maps each
-   working row back to its file row.
+   using ``each_row`` / 'One row per phone number', else a phone field copied from one column or using 'Phone +
+   area code column', where each 7-digit number first gets its row's area code from its own area code column,
+   ``mapping.area_code_pairs``): a file row with several *different* valid phone numbers - in separate columns or
+   several in one cell - becomes one working row per number, every other field copied. From here on the engine
+   works on "working rows"; ``src`` maps each working row back to its file row.
 3. Field by field (column-at-a-time, so each normalizer can first look at the whole column via ``N.prepare`` -
    e.g. to detect day-first dates or the file's common area codes): run the transform to get the raw value, then
    normalize/validate it, and record the output value, the raw value and a cell status. Identical raw values are
