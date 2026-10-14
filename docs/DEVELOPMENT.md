@@ -149,10 +149,26 @@ Add a test in `test_notes_checks.py`.
   making the change.
 - **Release steps:**
   1. Run the tests.
-  2. Bump `__version__` and update `docs/CHANGELOG.md`.
-  3. Commit, then tag: `git tag vX.Y.Z`.
-  4. `git push origin main --tags`.
-  5. Deploy as described in [OPERATIONS.md](OPERATIONS.md#updating).
+  2. Run the regression check against the previous version (below); every difference must be intended.
+  3. Bump `__version__` and update `docs/CHANGELOG.md`.
+  4. Commit, then tag: `git tag vX.Y.Z`.
+  5. `git push origin main --tags`.
+  6. Deploy as described in [OPERATIONS.md](OPERATIONS.md#updating).
+
+  The working rules for this repository (commit identity, delivery as git bundles, the checks, the business's
+  decisions and open items) are in [HANDOFF.md](HANDOFF.md).
+
+## Regression check
+
+```bash
+python scripts/regression/regression.py check v0.21.2      # this working tree vs. that version
+```
+
+Converts 406 files (400 generated exports in `scripts/regression/corpus.zip` plus `sample_data/`) with the tagged
+version, in a temporary `git worktree`, and with the working tree; rules only, no Claude. It compares, per file,
+the columns read, the mapping, the converted file (as a hash), the counts and the bad-row reasons, and prints
+`identical` or one line per difference (exit code 1). About 15 seconds. `run out.json` and `compare a.json
+b.json` do the two halves separately. The corpus holds generated data only; never add a client's file to it.
 
 ## Database changes
 
