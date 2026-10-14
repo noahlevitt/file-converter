@@ -9,7 +9,9 @@ imported it and when, and which column the consent came from are read from the i
 The Number history page looks a number up with :func:`lookup`.
 
 Kept for NUMBER_RECORD_DAYS (default 0 = forever; ``Store.purge_number_log``). Imports completed before 0.21.0
-whose files still exist are recorded once by :func:`backfill` when the server starts.
+whose files still exist are recorded once by :func:`backfill` when the server starts. Only completed imports are
+listed: one that ends cancelled or failed after its numbers were recorded has them removed again
+(``jobs._forget_numbers``, 0.21.1).
 
 Example: import #12 of "guests.xlsx" mapped consent from "SMS Opt In" (Y=true; N=false); row 17 had
 "(516) 555-0177" and "Y". ``lookup(store, "516-555-0177", schema)`` then gives one entry: number 5165550177,
