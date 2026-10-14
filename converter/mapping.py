@@ -14,6 +14,9 @@ Responsibilities
       wrong number of source columns, two "one row per phone number" fields).
     * **Row field** - :meth:`Mapping.row_field` names the phone field whose different numbers each get their own
       output row (from several columns, or several numbers in one cell).
+    * **Area code columns** (0.21.0) - :func:`is_area_code_header` recognises an "Area Code" column and
+      :func:`area_code_pairs` says which area code column each phone column of a 'Phone + area code column'
+      mapping uses ("Home Phone" ← "Home Area Code").
     * **Header fingerprints** - :func:`header_fingerprint` / :func:`header_similarity` recognise a file layout
       seen before, so a saved template can be reused (``storage.Store.find_template``).
     * **Column profiling** - :func:`profile_columns` summarises each source column (fill counts, samples, share
