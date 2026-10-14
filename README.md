@@ -18,6 +18,7 @@ http://localhost:8501. There is no login for now (see [Logins](#logins)). **Test
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | whoever runs it | running locally, Docker, a server with HTTPS, users, backups, updates, troubleshooting |
 | [docs/CHANGELOG.md](docs/CHANGELOG.md) | everyone | what changed in each version |
 | [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md) | developers | limits and quirks worth knowing before changing code |
+| [docs/HANDOFF.md](docs/HANDOFF.md) | whoever continues the work (or starts a project from it) | how changes are made, checked and delivered, the business's decisions, open items, starting a new project from this code |
 
 Every source file also starts with an overview, and every function has a docstring explaining what it does and why.
 
@@ -532,9 +533,11 @@ converter/
   editor.py             mapping-grid helpers
   cli.py                command line
 schemas/target_schema.yaml   the target import format (generic import format)
-scripts/                     make_sample_files.py (test data), manage_users.py (logins from the command line)
+scripts/                     make_sample_files.py (test data), manage_users.py (logins from the command line),
+                             regression/ (406-file before/after check run before every release)
 tests/                       pytest suite; tests/fixtures/ has the example contact schema used by generic tests
-docs/                        user guide, architecture, stack, development, operations, changelog, known issues
+docs/                        user guide, architecture, stack, development, operations, changelog, known issues,
+                             handoff
 ```
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how these fit together and [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)
