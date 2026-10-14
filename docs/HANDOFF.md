@@ -68,8 +68,8 @@ changed source file. A pass that only updates documents changes no code: compare
 their docstrings removed before and after.
 
 **Delivery** (when the changes can't be pushed directly)
-- Changes go to Noah as a git bundle, `file-converter-updateN.bundle`. The last one was update28, so the next is
-  `file-converter-update29.bundle`.
+- Changes go to Noah as a git bundle, `file-converter-updateN.bundle`, numbered in order. This file came with
+  update29, so the next is `file-converter-update30.bundle`; update this line with each bundle.
 
   ```bash
   tags=$(git tag --list 'v0.*' | sort -V | awk -F. '$2>=6')
