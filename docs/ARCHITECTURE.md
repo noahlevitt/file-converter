@@ -90,6 +90,7 @@ All business logic is in `converter/`. Only `app.py` and `converter/auth.py` imp
 | `converter/ui_format.py` | Small display helpers (sizes, durations, time left, status colours). |
 | `scripts/make_sample_files.py` | Generates the messy sample files used by the tests and for trying the app. |
 | `scripts/manage_users.py` | Add users, reset passwords, delete and list users from the command line. |
+| `scripts/regression/regression.py` | The before/after check run before every release: converts 406 files (`corpus.zip` + `sample_data/`) with an earlier version and with the working tree, and lists every difference. |
 
 ## Main data structures
 
