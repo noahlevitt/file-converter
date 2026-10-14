@@ -211,7 +211,8 @@ were cancelled or failed aren't listed.
   - a country code typed in front of a US number is removed (`+44 516 555 0100`);
   - an area code that doesn't exist anywhere and is one keystroke from an area code the file uses is read as that
     one (`(156) 555-0199` in a 516 file → 516-555-0199);
-  - a number without an area code (7 digits) gets the area code of 80%+ of the file's numbers.
+  - a number without an area code (7 digits, also `+1 555-0177`) gets the area code of 80%+ of the file's
+    numbers (when the file has no area code column for it).
 
   Every repair is imported **and shown in orange**. Check them: a wrong guess texts a stranger.
 - **A real area code is never changed.** `514…` in a file of `516` numbers is a bad row (514 is Quebec), and a
@@ -230,7 +231,8 @@ were cancelled or failed aren't listed.
     number, a bad row when it is their only one;
   - numbers on separate lines of one cell, numbered (`1. … 2. …`) or with an extension on the first
     (`516 555 0100 x12 917-555-1234`) are each found;
-  - the mapping page says how many cells hold several numbers, and in *Side by side* the number each row came
+  - the mapping page says how many cells hold several numbers (and, with an area code column, which area code
+    column each phone column uses), and in *Side by side* the number each row came
     from is underlined.
 - **Columns about a phone** (`phone4MarketingPreference`, Phone Type, SMS Opt In) or texting activity (*Last SMS
   Received*, *Last Text Sent*) are never treated as numbers.
@@ -303,8 +305,9 @@ not Claude, not a default and not a saved template (templates leave them out, so
   - a template is applied automatically to files with exactly the same columns, in any order or capitalisation,
     with or without spaces and punctuation (`Last Visit Date` = `Last_Visit_Date`);
   - a similar layout (75%+ of the same columns) starts from that template's rules, and a phone column that is new
-    since the template was saved (e.g. *Mobile*) is added to the phone field. A phone column the template's file
-    already had and the template leaves out stays out.
+    since the template was saved (e.g. *Mobile*) is added to the phone field; so is a new *Area Code* column, which
+    then gives the 7-digit numbers their area code. A phone column the template's file already had and the
+    template leaves out stays out.
 - **Target format:** a read-only description of every field of the import format and its rules, how long the
   files are kept and how long the number history is kept.
 - **Users** (administrators only, and only while logins are on): add users, reset passwords, make or remove
