@@ -5,7 +5,7 @@ other documents don't: how changes are made and delivered, the decisions the bus
 open. It also explains how to start a separate project from this code while this one keeps being updated.
 
 **State:** version 0.21.2 (see [CHANGELOG.md](CHANGELOG.md)), about 1,000 tests. Repository:
-github.com/noahlevitt/file-converter. Owner: Noah Levitt. Last updated 2026-10-14. Update this file with every
+github.com/noahlevitt/file-converter. Owner: Noah Levitt. Last updated 2026-10-16. Update this file with every
 release (section 4 in particular).
 
 What the tool does, and how, is in the [README](../README.md) and the documents it lists. Read
@@ -69,7 +69,7 @@ their docstrings removed before and after.
 
 **Delivery** (when the changes can't be pushed directly)
 - Changes go to Noah as a git bundle, `file-converter-updateN.bundle`, numbered in order. This file came with
-  update29, so the next is `file-converter-update30.bundle`; update this line with each bundle.
+  update30, so the next is `file-converter-update31.bundle`; update this line with each bundle.
 
   ```bash
   tags=$(git tag --list 'v0.*' | sort -V | awk -F. '$2>=6')
@@ -90,8 +90,8 @@ their docstrings removed before and after.
   git push origin main --tags
   ./run_local.sh
   ```
-- The claude.ai project "Noah" keeps a copy of the README (`claude/file-converter-README.md`); replace it after
-  each release.
+- The claude.ai project "Noah" keeps copies of the README and of this file (`claude/file-converter-README.md`,
+  `claude/file-converter-HANDOFF.md`); replace them whenever they change.
 
 ## 2. Decisions the business made (this project)
 
@@ -124,15 +124,37 @@ Each of these was decided by Noah. Don't reverse one without asking; for a new p
   area code, like `555-0177`. Noah has not confirmed it. To undo: in `normalizers._repair_phone`, rule 4, use
   `digits` instead of `seven`, and update the README's repair table, the changelog and the test
   `test_country_code_and_7_digits_get_the_files_main_area_code`.
+- **The two mapping tables on New import jump back to their first row after every edit** (the field grid and
+  *Columns in your file*; reported and fixed in Customer Records 1.0.2, not yet here). Their diagnosis: each edit
+  gives the table a new key, so a table scrolled inside itself loses its place. Their fix: `height="content"` on both
+  `st.data_editor` calls in `app.py` (the tables then grow to their full length and the page scrolls instead),
+  checked by their `tests/test_mapping_tables.py`. A code change: it needs a version (patch) and its own check.
 - **Not approved or not done** from the 25-item bug review: #1, #2, #5, #22, #23, #24, #25 (and #19–#21, status
   unknown). From the feature list: #2–#10. The descriptions of these items were only in the chat where they were
   made and were not kept; ask Noah for them, and record them here.
 - Limits that are known and accepted: [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
 
-## 5. Starting a new project from this code
+## 5. Projects built from this code
 
-This project keeps being updated, so start the new one **with this one's history**. Fixes made here can then be
-merged into it.
+**Customer Records** (github.com/noahlevitt/data-warehouse, started 2026-10-14) stores every imported row as a
+searchable record per business and service, and collects found records into tags of unique phone numbers. It runs
+this project's engine in its `converter/` folder, next to this app (it uses port 8502; this one keeps 8501).
+
+- **Its own history.** It started with this repository's files as of commit `57b8c9c` (0.21.2 and the regression
+  check), not with this history, so changes don't flow by `git merge` or `git cherry-pick`. It takes this
+  project's fixes **as patches**; the commands, and the last converter commit it took, are in its
+  `docs/HANDOFF.md`, section 5.
+- **After each release here,** decide whether Customer Records needs the change (anything in reading files, dates,
+  phone numbers, mapping or the engine usually does) and say so when delivering it.
+- **Its copy of the engine has small additions** that this project doesn't have: `schema.py` (`creation_date`,
+  `header_words` / `header_not_words`), `heuristics.py` (two rules that only act on those attributes) and
+  `jobs.py` (a `sink` that replaces the number history). They don't change this project's results. A change here
+  to those three files will need care when it is applied there. Its `docs/ARCHITECTURE.md` lists them.
+- **Fixes found there that apply here** are listed in section 4 (the mapping tables jumping to their first row).
+- Its decisions (section 2 of its handoff) are its own; the ones here don't apply to it unless confirmed there.
+
+**Starting another project from this code:** either the same way (copy the files into a new repository and take
+fixes as patches, as Customer Records does), or clone this repository with its history so fixes can be merged:
 
 ```bash
 git clone https://github.com/noahlevitt/file-converter.git NEW-PROJECT
@@ -142,12 +164,9 @@ git remote add origin https://github.com/noahlevitt/NEW-REPO.git
 git push -u origin main
 ```
 
-- Push only the new project's own tags (`git push origin v1.0.0`), not `--tags`: the clone also holds this
-  project's tags (v0.6.0 … v0.21.2), which mean nothing in the new one. Give the new project its own version
-  line and changelog, and start its changelog with the base: "Based on file-converter 0.21.2".
-- Taking later changes from this project: `git fetch upstream`, then `git merge upstream/main` for everything, or
-  `git cherry-pick <commit>` for one fix. One commit per file (section 1) keeps cherry-picks small. Expect
-  conflicts where the new project changed the same files.
+Then take later changes with `git fetch upstream` and `git merge upstream/main` (or `git cherry-pick <commit>`),
+and push only the new project's own tags (`git push origin v1.0.0`): `--tags` would also push this project's.
+Either way:
 - What carries over as it is: reading files (`reader`, `sheetsize`, `sheeterrors`), dates (`dateparse`), value
   cleaning (`normalizers`), the engine, transforms, mappings and templates, background imports, the comparison
   view, storage and the web app. The engine reads its rules from the schema:
@@ -156,10 +175,8 @@ git push -u origin main
   consent and last_contacted); the auto-mapping rules in `converter/heuristics.py` (which date goes to
   transactions_last or calls_last, birthday/anniversary splits, consent columns); the number history (built
   around a phone field and a field named consent); and the tests that use `real_schema`.
-- The decisions in section 2 belong to this project. Confirm each one for the new project instead of assuming
-  it, and keep the "approve guessing features one by one" rule unless told otherwise.
-- Give the new project its own copy of this file, rewritten for it, and its own claude.ai project, so the two
-  don't mix.
+- Confirm each decision in section 2 for the new project instead of assuming it.
+- Give it its own handoff, changelog and claude.ai project, and add it to this section.
 
 ## 6. Where things live
 
