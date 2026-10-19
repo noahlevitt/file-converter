@@ -77,7 +77,8 @@ from converter.editor import (FROM_LABEL, LABELS, OPTION_HELP, apply_column_edit
                               row_problem)
 from converter.engine import convert, count_multi_number_cells, preview_values, source_rows
 from converter.jobs import ImportRunner
-from converter.mapping import Mapping, area_code_pairs, has_generic_columns, profile_columns
+from converter.mapping import (OPT_OUT_CHOICES, Mapping, area_code_pairs, has_generic_columns, opt_out_problem,
+                               opt_out_setting, profile_columns)
 from converter.numberlog import lookup as number_lookup
 from converter.normalizers import sheet_error
 from converter.output import neutralise_csv
@@ -566,6 +567,32 @@ def on_map_edit(key: str) -> None:
     ss.editor_version += 1
 
 
+# The consent choice under the field grid (fields with opt_out_choice), as the reviewer reads it.
+OPT_OUT_LABELS = {
+    "skip": "Opt-ins only — yes subscribes; no is left blank and unsubscribes nobody (e.g. an email opt-in column: "
+            "not opting into email isn't opting out of texts)",
+    "import": "Opt-ins and opt-outs — yes subscribes; no opts the customer out of texts (only for a column that "
+              "records text opt-outs)",
+}
+
+
+def on_opt_out_choice(field_name: str, key: str) -> None:
+    """on_change callback of the consent choice under the field grid: store it in the field's params.
+
+    "skip" = opt-ins only (false values left blank), "import" = opt-ins and opt-outs (false values written); see
+    mapping.OPT_OUT_CHOICES. Until one is chosen, Mapping.problems blocks Start import. The widget key includes the
+    current choice, so after this the radio is rebuilt from the mapping.
+    """
+    choice = ss.get(key)
+    mapping: Mapping = ss.mapping
+    fm = mapping.get(field_name).model_copy(deep=True)
+    if choice in OPT_OUT_CHOICES:
+        fm.params["opt_outs"] = choice
+    else:
+        fm.params.pop("opt_outs", None)
+    ss.mapping = mapping.model_copy(update={"fields": {**mapping.fields, field_name: fm}})
+
+
 def mapping_diff(sch: TargetSchema, before: Mapping, changes: Mapping) -> pd.DataFrame:
     """Return a table of the fields whose mapping really changes between `before` and `changes`.
 
@@ -627,7 +654,7 @@ def start_import() -> int:
 
 
 def rerun_import(rec: ImportRecord, overrides: dict | None = None, ai_used: bool | None = None,
-                 mapping: Mapping | None = None) -> int:
+                 mapping: Mapping | None = None, opt_outs: dict[str, str] | None = None) -> int:
     """Start a new import from a previous one's original file and mapping, with the current target format.
 
     Used by "Re-run this import", "Re-run the import with these changes" (Claude's mistake check) and "Apply
@@ -641,11 +668,20 @@ def rerun_import(rec: ImportRecord, overrides: dict | None = None, ai_used: bool
       import's fixes, so fixes approved earlier are kept.
     - ai_used: whether Claude was involved; None keeps the old import's flag.
     - mapping: a replacement mapping (e.g. with Claude's suggested changes); None reuses the old one.
+    - opt_outs: {field name: "skip" / "import"} for a consent mapping made before 0.22.0, which has no opt-out
+      choice (asked on the import's page, see _rerun_opt_outs). A re-run never starts without one: ValueError.
 
     The *current* schema is used rather than the old import's snapshot, so a re-run picks up changes to the target
     format. The read options (sheet, header row, client time zone) are reused as they were. Writes a new import
     row and file copy to the database / data folder, queues it on the runner, and returns the new id.
     """
+    final = (mapping or rec.mapping).model_copy(deep=True)
+    for name, choice in (opt_outs or {}).items():
+        if name in final.fields and choice in OPT_OUT_CHOICES and opt_out_setting(final.fields[name].params) is None:
+            final.fields[name].params["opt_outs"] = choice
+    missing = [f.header for f in schema.mappable_fields if opt_out_problem(f, final.get(f.name))]
+    if missing:
+        raise ValueError(f"choose what a no in {', '.join(missing)} means before re-running")
     data = store.source_path(rec).read_bytes()
     # Shallow copy: the per-field dicts inside rec.overrides are updated in place. That's harmless here because
     # `rec` is a fresh object read from the database on every run, not something cached.
@@ -654,7 +690,7 @@ def rerun_import(rec: ImportRecord, overrides: dict | None = None, ai_used: bool
         merged.setdefault(k, {}).update(v)
     new_id = store.create_import(
         username=user["username"], filename=rec.filename, data=data, schema_label=schema.label,
-        schema_json=schema.model_dump_json(), mapping=mapping or rec.mapping, read_options=rec.read_options,
+        schema_json=schema.model_dump_json(), mapping=final, read_options=rec.read_options,
         overrides=merged, template_name=rec.template_name,
         ai_used=rec.ai_used if ai_used is None else ai_used, parent_id=rec.id)
     runner.submit(new_id)
@@ -847,6 +883,20 @@ def page_new_import() -> None:
     )
     for e in ss.get("edit_errors") or []:
         st.error(e)
+    # Consent (a field with opt_out_choice): whoever maps it says what its "no" values do. Nothing is assumed, and
+    # Start import stays disabled (Mapping.problems) until a choice is made.
+    for f in schema.mappable_fields:
+        fm = mapping.get(f.name)
+        if not f.opt_out_choice or fm.transform == "none":
+            continue
+        choice = opt_out_setting(fm.params)
+        okey = f"optouts_{f.name}_{choice}_{ss.editor_version}"
+        cols = ", ".join(f"`{c}`" for c in fm.sources) or "a fixed value"
+        st.radio(f"**{f.header}** comes from {cols}. What does a *no* in it mean?", list(OPT_OUT_CHOICES),
+                 index=None if choice not in OPT_OUT_CHOICES else list(OPT_OUT_CHOICES).index(choice),
+                 format_func=OPT_OUT_LABELS.get, key=okey, on_change=on_opt_out_choice, args=(f.name, okey),
+                 help="Required before importing. A blank consent changes nobody's subscription; false opts the "
+                      "customer out of texts.")
     # Several phone columns feeding the phone field, or cells holding several numbers, mean "one row per different
     # number"; say so, because the converted file will then have more rows than the original.
     each = mapping.row_field(schema)
@@ -1332,6 +1382,7 @@ def page_import_detail(import_id: int) -> None:
             st.error(rec.error)
         else:
             st.warning(f"This import was {rec.status}.")
+        _ask_rerun_opt_outs(rec)
         _rerun_button(rec)
         return
 
@@ -1367,19 +1418,44 @@ def _live_progress(import_id: int) -> None:
         st.caption("Cancelling…")
 
 
+def _rerun_missing(rec: ImportRecord) -> list:
+    """Fields of the current format whose opt-out choice is missing in this import's mapping (consent mapped
+    before 0.22.0, when nobody was asked what a no means). A re-run can't start until they are chosen."""
+    return [f for f in schema.mappable_fields if opt_out_problem(f, rec.mapping.get(f.name))]
+
+
+def _ask_rerun_opt_outs(rec: ImportRecord) -> None:
+    """Above the re-run actions of an import whose consent has no opt-out choice: ask for it (once per page)."""
+    for f in _rerun_missing(rec):
+        cols = ", ".join(f"`{c}`" for c in rec.mapping.get(f.name).sources) or "a fixed value"
+        st.radio(f"Before re-running: **{f.header}** came from {cols}, mapped before this question was asked. "
+                 "What does a *no* in it mean?", list(OPT_OUT_CHOICES), index=None, format_func=OPT_OUT_LABELS.get,
+                 key=f"rerun_optouts_{rec.id}_{f.name}")
+
+
+def _rerun_opt_outs(rec: ImportRecord) -> dict[str, str] | None:
+    """The opt-out choices made above the re-run actions ({field: "skip"/"import"}), or None while one is still
+    missing (the re-run buttons are then disabled)."""
+    chosen = {f.name: ss.get(f"rerun_optouts_{rec.id}_{f.name}") for f in _rerun_missing(rec)}
+    return None if any(v not in OPT_OUT_CHOICES for v in chosen.values()) else chosen
+
+
 def _rerun_button(rec: ImportRecord) -> None:
     """Show "Re-run this import", or a note saying why it can't be re-run.
 
     A re-run needs the stored original file, which is deleted after FILE_RETENTION_DAYS (files_purged) or may be
     missing on disk. Clicking creates a new import with the same file and mapping but the current target format
-    (see rerun_import), and opens it.
+    (see rerun_import), and opens it. Disabled while a consent opt-out choice is missing (_ask_rerun_opt_outs).
     """
     if rec.files_purged or not store.source_path(rec).exists():
         st.caption("The original file is no longer stored, so this import can't be re-run.")
         return
-    if st.button("↻ Re-run this import", help="Runs the same original file and mapping again with the current "
-                                              "target format. Creates a new import."):
-        open_import(rerun_import(rec))
+    opt_outs = _rerun_opt_outs(rec)
+    if st.button("↻ Re-run this import", disabled=opt_outs is None,
+                 help="Runs the same original file and mapping again with the current target format. Creates a "
+                      "new import." + (" First choose above what a no in consent means." if opt_outs is None
+                                       else "")):
+        open_import(rerun_import(rec, opt_outs=opt_outs))
 
 
 def _completed_view(rec: ImportRecord) -> None:
@@ -1537,6 +1613,7 @@ def _completed_view(rec: ImportRecord) -> None:
                    f", client time zone {ZONE_LABEL.get(tz, tz or 'Eastern')}")
 
     st.divider()
+    _ask_rerun_opt_outs(rec)
     _import_check_section(rec, rec_schema, src_df, audit)
     a, b = st.columns([1, 3])
     with a:
@@ -1598,14 +1675,15 @@ def _import_check_section(rec: ImportRecord, rec_schema: TargetSchema, src_df: p
             st.markdown("**Claude's suggested mapping changes**")
             st.dataframe(diff, hide_index=True, width="stretch")
             can_rerun = not rec.files_purged and store.source_path(rec).exists()
-            if st.button("Re-run the import with these changes", type="primary", disabled=not can_rerun,
-                         key=f"rerun_{ckey}"):
+            opt_outs = _rerun_opt_outs(rec)
+            if st.button("Re-run the import with these changes", type="primary",
+                         disabled=not can_rerun or opt_outs is None, key=f"rerun_{ckey}"):
                 # Same selection as Accept on New import: only fields that really change (matched by output
                 # header, as shown in the diff), merged onto the old mapping so its notes and skipped columns stay.
                 changed = Mapping(fields={k: v for k, v in chk["ai"].mapping.fields.items()
                                           if rec_schema.field(k).header in set(diff["Field"])})
                 new_map = merge(rec.mapping, changed)
-                open_import(rerun_import(rec, ai_used=True, mapping=new_map))
+                open_import(rerun_import(rec, ai_used=True, mapping=new_map, opt_outs=opt_outs))
 
 
 def _side_by_side(rec: ImportRecord, rec_schema: TargetSchema, src_df: pd.DataFrame, audit: pd.DataFrame,
@@ -1662,9 +1740,11 @@ def _repair_section(rec: ImportRecord, rec_schema: TargetSchema, audit: pd.DataF
     accepted fixes as overrides ({field: {original: fixed}}) and opens it; this import is never changed, so
     every fix stays traceable.
     """
-    # Excel error codes (#REF!, #VALUE!…) are left out: they hold no data, so there is nothing to reformat.
+    # Excel error codes (#REF!, #VALUE!…) are left out: they hold no data, so there is nothing to reformat. Yes/no
+    # fields (consent) too: a value that isn't yes or no can't be reformatted into one, only guessed (0.22.0).
     failed = {k: kept for k, v in rec.summary.get("failed_values", {}).items()
-              if k in rec_schema.field_names and (kept := [x for x in v if not sheet_error(x)])}
+              if k in rec_schema.field_names and rec_schema.field(k).type != "boolean"
+              and (kept := [x for x in v if not sheet_error(x)])}
     if not failed or not assistant:
         return
     n_vals = sum(len(v) for v in failed.values())
@@ -1704,10 +1784,11 @@ def _repair_section(rec: ImportRecord, rec_schema: TargetSchema, audit: pd.DataF
                 rows += [{"Field": h, "Original": a, "Fix": "", "Status": "can't be fixed"} for a in p["unfixable"]]
             st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
             n_ok = sum(len(p["accepted"]) for p in props.values())
+            opt_outs = _rerun_opt_outs(rec)
             if n_ok and st.button(f"Apply {n_ok} fix{'es' if n_ok != 1 else ''} and re-run", type="primary",
-                                  key=f"apply_{rec.id}"):
+                                  key=f"apply_{rec.id}", disabled=opt_outs is None):
                 new_id = rerun_import(rec, overrides={k: p["accepted"] for k, p in props.items() if p["accepted"]},
-                                      ai_used=True)
+                                      ai_used=True, opt_outs=opt_outs)
                 # Drop the proposals before leaving (open_import ends the run), so coming back to this import
                 # doesn't offer the same fixes again.
                 ss.pop(pkey, None)
