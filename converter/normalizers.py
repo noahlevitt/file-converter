@@ -1476,21 +1476,33 @@ def normalize_decimal(value: str, field: FieldSpec, params: dict, ctx: dict) -> 
 # Words (lower-cased) meaning yes / no in opt-in, status and checkbox columns ("x" and "✓" are ticked boxes).
 TRUE_TOKENS = {"y", "yes", "true", "t", "1", "x", "on", "opted in", "opt in", "optin", "subscribed", "active", "✓"}
 FALSE_TOKENS = {"n", "no", "false", "f", "0", "off", "opted out", "opt out", "optout", "unsubscribed", "inactive"}
+# The same, as compared by normalize_boolean (_boolean_key: no spaces, hyphens or underscores).
+_TRUE_KEYS = {t.replace(" ", "") for t in TRUE_TOKENS}
+_FALSE_KEYS = {t.replace(" ", "") for t in FALSE_TOKENS}
 
 
 def normalize_boolean(value: str, field: FieldSpec, params: dict, ctx: dict) -> tuple[str, str | None]:
     """Normalizer for "boolean" fields: yes/no words → field.true_value / field.false_value.
 
-    "yes", "Y", "1", "x", "Subscribed" → true_value; "no", "0", "Unsubscribed", "opted out" → false_value;
+    "yes", "Y", "1", "x", "Subscribed" → true_value; "no", "0", "Unsubscribed", "opted out", "Opt-Out" → false_value;
     anything else → ("", "not a yes/no value"). The real schema's consent column uses this when a person maps a
     column to it (true / false; any other value is left blank, which changes nobody's consent).
     """
-    v = value.strip().lower()
-    if v in TRUE_TOKENS:
+    v = _boolean_key(value)
+    if v in _TRUE_KEYS:
         return field.true_value, None
-    if v in FALSE_TOKENS:
+    if v in _FALSE_KEYS:
         return field.false_value, None
     return "", "not a yes/no value"
+
+
+def _boolean_key(value: str) -> str:
+    """A yes/no value reduced for comparison: full-width characters made ASCII, lower case, a spreadsheet ".0"
+    removed, and spaces, hyphens and underscores dropped. "Opt-Out" → "optout", "Un-subscribed" → "unsubscribed",
+    "1.0" → "1", "Ｎ" → "n" (0.22.0; before, these weren't read as yes/no)."""
+    v = unicodedata.normalize("NFKC", value).strip().lower()
+    v = _FLOAT_ARTIFACT_RE.sub(r"\1", v)
+    return re.sub(r"[\s\-_]+", "", v)
 
 
 def normalize_enum(value: str, field: FieldSpec, params: dict, ctx: dict) -> tuple[str, str | None]:
