@@ -36,6 +36,7 @@ The suite needs no network and no API key. Claude is replaced by fake clients. T
 | `test_multi_phone.py` | Several phone columns → one row per different number; phone-setting and texting-activity columns |
 | `test_activity_dates.py` | One last date per row: named, then generic, then creation date; call logs (and what doesn't make one); last_contacted only by hand; activity dates imported as written (1900, 1970, future); machine-format date columns mapped by name; named date + time pairs |
 | `test_manual_only.py` | Consent and last_contacted: filled only when a person maps them, never by rules, Claude or templates |
+| `test_consent_choice.py` | Consent opt-ins only vs opt-ins and opt-outs: every spelling of no, translations, fixed values, the required choice, editing (removing a column or Leave blank asks again), reports and counts, number history, the preview, odd stored values, Claude never setting it, the mapping page and re-running an older import (AppTest) |
 | `test_multi_number_cells.py` | Several numbers in one cell → one row each; labels, fax, extensions, numbers on separate lines or numbered, never splitting a single number |
 | `test_birthdays.py` | No-year birthdays/anniversaries → 1600 (placeholders, Excel-added years, split columns, year 0); time zones never shift a birthday; full column vs split columns; dates about a birthday |
 | `test_real_schema.py` | The real import format end to end: headers, consent only by hand, dedupe, sample exports |
