@@ -1496,12 +1496,41 @@ def normalize_boolean(value: str, field: FieldSpec, params: dict, ctx: dict) -> 
     return "", "not a yes/no value"
 
 
+# Values that name a subscription status rather than answer yes or no (as _boolean_key compares them). A consent
+# column set to "opt-outs only" reads its plain yes as an opt-out, but these keep their own meaning there (0.23.0).
+_OPT_IN_STATUS = {"optedin", "optin", "subscribed", "active"}
+_OPT_OUT_STATUS = {"optedout", "optout", "unsubscribed"}
+
+
+def consent_reading(value: str) -> str | None:
+    """How a consent cell reads, before its column's consent setting is applied (0.23.0): "yes" / "no" for a plain
+    yes/no value ("Y", "1", "True", "No"), "in" / "out" for a value naming a status ("Subscribed", "Opt-In",
+    "Active", "Opted out", "Unsubscribed"), None for anything else ("maybe", "-1", ""). "Inactive" is a plain no:
+    it may only mean a customer who hasn't visited, so it never opts anyone out of an opt-outs-only column.
+
+    Spellings as in :func:`normalize_boolean` (case, spaces, hyphens and underscores don't matter).
+    """
+    v = _boolean_key(value)
+    if v in _OPT_IN_STATUS:
+        return "in"
+    if v in _OPT_OUT_STATUS:
+        return "out"
+    if v in _TRUE_KEYS:
+        return "yes"
+    if v in _FALSE_KEYS:
+        return "no"
+    return None
+
+
 def _boolean_key(value: str) -> str:
     """A yes/no value reduced for comparison: full-width characters made ASCII, lower case, a spreadsheet ".0"
     removed, and spaces, hyphens and underscores dropped. "Opt-Out" → "optout", "Un-subscribed" → "unsubscribed",
-    "1.0" → "1", "Ｎ" → "n" (0.22.0; before, these weren't read as yes/no)."""
+    "1.0" → "1", "Ｎ" → "n" (0.22.0; before, these weren't read as yes/no). A minus sign in front of a number is kept,
+    so "-1" (an "unknown" in some systems) isn't read as 1 (0.23.0)."""
     v = unicodedata.normalize("NFKC", value).strip().lower()
     v = _FLOAT_ARTIFACT_RE.sub(r"\1", v)
+    if re.fullmatch(r"-\s*\d+(\.\d+)?", v):
+        return v.replace(" ", "")
     return re.sub(r"[\s\-_]+", "", v)
 
 
