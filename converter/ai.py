@@ -83,7 +83,7 @@ from typing import Any
 
 from rapidfuzz import fuzz
 
-from .mapping import ColumnProfile, FieldMapping, Mapping
+from .mapping import FIELD_PARAMS, ColumnProfile, FieldMapping, Mapping
 from .schema import TYPE_DESCRIPTIONS, FieldSpec, TargetSchema
 from .transforms import ADDRESS_PARTS, DATE_ORDERS, NAME_PARTS, TRANSFORMS, check_transform
 
@@ -754,7 +754,8 @@ def parse_mapping_entries(entries: list[dict], schema: TargetSchema, columns: li
                 unknown = True
             elif real not in sources:
                 sources.append(real)
-        params = {k: v for k, v in (e.get("params") or {}).items() if v not in (None, "", [])}
+        # The consent opt-out choice is a person's (FIELD_PARAMS): never taken from Claude.
+        params = {k: v for k, v in (e.get("params") or {}).items() if v not in (None, "", []) and k not in FIELD_PARAMS}
         if transform in ("none", "constant"):
             sources = []
         # A multi-column transform left with one column (e.g. after dropping an unknown one) is just a copy.
