@@ -392,9 +392,10 @@ def run_checks(schema: TargetSchema, mapping: Mapping, source: pd.DataFrame, aud
         if is_consent_column(p.name):
             findings.append(Finding("info", "", p.name, f"'{p.name}' is not imported.",
                                     "Consent is only imported when you map it yourself: if this column holds the "
-                                    "customers' consent, send it to consent under Columns in your file and choose "
-                                    "what a no in it means: opt-ins only (a no is left blank, e.g. an email opt-in "
-                                    "column) or opt-ins and opt-outs (a no opts the customer out of texts). "
+                                    "customers' consent, send it to consent under Columns in your file with what "
+                                    "it records: opt-ins only (a no is left blank, e.g. an email opt-in column), "
+                                    "opt-ins and opt-outs (a no opts the customer out of texts) or opt-outs only "
+                                    "(e.g. Unsubscribed: a yes opts the customer out, a no is left blank). "
                                     "Otherwise leaving it out is intended."))
             continue
         if p.shares.get("date", 0) >= 0.6 and unmapped_dates:
