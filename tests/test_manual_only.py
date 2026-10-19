@@ -29,7 +29,7 @@ def hand_mapped(real_schema):
     """The mapping after a person sent 'SMS Opt In' to consent and 'Last Campaign Sent' to last_contacted."""
     df = file_df()
     m = initial_mapping(real_schema, df, profile_columns(df), None, None, use_ai=False).mapping
-    m, _ = apply_column_edit(real_schema, m, "SMS Opt In", targets=["consent"])
+    m, _ = apply_column_edit(real_schema, m, "SMS Opt In", targets=["consent"], settings={"consent": "both"})
     m, _ = apply_column_edit(real_schema, m, "Last Campaign Sent", targets=["last_contacted"])
     return m
 
@@ -89,6 +89,7 @@ def test_unknown_consent_values_stay_blank(real_schema):
     df = pd.DataFrame({"Phone": ["5165550100", "9175551234", "6315550188"],
                        "Consent": ["Subscribed", "pending", "Opted Out"]})
     m = Mapping(fields={"phone_number": FieldMapping(sources=["Phone"], transform="copy"),
-                        "consent": FieldMapping(sources=["Consent"], transform="copy", origin="user")})
+                        "consent": FieldMapping(sources=["Consent"], transform="copy", origin="user",
+                                                params={"modes": {"Consent": "both"}})})
     res = convert(df, real_schema, m)
     assert res.output["consent"].tolist() == ["true", "", "false"] and res.imported == 3
