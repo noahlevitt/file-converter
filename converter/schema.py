@@ -138,6 +138,14 @@ class FieldSpec(BaseModel):
         description="Only filled when a person maps a column to it by hand on the mapping page; never by the "
         "automatic rules, a saved template, Claude or a default.",
     )
+    # boolean fields (0.22.0): a person mapping a column to this field must choose what its false values do: written
+    # (opt-ins and opt-outs) or left blank (opt-ins only). Mapping param "opt_outs": "import" / "skip". For
+    # consent: an email opt-in column's "No" isn't a text opt-out, so it mustn't unsubscribe anyone.
+    opt_out_choice: bool = Field(
+        False,
+        description="boolean only: whoever maps a column to this field chooses whether its false values are "
+        "written (opt-ins and opt-outs) or left blank (opt-ins only); importing is blocked until they choose.",
+    )
     # date/datetime fields: takes a date column whose header names no particular activity ("Date", "Start Time",
     # "Timestamp"; see heuristics.auto_map step 7). "call_log" = first choice in files that look like call logs,
     # "default" = first choice in other files; each is the other's second choice. None = only by its own name.
@@ -160,7 +168,8 @@ class FieldSpec(BaseModel):
         * A ``fixed_blank`` field can't be required or have a default - both would put a value in it.
         * A ``manual_only`` field can't be required, have a default or be fixed_blank: a default would fill it
           without a person choosing a column, and a required one would block every file nobody mapped by hand.
-        * ``no_year_value`` only makes sense for ``date`` fields, ``generic_date`` for date/datetime fields.
+        * ``no_year_value`` only makes sense for ``date`` fields, ``generic_date`` for date/datetime fields,
+          ``opt_out_choice`` for boolean fields.
         * ``on_invalid`` defaults to "reject" for required fields and "blank" for optional ones: a bad value in
           a required field makes the row unusable, a bad optional value is just dropped.
         * An ``enum`` field needs ``allowed_values``.
@@ -177,6 +186,8 @@ class FieldSpec(BaseModel):
             raise ValueError(f"no_year_value only applies to date fields ('{self.name}' is {self.type})")
         if self.generic_date and self.type not in ("date", "datetime"):
             raise ValueError(f"generic_date only applies to date/datetime fields ('{self.name}' is {self.type})")
+        if self.opt_out_choice and self.type != "boolean":
+            raise ValueError(f"opt_out_choice only applies to boolean fields ('{self.name}' is {self.type})")
         if self.on_invalid is None:
             self.on_invalid = "reject" if self.required else "blank"
         if self.type == "enum" and not self.allowed_values:
