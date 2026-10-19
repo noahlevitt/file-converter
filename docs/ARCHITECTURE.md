@@ -100,7 +100,8 @@ All business logic is in `converter/`. Only `app.py` and `converter/auth.py` imp
 header, quoting), `dedupe` (`DedupeSpec`: `keys`, `keep`; `["*"]` = every field) and `fields` (list of
 `FieldSpec`). A `FieldSpec` carries:
 - `name`, `header`, `type`, `required` and `format`;
-- the rules: `on_invalid`, `countries` (phones), `no_year_value` (dates) and `fixed_blank`;
+- the rules: `on_invalid`, `countries` (phones), `no_year_value` (dates), `fixed_blank`, `manual_only` and
+  `opt_out_choice` (boolean: the person mapping it chooses opt-ins only or opt-ins and opt-outs);
 - string options: `case`, `max_length` and `truncate`;
 - `allowed_values`, `default` and `synonyms`.
 
@@ -192,6 +193,7 @@ changes (`Store.purge_drafts`).
 | Birthday/anniversary without a real year → year 1600 | `dateparse` (`NO_YEAR`), `normalizers.normalize_date`, `_placeholder_year`; schema `no_year_value` |
 | Times with a zone converted to the client's time zone | `dateparse._to_zone`; zone chosen per import on the New import page |
 | Consent and last_contacted only mapped by a person | schema `manual_only`; `Mapping.normalized` drops any mapping of them not made by a person (`origin="user"`); skipped by `heuristics.auto_map`, refused in `ai.parse_mapping_entries`, left out of templates (`Mapping.without_manual`, `services.template_mapping`) |
+| Consent: whoever maps it chooses opt-ins only (false left blank, cell status `out`, counted) or opt-ins and opt-outs; nothing assumed, Start import (and Re-run of an older import) blocked until chosen; another or a removed column asks again; never from Claude | schema `opt_out_choice`; param `opt_outs` (`mapping.OPT_OUT_CHOICES`, `FIELD_PARAMS`, `opt_out_setting`; kept by `normalized` / `apply_row_edit` while the columns stay; dropped by `ai.parse_mapping_entries`); `mapping.opt_out_problem` (in `Mapping.problems`, `editor.row_problem`, `engine.preview_values`); `engine.convert` (`CELL_OPTOUT`, `opt_outs_left_blank`); `compare` (teal), `output.write_summary`, `numberlog.consent_source`; `app.on_opt_out_choice`, `app.rerun_import` / `_ask_rerun_opt_outs` |
 | Duplicates only when every column matches | schema `dedupe: keys: ["*"]`; `engine.convert` |
 | Bad rows not imported, counted with reasons | `engine.convert` (`RowIssue.rejected`), `output.write_rejects`, summary |
 | No live spreadsheet formulas in downloads (client values starting with `=`, `+`, `-`, `@` get an apostrophe) | `output.neutralise_formula`, `write_rejects`; `app.rejects_download` for files from older versions |
