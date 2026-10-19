@@ -4,8 +4,8 @@ For whoever picks this repository up next: a person, or Claude in a new chat. It
 other documents don't: how changes are made and delivered, the decisions the business made, and what is still
 open. It also explains how to start a separate project from this code while this one keeps being updated.
 
-**State:** version 0.21.2 (see [CHANGELOG.md](CHANGELOG.md)), about 1,000 tests. Repository:
-github.com/noahlevitt/file-converter. Owner: Noah Levitt. Last updated 2026-10-16. Update this file with every
+**State:** version 0.22.0 (see [CHANGELOG.md](CHANGELOG.md)), about 1,000 tests. Repository:
+github.com/noahlevitt/file-converter. Owner: Noah Levitt. Last updated 2026-10-19. Update this file with every
 release (section 4 in particular).
 
 What the tool does, and how, is in the [README](../README.md) and the documents it lists. Read
@@ -69,7 +69,7 @@ their docstrings removed before and after.
 
 **Delivery** (when the changes can't be pushed directly)
 - Changes go to Noah as a git bundle, `file-converter-updateN.bundle`, numbered in order. This file came with
-  update30, so the next is `file-converter-update31.bundle`; update this line with each bundle.
+  update31, so the next is `file-converter-update32.bundle`; update this line with each bundle.
 
   ```bash
   tags=$(git tag --list 'v0.*' | sort -V | awk -F. '$2>=6')
@@ -105,6 +105,7 @@ Each of these was decided by Noah. Don't reverse one without asking; for a new p
 | Duplicates | A row is a duplicate only when every column matches an earlier one; the same phone with a different date is not. |
 | Bad rows | Not imported, counted, and each one has a reason. |
 | Consent, last_contacted | Mapped by a person only, for each file; never by rules, templates, Claude or defaults. |
+| What a consent "no" means | Decided for each file by whoever maps consent (0.22.0): **opt-ins only** (a "no" is left blank: e.g. an email opt-in column, whose "no" isn't a text opt-out) or **opt-ins and opt-outs** (a "no" opts the customer out). Neither is assumed; the import can't start without the choice. |
 | Dates | The placeholder year 1600 only for birthday and anniversary (month and day without a real year); every other date is imported as written. |
 | Files without a header row | No templates. |
 | Logins | Off for now (`AUTH_MODE=none`); may come back. |
@@ -150,6 +151,11 @@ this project's engine in its `converter/` folder, next to this app (it uses port
   `header_words` / `header_not_words`), `heuristics.py` (two rules that only act on those attributes) and
   `jobs.py` (a `sink` that replaces the number history). They don't change this project's results. A change here
   to those three files will need care when it is applied there. Its `docs/ARCHITECTURE.md` lists them.
+- **Not yet taken there: 0.22.0** (consent opt-ins only, and more spellings of yes/no). It applies if Customer
+  Records maps consent. It changes `schemas/target_schema.yaml`, `app.py` and, in `converter/`, `schema.py`,
+  `mapping.py`, `editor.py`, `engine.py`, `normalizers.py`, `compare.py`, `output.py`, `checks.py`, `ai.py` and
+  `numberlog.py` (`git diff v0.21.2 v0.22.0`). `schema.py` has its additions there, and its number history is
+  replaced by a `sink`, so those two need care.
 - **Fixes found there that apply here** are listed in section 4 (the mapping tables jumping to their first row).
 - Its decisions (section 2 of its handoff) are its own; the ones here don't apply to it unless confirmed there.
 
