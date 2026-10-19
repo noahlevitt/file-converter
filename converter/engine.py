@@ -98,8 +98,8 @@ from typing import Any, Callable
 import pandas as pd
 
 from . import normalizers as N
-from .mapping import Mapping, area_code_pairs, opt_out_problem
-from .schema import TargetSchema
+from .mapping import Mapping, area_code_pairs, consent_missing, consent_modes
+from .schema import FieldSpec, TargetSchema
 from .transforms import apply_transform
 
 
@@ -121,7 +121,9 @@ CELL_DEFAULT = "def"    # filled from a default or fixed value
 CELL_FIXED = "fix"      # user-approved AI fix
 CELL_REPAIRED = "rpr"   # repaired from a likely typo (e.g. a phone digit typed twice) — worth a look
 CELL_BLANKED = "blk"    # invalid optional value, left blank
-CELL_OPTOUT = "out"     # a false value (opt-out) left blank because consent was mapped as "opt-ins only" (0.22.0)
+CELL_OPTOUT = "out"     # consent left blank by its column's consent setting: a no in an opt-ins-only or opt-outs-
+#                         only column (0.22.0; 0.23.0 also opt-outs only)
+CELL_UNSUB = "uns"      # consent false from a yes in an opt-outs-only column, e.g. Unsubscribed = Yes (0.23.0)
 CELL_REJECT = "rej"     # invalid or missing required value → row rejected
 # Possible values of the audit's _status column. "empty" rows (every cell blank) are skipped, not rejected.
 ROW_STATUSES = ("imported", "rejected", "duplicate", "empty")
@@ -188,9 +190,11 @@ class ConversionResult:
     skipped_counts: Counter = field(default_factory=Counter)  # why extra values were skipped: "Header: reason"
     repaired_values: int = 0  # values repaired from likely typos (each marked in the audit)
     repaired_counts: Counter = field(default_factory=Counter)  # how values were repaired: "Header: repaired: ..."
-    # False values (opt-outs) left blank because consent was mapped as "opt-ins only" (0.22.0). Counted on every
-    # non-empty row, like blanked_values (also rows then rejected for another reason or removed as duplicates).
-    opt_outs_left_blank: int = 0
+    # Consent in the converted file (0.23.0), per consent field read from columns (output header): how many imported
+    # rows say true (subscribed), false (unsubscribed), and how many were left blank by their columns' consent
+    # settings (a no in an opt-ins-only or opt-outs-only column), e.g. {"consent": {"true": 120, "false": 15,
+    # "left_blank": 300}}.
+    consent_counts: dict[str, dict[str, int]] = field(default_factory=dict)
 
     @property
     def has_bad_rows(self) -> bool:
@@ -225,10 +229,12 @@ class ConversionResult:
         if self.repaired_values:
             parts.append(f"{self.repaired_values:,} phone number{'s were' if self.repaired_values != 1 else ' was'} "
                          "repaired from likely typos — check them under Side by side → Problems only.")
-        if self.opt_outs_left_blank:
-            n = self.opt_outs_left_blank
-            parts.append(f"{n:,} consent value{'s' if n != 1 else ''} of false left blank (consent: opt-ins only), "
-                         "so this import opts nobody out.")
+        for header, c in self.consent_counts.items():
+            text = (f"{header.capitalize()} in the converted file: {c.get('true', 0):,} true (subscribed), "
+                    f"{c.get('false', 0):,} false (unsubscribed)")
+            if c.get("left_blank"):
+                text += f", {c['left_blank']:,} left blank by the consent settings (they change nothing)"
+            parts.append(text + ".")
         return " ".join(parts)
 
     def summary_dict(self) -> dict[str, Any]:
@@ -251,7 +257,7 @@ class ConversionResult:
             "skipped": dict(self.skipped_counts.most_common()),
             "repaired_values": self.repaired_values,
             "repaired": dict(self.repaired_counts.most_common()),
-            "opt_outs_left_blank": self.opt_outs_left_blank,
+            "consent_counts": self.consent_counts,
             "message": self.flag_message(),
         }
 
@@ -352,6 +358,12 @@ def convert(
         params = fm.params
         if progress:
             progress(done_w / total_w, f"Converting {f.header}")
+        if f.opt_out_choice and fm.transform in ("consent", "coalesce", "map_values"):
+            # Consent read from columns (0.23.0): each column with its own consent setting, an opt-out wins.
+            out_cols[f.name], raw_cols[f.name], status_cols[f.name] = _convert_consent(
+                f, fm, records, blank, issues, failed_values)
+            done_w += weights[fi]
+            continue
         # Step 1: the transform pulls the raw value out of the source column(s). For the each_row field the value
         # was already chosen per working row by _expand_rows.
         if f is each_field:
@@ -409,11 +421,8 @@ def convert(
             out, err = cache[v]
             if f is each_field and i in fax_rows:
                 out, err = "", N.FAX_REASON  # the row's only number is a fax line
-            # Consent mapped as "opt-ins only": a false value (an opt-out) is left blank, so it opts nobody out.
-            opt_out = (not err and f.type == "boolean" and params.get("opt_outs") == "skip" and out != ""
-                       and out == f.false_value)
             # Cell status, in order of precedence: invalid (rejected or blanked, per the field's on_invalid) >
-            # opt-out left blank > approved fix > repaired typo > fixed value > derived > unchanged/reformatted.
+            # approved fix > repaired typo > fixed value > derived > unchanged/reformatted.
             if err:
                 rejected = f.on_invalid == "reject"
                 issues[i].append(RowIssue(f.name, v, err, rejected))
@@ -421,9 +430,6 @@ def convert(
                     failed_values.setdefault(f.name, set()).add(v)
                 out = ""
                 statuses.append(CELL_REJECT if rejected else CELL_BLANKED)
-            elif opt_out:
-                out = ""
-                statuses.append(CELL_OPTOUT)
             elif v in fixes:
                 statuses.append(CELL_FIXED)
             elif v in ctx.get("repairs", {}):
@@ -595,8 +601,124 @@ def convert(
         skipped_counts=skipped_counts,
         repaired_values=sum(repaired_counts.values()),
         repaired_counts=repaired_counts,
-        opt_outs_left_blank=sum(status_cols[f.name].count(CELL_OPTOUT) for f in schema.fields),
+        consent_counts={
+            f.header: {"true": sum(out_cols[f.name][i] == f.true_value for i in accepted),
+                       "false": sum(out_cols[f.name][i] == f.false_value for i in accepted),
+                       "left_blank": sum(status_cols[f.name][i] == CELL_OPTOUT for i in accepted)}
+            for f in schema.fields
+            if f.opt_out_choice and mapping.get(f.name).transform != "none"},
     )
+
+
+# What each consent setting does with how a cell reads (normalizers.consent_reading): "true" / "false" is written,
+# "blank" is left blank by the setting (CELL_OPTOUT), "unsub" is a yes in an opt-outs-only column (false,
+# CELL_UNSUB). Values naming a status ("Subscribed" = in, "Opted out" = out) keep their meaning in every setting.
+_CONSENT_EFFECT = {
+    "in": {"yes": "true", "in": "true", "no": "blank", "out": "blank"},
+    "both": {"yes": "true", "in": "true", "no": "false", "out": "false"},
+    "out": {"yes": "unsub", "out": "false", "no": "blank", "in": "blank"},
+}
+
+
+def _consent_cell(f: FieldSpec, fm, modes: dict[str, str], row: dict[str, str]
+                  ) -> tuple[str, str, str, str | None]:
+    """Consent for one row from its consent columns, each read with its own setting (0.23.0).
+
+    Returns (output value, cell status, raw value shown as "was", error). Every column with a value and a setting
+    gives true, false or "left blank"; the row then gets, in this order: false if any column gives false (an opt-out
+    wins: an Unsubscribed = Yes beats an Email Opt In = Y), else true if any gives true, else blank — status
+    CELL_OPTOUT when a setting left a value blank, or "not a yes/no value" when a value couldn't be read. With
+    several columns the raw value names the column that decided ("Unsubscribed: Yes"). A column without a setting
+    is ignored (the import can't start until each has one: mapping.consent_problem).
+
+    "First non-empty" (how 0.22.0 combined consent columns; kept so their re-runs give the same result): only the
+    first column with a value counts. "Translate values": a translated value means what it says, in every setting
+    (the setting decides which are imported): opt-in / opt-out (what the mapping page accepts since 0.23.0), or a
+    true / false from an older mapping, which meant subscribed / opted out then — so "Yes=false; No=true" on an
+    Unsubscribed column can't be turned around. A value translated to nothing, or an empty cell, is left blank; a
+    value the translation doesn't list is read like any other.
+
+    Examples, with Email Opt In = opt-ins only and Unsubscribed = opt-outs only:
+        Y, No   -> ("true", fmt, "Email Opt In: Y")      N, No  -> ("", out, "Email Opt In: N")
+        Y, Yes  -> ("false", uns, "Unsubscribed: Yes")   N, ""  -> ("", out, "Email Opt In: N")
+    """
+    several = len(fm.sources) > 1
+    found: dict[str, tuple[str, str]] = {}  # effect -> first (column, value) giving it, in source order
+    unreadable: tuple[str, str] | None = None
+    table = {str(m.get("from", "")).strip().lower(): str(m.get("to", ""))
+             for m in fm.params.get("value_map") or []} if fm.transform == "map_values" else {}
+    columns = fm.sources
+    if fm.transform == "coalesce":
+        columns = [next((c for c in fm.sources if N.clean_text(row.get(c, ""))), fm.sources[0])]
+    for col in columns:
+        mode = modes.get(col)
+        v = N.clean_text(row.get(col, ""))
+        translated = bool(v) and v.lower() in table  # an empty cell is never translated (blank changes nothing)
+        if translated:
+            v = N.clean_text(table[v.lower()])
+        if not v or mode is None:
+            continue
+        reading = N.consent_reading(v)
+        if translated and reading in ("yes", "no"):
+            reading = "in" if reading == "yes" else "out"  # a translation says what the value means
+        if reading is None:
+            unreadable = unreadable or (col, v)
+            continue
+        found.setdefault(_CONSENT_EFFECT[mode][reading], (col, v))
+    for effect in ("unsub", "false", "true", "blank"):
+        if effect in found:
+            break
+    else:
+        if unreadable:
+            col, v = unreadable
+            return "", CELL_BLANKED, f"{col}: {v}" if several else v, "not a yes/no value"
+        return "", "", "", None
+    # "unsub" and "false" are both opt-outs: the first column (in source order) that opts out decides.
+    if "unsub" in found and "false" in found and fm.sources.index(found["false"][0]) < fm.sources.index(
+            found["unsub"][0]):
+        effect = "false"
+    col, v = found[effect]
+    raw = f"{col}: {v}" if several else v
+    if effect == "blank":
+        return "", CELL_OPTOUT, raw, None
+    if effect == "unsub":
+        return f.false_value, CELL_UNSUB, raw, None
+    out = f.true_value if effect == "true" else f.false_value
+    if fm.transform == "map_values":
+        return out, CELL_DERIVED, raw, None
+    return out, CELL_SAME if v == out and not several else CELL_FORMAT, raw, None
+
+
+def _convert_consent(f: FieldSpec, fm, records: list[dict[str, str]], blank: list[bool],
+                     issues: list[list[RowIssue]], failed_values: dict[str, set[str]]
+                     ) -> tuple[list[str], list[str], list[str]]:
+    """Convert the consent field read from columns (transform "consent" or "Translate values"): one
+    :func:`_consent_cell` per non-empty row. Returns (values, raw values, statuses); an unreadable value is recorded
+    like any invalid value (left blank, or the row rejected when the field's on_invalid is "reject")."""
+    modes = consent_modes(fm)
+    values, raws, statuses = [], [], []
+    cache: dict[tuple[str, ...], tuple[str, str, str, str | None]] = {}
+    for i, row in enumerate(records):
+        if blank[i]:
+            values.append("")
+            raws.append("")
+            statuses.append("")
+            continue
+        key = tuple(row.get(c, "") for c in fm.sources)
+        if key not in cache:
+            cache[key] = _consent_cell(f, fm, modes, row)
+        out, st, raw, err = cache[key]
+        if err:
+            rejected = f.on_invalid == "reject"
+            issues[i].append(RowIssue(f.name, raw, err, rejected))
+            failed_values.setdefault(f.name, set()).add(raw)
+            st = CELL_REJECT if rejected else CELL_BLANKED
+        elif not out and not st and f.default not in (None, ""):
+            out, st = str(f.default), CELL_DEFAULT
+        values.append(out)
+        raws.append(raw)
+        statuses.append(st)
+    return values, raws, statuses
 
 
 def _expand_rows(records: list[dict[str, str]], blank: list[bool], f, mapping: Mapping,
@@ -806,10 +928,10 @@ def preview_values(df: pd.DataFrame, schema: TargetSchema, mapping: Mapping, lim
         if fm.transform == "none" and not f.default:
             out[f.name] = ""
             continue
-        if opt_out_problem(f, fm):
-            # Consent before anyone chose what its "no" means: its false values would neither surely be written
-            # nor surely be left blank, so no sample is shown.
-            out[f.name] = "choose below what a no means"
+        if consent_missing(f, mapping.normalized(schema, list(df.columns)).get(f.name)):
+            # Consent reading a column whose setting isn't chosen yet: what it gives depends on that choice, so no
+            # sample is shown.
+            out[f.name] = "choose below what each column records"
             continue
         # Samples come from the output (accepted rows only), so a field shows nothing when every row was rejected.
         vals = [v for v in res.output[f.header].tolist() if v][:limit] if not res.output.empty else []
