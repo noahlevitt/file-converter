@@ -176,7 +176,7 @@ def test_consent_can_be_picked_by_a_person(real_schema):
     """
     m2, msgs = apply_column_edit(real_schema, Mapping(), "SMS Opt In", targets=["consent"])
     assert m2.targets_of("SMS Opt In") == ["consent"] and m2.get("consent").origin == "user"
-    assert msgs == ["consent now comes from 'SMS Opt In'."]
+    assert msgs == ["consent now comes from 'SMS Opt In' (choose its setting below the field table)."]
     assert m2.normalized(real_schema, ["SMS Opt In"]).get("consent").sources == ["SMS Opt In"]
 
 
