@@ -46,15 +46,16 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from .engine import (CELL_BLANKED, CELL_DEFAULT, CELL_DERIVED, CELL_FIXED, CELL_FORMAT, CELL_REJECT, CELL_REPAIRED,
-                     CELL_SAME)
+from .engine import (CELL_BLANKED, CELL_DEFAULT, CELL_DERIVED, CELL_FIXED, CELL_FORMAT, CELL_OPTOUT, CELL_REJECT,
+                     CELL_REPAIRED, CELL_SAME)
 from .mapping import Mapping
 from .normalizers import ADDED_AREA_CODE_RE, clean_text
 from .schema import TargetSchema
 
 # Cell statuses that count as "the converted value differs from (or doesn't simply copy) the original". Used by
 # the "Rows with changes" filter. Everything except CELL_SAME and "" (empty cell) is a change.
-CHANGED_CELLS = {CELL_FORMAT, CELL_DERIVED, CELL_DEFAULT, CELL_FIXED, CELL_REPAIRED, CELL_BLANKED, CELL_REJECT}
+CHANGED_CELLS = {CELL_FORMAT, CELL_DERIVED, CELL_DEFAULT, CELL_FIXED, CELL_REPAIRED, CELL_BLANKED, CELL_REJECT,
+                 CELL_OPTOUT}
 ATTENTION_CELLS = [CELL_BLANKED, CELL_REPAIRED]  # imported, but worth a look ("Problems only")
 
 # Filter modes for the side-by-side view: key -> button label. The keys are understood by filter_rows() and
@@ -78,6 +79,7 @@ CELL_LABELS = {
     CELL_FIXED: "fixed (approved Claude suggestion)",
     CELL_REPAIRED: "repaired from a likely typo — check it",
     CELL_BLANKED: "invalid — left blank",
+    CELL_OPTOUT: "opt-out left blank (consent: opt-ins only)",
     CELL_REJECT: "invalid or missing — row rejected",
 }
 
@@ -253,6 +255,7 @@ def status_counts(audit: pd.DataFrame, schema: TargetSchema) -> dict[str, int]:
 # Cell status classes on converted cells are "c-" + the engine.CELL_* code, so they match automatically:
 #   c-fmt reformatted (blue)   c-drv built/derived (purple)   c-def default (grey, italic)   c-fix Claude fix (green)
 #   c-blk invalid, left blank (yellow)   c-rpr repaired typo (orange, bold)   c-rej rejected cause (red, bold)
+#   c-out opt-out left blank, consent mapped as opt-ins only (teal)
 # The swatch colours in _LEGEND and XLSX_FILL below repeat these hex values; keep them in sync (DARK_CSS has the
 # dark-mode versions).
 CSS = """
@@ -291,6 +294,7 @@ td.c-drv{background:#f2ecff}
 td.c-def{background:#f3f4f6;font-style:italic}
 td.c-fix{background:#e3f6e9}
 td.c-blk{background:#fff4d6}
+td.c-out{background:#e3f5f3}
 td.c-rpr{background:#ffe2c6;font-weight:600}
 td.c-rej{background:#fde1e1;color:#b42318;font-weight:600}
 td .blank{color:#9aa1a9;font-style:italic;font-weight:400}
@@ -334,6 +338,7 @@ td.c-drv{background:#2a2147}
 td.c-def{background:#262a33}
 td.c-fix{background:#15331f}
 td.c-blk{background:#3a2f0b}
+td.c-out{background:#113532}
 td.c-rpr{background:#4a2a0f}
 td.c-rej{background:#4a1717;color:#ff9b9b}
 td .blank{color:#6b7280}
@@ -348,6 +353,7 @@ _LEGEND = [("c-fmt", "#e8f1ff", "#16304f", "reformatted"),
            ("c-fix", "#e3f6e9", "#15331f", "fixed by approved Claude suggestion"),
            ("c-rpr", "#ffe2c6", "#4a2a0f", "repaired from a likely typo — check it"),
            ("c-blk", "#fff4d6", "#3a2f0b", "invalid → left blank"),
+           ("c-out", "#e3f5f3", "#113532", "opt-out left blank (opt-ins only)"),
            ("c-rej", "#fde1e1", "#4a1717", "invalid / missing → row rejected")]
 
 
@@ -513,6 +519,11 @@ def build_compare_html(source: pd.DataFrame, audit: pd.DataFrame, rows: list[int
                 body += f'<span class="why">{_e(reason)}</span>'
                 if st == CELL_BLANKED and show_was and raw:
                     body = f'{body}<span class="was">{_e(raw)}</span>'
+            elif st == CELL_OPTOUT:
+                # Consent mapped as "opt-ins only": the file's opt-out is shown struck through above an empty value.
+                body = '<span class="blank">(left blank: opt-ins only)</span>'
+                if show_was and raw:
+                    body += f'<span class="was">{_e(raw)}</span>'
             else:
                 # Normal cell: the converted value; for value-changing statuses optionally the struck-through
                 # original underneath. Derived/default cells don't show it -- their "original" isn't one cell.
@@ -539,7 +550,8 @@ def field_change_summary(audit: pd.DataFrame, schema: TargetSchema, mapping: Map
 
     Empty rows are excluded. One output row per schema field that has a status column, with columns:
     Field, From (mapping summary), one count per cell status (Unchanged, Reformatted, Built/split, Default,
-    Claude fix, Repaired typo, Left blank (invalid), Rejected rows), Empty (cells with no value) and Examples --
+    Claude fix, Repaired typo, Left blank (invalid), Opt-outs left blank, Rejected rows), Empty (cells with no
+    value) and Examples --
     up to three distinct "original → converted" pairs taken from repaired, reformatted or Claude-fixed cells, so
     the user can see what a reformat actually did.
 
@@ -568,6 +580,7 @@ def field_change_summary(audit: pd.DataFrame, schema: TargetSchema, mapping: Map
             "Claude fix": int(vc.get(CELL_FIXED, 0)),
             "Repaired typo": int(vc.get(CELL_REPAIRED, 0)),
             "Left blank (invalid)": int(vc.get(CELL_BLANKED, 0)),
+            "Opt-outs left blank": int(vc.get(CELL_OPTOUT, 0)),
             "Rejected rows": int(vc.get(CELL_REJECT, 0)),
             "Empty": int((st == "").sum()),
             "Examples": "   ·   ".join(examples),
@@ -583,7 +596,7 @@ def field_change_summary(audit: pd.DataFrame, schema: TargetSchema, mapping: Map
 # CELL_SAME and empty cells are not listed and get the plain text format.
 XLSX_FILL = {CELL_FORMAT: "#E8F1FF", CELL_DERIVED: "#F2ECFF", CELL_DEFAULT: "#F3F4F6", CELL_FIXED: "#E3F6E9",
              CELL_REPAIRED: "#FFE2C6",
-             CELL_BLANKED: "#FFF4D6", CELL_REJECT: "#FDE1E1"}
+             CELL_BLANKED: "#FFF4D6", CELL_REJECT: "#FDE1E1", CELL_OPTOUT: "#E3F5F3"}
 
 
 def comparison_xlsx(source: pd.DataFrame, audit: pd.DataFrame, schema: TargetSchema, plan: ColumnPlan,
@@ -650,7 +663,8 @@ def comparison_xlsx(source: pd.DataFrame, audit: pd.DataFrame, schema: TargetSch
     # Colour key. It names the most common colours; the grey (default) and orange (repaired) fills are explained
     # by the HTML legend only.
     ws.write(1, 0, "Blue = reformatted · purple = built from other columns · green = Claude fix · "
-                   "yellow = invalid, left blank · red = invalid/missing, row rejected")
+                   "yellow = invalid, left blank · teal = opt-out left blank (consent: opt-ins only) · "
+                   "red = invalid/missing, row rejected")
     # Group labels: merge across the block when it is wider than one column, otherwise write a single cell.
     ws.merge_range(2, c_src0, 2, c_gap - 1, "ORIGINAL FILE", f_grp_src) if len(cols) > 1 else \
         ws.write(2, c_src0, "ORIGINAL FILE", f_grp_src)
