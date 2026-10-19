@@ -73,7 +73,8 @@ two tables.
 - **Goes to:** the field(s) this column feeds.
   - Pick a different field to move the column there. That field takes this column as its only source, *except*
     the phone field: adding a phone column gives each extra number its own row, and adding an *Area Code* column
-    gives the 7-digit numbers their area code.
+    gives the 7-digit numbers their area code. Consent columns add up too, each picked with what it records
+    (`consent — opt-ins only`, `— opt-ins and opt-outs`, `— opt-outs only`; see *Mapped by hand only* below).
   - Clear the cell to leave the column out.
 - **Skip:** tick to keep a column out completely. The rules, saved templates and Claude won't map it again, and
   the template remembers it for next time.
@@ -158,7 +159,9 @@ The numbers below it are:
     - green: fix you approved;
     - **orange: repaired from a likely typo — check it;**
     - yellow: invalid, left blank;
-    - teal: a consent "no" left blank because consent was mapped as opt-ins only;
+    - teal: a consent value left blank by its column's setting (a "no" in an opt-ins-only or opt-outs-only
+      column);
+    - pink: `false` from a "yes" in an opt-outs-only column (e.g. *Unsubscribed* = Yes);
     - red: invalid or missing, row rejected.
   - **Original values:** with **Show original under changed values** on, the original is shown under each changed
     value. Hover over any cell for details.
@@ -181,7 +184,8 @@ The numbers below it are:
      Yes/no fields such as consent are never sent: an unreadable consent value stays blank.
   3. **Apply fixes and re-run** creates a new import with the approved fixes.
 - **Re-run this import:** runs the same file and mapping again with the current rules, as a new import. The
-  original stays as it was. An import made before 0.22.0 with consent mapped first asks what a consent "no" means.
+  original stays as it was. An import made before 0.22.0 with consent mapped first asks what each consent column
+  records.
 
 ## Looking up a number (Number history)
 
@@ -195,7 +199,7 @@ every import the number was converted in, newest first:
 | Row | the row in the client's file, numbered as Excel shows it |
 | Number in file | the number as written in the file (with the area code in front when it came from an area code column) |
 | Consent sent | `true` (subscribed), `false` (opted out) or blank (no change) |
-| Consent in file / Consent from | the consent cell as written in the file, and the column (and translation) it came from, with the choice made for it (*opt-ins only*: a "no" was sent blank); *not mapped* when nobody mapped consent |
+| Consent in file / Consent from | the consent cell(s) as written in the file (with several consent columns, each with its column's name: *Email Opt In: Y / Unsubscribed: Yes*), and the column(s) (and translation) it came from, each with its setting (*opt-ins only*, *opt-ins and opt-outs*, *opt-outs only*); *not mapped* when nobody mapped consent |
 
 Select a row to open that import. **Download (CSV)** saves the table with exact times (UTC), e.g. to answer a
 complaint. Look up one number at a time. Numbers are recorded since version 0.21.0; earlier imports are included
@@ -293,23 +297,53 @@ were cancelled or failed aren't listed.
 the field grid or with **Goes to** under **Columns in your file**. Nothing automatic fills them: not the rules,
 not Claude, not a default and not a saved template (templates leave them out, so you choose again for each file).
 
-- **consent:** only map a column that really records the customer's consent. Values become `true` (subscribes the
-  customer) or `false` (opts them out); Y/N, yes/no, true/false, 1/0, opted in/out, opt-in/opt-out and
-  subscribed/unsubscribed are understood (case, spaces, hyphens and underscores don't matter).
-  Anything else is left blank, which changes nobody's consent. What was sent for each number, and from which
-  column and row, can be looked up later under **Number history**.
-- **What a "no" means (consent only).** Once consent has a column, a question appears under the field table:
-  - **Opt-ins only:** yes → `true`; no → left blank, so the import unsubscribes nobody. Use it for a column such as
-    *Email Opt In* or *Newsletter*: a customer who didn't opt into email hasn't opted out of texts.
-  - **Opt-ins and opt-outs:** yes → `true`; no → `false`, which **opts the customer out of texts**. Only for a
-    column that records text (SMS) opt-ins and opt-outs.
+- **consent:** only map a column that really records the customer's consent. The import gets `true` (subscribes
+  the customer), `false` (opts them out of texts) or blank (changes nothing). Y/N, yes/no, true/false, T/F,
+  1/0, on/off, X or ✓, opted in/out, opt-in/opt-out, subscribed/unsubscribed and active/inactive are understood
+  (case, spaces, hyphens and underscores don't matter); anything else (e.g. `-1`, *maybe*) is left blank. What was sent for each number, and from which column and row, can
+  be looked up later under **Number history**.
+- **What each consent column records (its setting).** You choose it for every column you send to consent — with
+  the column under **Columns in your file** (*Goes to*: `consent — opt-ins only`, `consent — opt-ins and
+  opt-outs` or `consent — opt-outs only`), or under the field table, where each consent column has its own
+  question:
 
-  Nothing is chosen for you, and **Start import** stays disabled until you choose ("choose Opt-ins only or
-  Opt-ins and opt-outs"); until then the grid's preview for consent reads "choose below what a no means".
-  Choosing another column for consent, or removing one of its columns, asks again. Re-running an import made
-  before 0.22.0 asks the same question on the import's page before the *Re-run* buttons work. With opt-ins only,
-  *Side by side* shows each "no" that was left blank in teal, and the result banner and summary count them
-  ("2 consent values of false left blank (consent: opt-ins only), so this import opts nobody out").
+  | Setting | A yes in the column | A no in the column | Use it for |
+  |---|---|---|---|
+  | **Opt-ins only** | `true` | blank | *Email Opt In*, *Newsletter*: not opting into email isn't opting out of texts |
+  | **Opt-ins and opt-outs** | `true` | `false` (**opts the customer out**) | a column of text (SMS) opt-ins and opt-outs |
+  | **Opt-outs only** | `false` (**opts the customer out**) | blank | *Unsubscribed*, *Opt Out*, *Do Not Text* |
+
+  A value that names a status keeps its meaning in every setting: *Subscribed* / *Opted in* / *Active* is an
+  opt-in and *Unsubscribed* / *Opted out* an opt-out; the setting only decides which of them are imported (e.g.
+  *Subscribed* in an opt-outs-only column is left blank). *Inactive* is a plain no. **Translate values** is for values that
+  aren't yes/no words (e.g. *DNT* / *OK* in a *Do Not Text* column): translate each one to **opt-in**, **opt-out** or
+  nothing — `DNT=opt-out; OK=`. True / false and yes / no aren't accepted there, because "DNT=yes" could mean
+  "yes, opted out" or "yes, subscribed". A translated value means what it says in every setting, and the setting
+  decides which are imported (opt-outs only: DNT → `false`, OK → blank). Values the translation doesn't list are
+  read as above; an empty cell stays blank. Translations saved before 0.23.0 used `true` / `false` (or yes / no),
+  which keep their meaning then: true / yes subscribed, false / no opted out — so a re-run only ever imports
+  fewer of them, never the opposite. A **Fixed value** needs no setting (e.g. `false` for a file that is a
+  list of unsubscribes).
+
+  **Several consent columns** (e.g. *Email Opt In* and *Unsubscribed*) are read together, row by row (How:
+  *Consent columns*): an opt-out in any of them wins (`false`), otherwise an opt-in (`true`), otherwise blank. So
+  *Email Opt In* = Y with *Unsubscribed* = Yes gives `false`. Imports made with 0.22.0 combined consent columns
+  with *First non-empty* (the first column with a value decides); re-run as they are, they keep it, so they give
+  the same result. Any change you make to such a consent mapping (a column, a setting) turns it into *Consent
+  columns*, and re-running an import from
+  before 0.22.0 (whose settings you choose then) reads its columns together.
+
+  In the grid's **Option** cell the settings are typed per column (`Email Opt In: opt-ins only; Unsubscribed:
+  opt-outs only`); a setting alone (`opt-outs only`) only works when consent has one column.
+
+  Nothing is chosen for you: **Start import** stays disabled until every consent column has a setting, and until
+  then the grid's preview for consent reads "choose below what each column records". A column you add later has
+  no setting yet; one you remove takes its setting with it. Re-running an import made before 0.22.0 asks for each
+  consent column's setting on the import's page before the *Re-run* buttons work (0.22.0 imports keep the choice
+  they were made with, on each column). After the import, the result banner and the summary file count consent in
+  the converted file ("Consent in the converted file: 120 true (subscribed), 15 false (unsubscribed), 300 left
+  blank by the consent settings"). *What changed* counts every row read, bad rows and duplicates included, like
+  its other columns, so its numbers can be higher.
 - **last_contacted:** when *we* last texted the customer (e.g. *Last Campaign Sent*). Files almost never have it.
 
 ## Templates, target format, users
