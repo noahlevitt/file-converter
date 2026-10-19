@@ -137,6 +137,10 @@ class AIReviewResult:
 # Prompts
 # ---------------------------------------------------------------------------
 
+# Transforms only a person uses: "consent" reads consent columns (0.23.0), which only a person maps.
+PERSON_ONLY_TRANSFORMS = {"consent"}
+
+
 def _transform_docs() -> str:
     """Describe every transform in the registry for the system prompt, one bullet per transform.
 
@@ -145,6 +149,8 @@ def _transform_docs() -> str:
     """
     lines = []
     for t in TRANSFORMS.values():
+        if t.name in PERSON_ONLY_TRANSFORMS:
+            continue
         src = "no sources" if t.max_sources == 0 else (
             f"{t.min_sources}+ sources" if t.max_sources is None else f"exactly {t.min_sources} source")
         params = f"; params: {', '.join(t.params)}" if t.params else ""
@@ -397,7 +403,7 @@ def _mapping_item_schema(schema: TargetSchema, columns: list[str]) -> dict[str, 
         "type": "object",
         "properties": {
             "target_field": {"type": "string", "enum": [f.name for f in schema.auto_fields]},
-            "transform": {"type": "string", "enum": list(TRANSFORMS)},
+            "transform": {"type": "string", "enum": [t for t in TRANSFORMS if t not in PERSON_ONLY_TRANSFORMS]},
             "sources": {"type": "array", "items": {"type": "string", "enum": columns}},
             "params": {"type": "object", "properties": params_props, "additionalProperties": False},
             "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
@@ -742,7 +748,7 @@ def parse_mapping_entries(entries: list[dict], schema: TargetSchema, columns: li
         if schema.field(target).manual_only:
             dropped.append(f"{target}: only a person maps this field")
             continue
-        if transform not in TRANSFORMS:
+        if transform not in TRANSFORMS or transform in PERSON_ONLY_TRANSFORMS:
             dropped.append(f"{target}: unknown transform '{transform}'")
             continue
         sources = []
@@ -754,7 +760,7 @@ def parse_mapping_entries(entries: list[dict], schema: TargetSchema, columns: li
                 unknown = True
             elif real not in sources:
                 sources.append(real)
-        # The consent opt-out choice is a person's (FIELD_PARAMS): never taken from Claude.
+        # Consent settings are a person's (FIELD_PARAMS): never taken from Claude.
         params = {k: v for k, v in (e.get("params") or {}).items() if v not in (None, "", []) and k not in FIELD_PARAMS}
         if transform in ("none", "constant"):
             sources = []
