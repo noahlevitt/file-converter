@@ -138,13 +138,15 @@ class FieldSpec(BaseModel):
         description="Only filled when a person maps a column to it by hand on the mapping page; never by the "
         "automatic rules, a saved template, Claude or a default.",
     )
-    # boolean fields (0.22.0): a person mapping a column to this field must choose what its false values do: written
-    # (opt-ins and opt-outs) or left blank (opt-ins only). Mapping param "opt_outs": "import" / "skip". For
-    # consent: an email opt-in column's "No" isn't a text opt-out, so it mustn't unsubscribe anyone.
+    # boolean fields (0.22.0; per column since 0.23.0): whoever maps a column to this field chooses what it records,
+    # its consent setting: opt-ins only (a no is left blank), opt-ins and opt-outs (a no is written as false) or
+    # opt-outs only (a yes is written as false, a no left blank). Mapping param "modes": {column: "in" | "both" |
+    # "out"} (mapping.CONSENT_MODES); several columns are combined and an opt-out in any of them wins. For consent:
+    # an email opt-in column's "No" isn't a text opt-out, and an Unsubscribed column's "Yes" is one.
     opt_out_choice: bool = Field(
         False,
-        description="boolean only: whoever maps a column to this field chooses whether its false values are "
-        "written (opt-ins and opt-outs) or left blank (opt-ins only); importing is blocked until they choose.",
+        description="boolean only: whoever maps a column to this field chooses what each column records (its consent "
+        "setting): opt-ins only, opt-ins and opt-outs, or opt-outs only; importing is blocked until they choose.",
     )
     # date/datetime fields: takes a date column whose header names no particular activity ("Date", "Start Time",
     # "Timestamp"; see heuristics.auto_map step 7). "call_log" = first choice in files that look like call logs,
