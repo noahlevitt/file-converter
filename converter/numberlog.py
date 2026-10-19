@@ -28,7 +28,7 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 
 from . import normalizers as N
-from .mapping import OPT_OUT_CHOICES, Mapping, opt_out_setting
+from .mapping import Mapping
 from .schema import FieldSpec, TargetSchema
 from .storage import ImportRecord, Store
 
@@ -49,8 +49,9 @@ def consent_field(schema: TargetSchema) -> FieldSpec | None:
 def consent_source(schema: TargetSchema, mapping: Mapping) -> str:
     """Where an import's consent values came from, in words, or "" when consent wasn't mapped (always blank).
 
-    Examples: "SMS Opt In" (copied), "Translate values: SMS Opt In (Y=true; N=false)", "fixed value 'true'",
-    "Email Opt In — opt-ins only" (false values were left blank, 0.22.0).
+    Examples: "SMS Opt In (opt-ins and opt-outs)", "Email Opt In (opt-ins only) + Unsubscribed (opt-outs only)"
+    (each column's consent setting, 0.23.0), "Translate values: SMS Opt In (Y=true; N=false) (opt-ins only)",
+    "fixed value 'true'". Imports from before 0.23.0 show what they were mapped with then ("SMS Opt In").
     """
     f = consent_field(schema)
     if f is None or f.fixed_blank:
@@ -58,18 +59,20 @@ def consent_source(schema: TargetSchema, mapping: Mapping) -> str:
     fm = mapping.get(f.name)
     if fm.transform == "none" or (f.manual_only and fm.origin != "user"):
         return ""  # not mapped, or mapped by something other than a person, which a manual-only field ignores
-    choice = opt_out_setting(fm.params)
-    text = fm.summary().removesuffix(f" — {OPT_OUT_CHOICES[choice]}") if choice else fm.summary()
+    text = fm.summary()
     if fm.transform == "map_values" and fm.params.get("value_map"):
-        text += " (" + "; ".join(f"{m.get('from', '')}={m.get('to', '')}" for m in fm.params["value_map"]) + ")"
-    return f"{text} — {OPT_OUT_CHOICES[choice]}" if choice else text
+        pairs = " (" + "; ".join(f"{m.get('from', '')}={m.get('to', '')}" for m in fm.params["value_map"]) + ")"
+        plain = fm._summary_text()
+        text = plain + pairs + text.removeprefix(plain)  # the translation, then the consent setting
+    return text
 
 
 def _consent_cells(audit: pd.DataFrame, schema: TargetSchema, source: pd.DataFrame | None,
                    mapping: Mapping | None) -> list[str] | None:
     """The consent cell(s) of each audit row as written in the client's file ("Y", "Opted in"), or None when they
-    can't be read (no file or mapping given). Several consent columns are joined with " / "; "" when consent wasn't
-    taken from the file (not mapped, a fixed value, or mapped by something other than a person)."""
+    can't be read (no file or mapping given). Several consent columns are joined with " / ", each with its column's
+    name ("Email Opt In: Y / Unsubscribed: No"); "" when consent wasn't taken from the file (not mapped, a fixed
+    value, or mapped by something other than a person)."""
     f = consent_field(schema)
     if source is None or mapping is None or "_src" not in audit.columns:
         return None
@@ -79,7 +82,11 @@ def _consent_cells(audit: pd.DataFrame, schema: TargetSchema, source: pd.DataFra
     cols = [c for c in fm.sources if c in source.columns]
     if not cols:
         return [""] * len(audit)
-    cells = [" / ".join(v for v in map(N.clean_text, row) if v) for row in source[cols].itertuples(index=False)]
+    if len(cols) == 1:
+        cells = [N.clean_text(v) for v in source[cols[0]].tolist()]
+    else:
+        cells = [" / ".join(f"{c}: {v}" for c, v in zip(cols, map(N.clean_text, row)) if v)
+                 for row in source[cols].itertuples(index=False)]
     return [cells[int(k)] if 0 <= int(k) < len(cells) else "" for k in audit["_src"].tolist()]
 
 
