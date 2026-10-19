@@ -4,7 +4,7 @@ For whoever picks this repository up next: a person, or Claude in a new chat. It
 other documents don't: how changes are made and delivered, the decisions the business made, and what is still
 open. It also explains how to start a separate project from this code while this one keeps being updated.
 
-**State:** version 0.23.0 (see [CHANGELOG.md](CHANGELOG.md)), about 1,090 tests. Repository:
+**State:** version 0.23.1 (see [CHANGELOG.md](CHANGELOG.md)), about 1,090 tests. Repository:
 github.com/noahlevitt/file-converter. Owner: Noah Levitt. Last updated 2026-10-19. Update this file with every
 release (section 4 in particular).
 
@@ -69,7 +69,7 @@ their docstrings removed before and after.
 
 **Delivery** (when the changes can't be pushed directly)
 - Changes go to Noah as a git bundle, `file-converter-updateN.bundle`, numbered in order. This file came with
-  update32, so the next is `file-converter-update33.bundle`; update this line with each bundle.
+  update33, so the next is `file-converter-update34.bundle`; update this line with each bundle.
 
   ```bash
   tags=$(git tag --list 'v0.*' | sort -V | awk -F. '$2>=6')
@@ -125,11 +125,6 @@ Each of these was decided by Noah. Don't reverse one without asking; for a new p
   area code, like `555-0177`. Noah has not confirmed it. To undo: in `normalizers._repair_phone`, rule 4, use
   `digits` instead of `seven`, and update the README's repair table, the changelog and the test
   `test_country_code_and_7_digits_get_the_files_main_area_code`.
-- **The two mapping tables on New import jump back to their first row after every edit** (the field grid and
-  *Columns in your file*; reported and fixed in Customer Records 1.0.2, not yet here). Their diagnosis: each edit
-  gives the table a new key, so a table scrolled inside itself loses its place. Their fix: `height="content"` on both
-  `st.data_editor` calls in `app.py` (the tables then grow to their full length and the page scrolls instead),
-  checked by their `tests/test_mapping_tables.py`. A code change: it needs a version (patch) and its own check.
 - **Not approved or not done** from the 25-item bug review: #1, #2, #5, #22, #23, #24, #25 (and #19–#21, status
   unknown). From the feature list: #2–#10. The descriptions of these items were only in the chat where they were
   made and were not kept; ask Noah for them, and record them here.
@@ -157,7 +152,8 @@ this project's engine in its `converter/` folder, next to this app (it uses port
   `editor.py`, `engine.py`, `normalizers.py`, `compare.py`, `output.py`, `checks.py`, `ai.py` and `numberlog.py`
   (`git diff v0.21.2 v0.23.0`). `schema.py` has its additions there, and its number history is replaced by a
   `sink`, so those two need care.
-- **Fixes found there that apply here** are listed in section 4 (the mapping tables jumping to their first row).
+- **Fixes found there that apply here** go in section 4. The last one, the mapping tables jumping back to their
+  first row (its 1.0.2), was taken here in 0.23.1.
 - Its decisions (section 2 of its handoff) are its own; the ones here don't apply to it unless confirmed there.
 
 **Starting another project from this code:** either the same way (copy the files into a new repository and take
