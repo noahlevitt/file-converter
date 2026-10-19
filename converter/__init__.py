@@ -33,4 +33,4 @@ Modules
 ``summary.txt``; bump it with each release.
 """
 
-__version__ = "0.21.2"
+__version__ = "0.22.0"
