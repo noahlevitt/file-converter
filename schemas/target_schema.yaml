@@ -34,8 +34,9 @@
 #   no_year_value  date: the year written when the source has month + day only (or a placeholder year)
 #   fixed_blank    always empty in the output, whatever the file or mapping says; locked in the UI and for Claude
 #   manual_only    filled only when a person maps a column to it on the mapping page (never rules, templates, Claude)
-#   opt_out_choice boolean: the person mapping it chooses "Opt-ins only" (false values left blank) or "Opt-ins and
-#                  opt-outs" (false values written); the import can't start until they choose
+#   opt_out_choice boolean: the person mapping it chooses each column's consent setting: "Opt-ins only" (a no is
+#                  left blank), "Opt-ins and opt-outs" (a no is written as false) or "Opt-outs only" (a yes is
+#                  written as false, a no left blank); the import can't start until every column has one
 #   description    shown in the app and given to Claude to explain the field
 #   synonyms       other header names that mean this field (the more, the better automatic matching)
 # ---------------------------------------------------------------------------
@@ -78,9 +79,10 @@ fields:
 
   # Mapped by hand only: the rules, templates and Claude never fill it. Values become true / false (Y/N, yes/no,
   # opted in/out, subscribed/unsubscribed...); anything else is left blank, and a blank never changes anyone's
-  # consent. Whoever maps it chooses "Opt-ins only" (false left blank: e.g. an email opt-in column, whose "No" is
-  # not a text opt-out) or "Opt-ins and opt-outs" (false written: opts the customer out). To lock it blank again,
-  # replace manual_only with fixed_blank: true.
+  # consent. Whoever maps a column to it chooses what that column records: "Opt-ins only" (a no is left blank: e.g.
+  # an email opt-in column, whose "No" is not a text opt-out), "Opt-ins and opt-outs" (a no opts the customer out)
+  # or "Opt-outs only" (e.g. Unsubscribed: a yes opts the customer out, a no is left blank). Several columns are
+  # combined; an opt-out in any of them wins. To lock it blank again, replace manual_only with fixed_blank: true.
   - name: consent
     header: consent
     type: boolean
