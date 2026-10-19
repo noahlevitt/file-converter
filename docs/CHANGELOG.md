@@ -3,6 +3,16 @@
 What changed in each version. The running version is shown in the app's sidebar. Each version is tagged in git
 (`vX.Y.Z`).
 
+## 0.23.1 — the mapping tables keep their place
+
+- **Editing a row of a mapping table no longer jumps back to the first row.** Both tables on New import (the field
+  grid and *Columns in your file*) showed at most ten rows and scrolled inside themselves; each edit rebuilt the
+  table at its first row, so in a file with more than ten columns the row just edited disappeared. Both tables are
+  now as tall as their content and the page scrolls instead (Customer Records fixed the same page this way in its
+  1.0.2). In a file with a very large number of columns (about 280 or more) *Columns in your file* still scrolls
+  inside itself past that height.
+- All 406 test files give identical results (no conversion change).
+
 ## 0.23.0 — consent settings per column: opt-ins only, opt-ins and opt-outs, opt-outs only
 
 - **Each consent column now has its own setting, chosen when it is mapped.** 0.22.0 had one choice for the whole
