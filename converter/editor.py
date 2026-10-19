@@ -10,12 +10,15 @@ The web app (``app.py``) shows the mapping in two editable tables:
 * **Field side** - one row per target field: Field | Type | How (transform label) | Source column(s) | Option |
   Check. :func:`option_text` fills the Option cell, :func:`apply_row_edit` applies an edited row back to the
   :class:`~converter.mapping.Mapping`, :func:`row_problem` fills the Check cell.
-* **Column side** ("Columns in your file") - one row per source column: Goes to (target fields) | Skip | Your
-  note. :func:`apply_column_edit` applies "Goes to" and "Skip" edits (notes are handled in ``app.py``).
+* **Column side** ("Columns in your file") - one row per source column: Goes to (target fields; consent with the
+  column's consent setting, "consent — opt-outs only") | Skip | Your note. :func:`goes_to_options` /
+  :func:`goes_to_cell` fill "Goes to", :func:`read_goes_to` reads it back, :func:`apply_column_edit` applies "Goes
+  to" and "Skip" edits (notes are handled in ``app.py``).
 
 Main entry points
     :func:`option_text`, :func:`parse_option`, :func:`apply_row_edit`, :func:`apply_column_edit`,
-    :func:`row_problem`, plus the label tables :data:`LABELS` / :data:`FROM_LABEL` and :data:`OPTION_HELP`.
+    :func:`row_problem`, :func:`goes_to_options`, :func:`goes_to_cell`, :func:`read_goes_to`, plus the label
+    tables :data:`LABELS` / :data:`FROM_LABEL` and :data:`OPTION_HELP`.
 
 Data flow
     ``Mapping`` -> grid rows (``LABELS``, :func:`option_text`, :func:`row_problem`) -> reviewer edits the grid ->
@@ -24,7 +27,9 @@ Data flow
 
 Every edit marks the touched fields as the reviewer's choice (``origin="user"``, reason "set by reviewer").
 Phone fields follow the "several phone columns -> one row per number" rule (see ``mapping.phone_rule``); an area
-code column added to the phone field makes it 'Phone + area code column'.
+code column added to the phone field makes it 'Phone + area code column'. Consent (0.23.0) reads each of its columns
+with that column's consent setting (``mapping.consent_rule``, ``mapping.CONSENT_MODES``): its columns add up like
+the phone field's, and a column keeps its setting while it stays.
 """
 
 from __future__ import annotations
@@ -32,7 +37,9 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from .mapping import FIELD_PARAMS, FieldMapping, Mapping, is_area_code_header, opt_out_problem, phone_rule
+from . import normalizers as N
+from .mapping import (CONSENT_MODES, FIELD_PARAMS, FieldMapping, Mapping, consent_modes, consent_problem, consent_rule,
+                      is_area_code_header, parse_consent_mode, phone_rule)
 from .schema import FieldSpec, TargetSchema
 from .transforms import ADDRESS_PARTS, DATE_ORDERS, NAME_PARTS, TRANSFORMS, check_transform
 
@@ -46,8 +53,48 @@ OPTION_HELP = (
     "Depends on 'How': date fields → auto / MDY / DMY / YMD (or a strptime pattern like %d.%m.%Y); "
     "name part → first / middle / last / first_middle / title / suffix / full; "
     "address part → line1 / line2 / city / state / zip; combine → separator; "
-    "split → separator and piece, e.g. ', #2'; translate → Y=true; N=false; fixed value → the value."
+    "split → separator and piece, e.g. ', #2'; translate → Y=true; N=false (consent: to opt-in, opt-out or "
+    "nothing, e.g. DNT=opt-out; OK=); fixed value → the value; consent columns → each column's setting, e.g. "
+    "Email Opt In: opt-ins only; Unsubscribed: opt-outs only."
 )
+
+
+def consent_option_text(fm: FieldMapping) -> str:
+    """The Option cell of consent read with "Consent columns": the setting of each column that has one, e.g.
+    "opt-ins only" (one column) or "Email Opt In: opt-ins only; Unsubscribed: opt-outs only"."""
+    modes = consent_modes(fm)
+    if len(fm.sources) == 1:
+        return CONSENT_MODES.get(modes.get(fm.sources[0], ""), "")
+    return "; ".join(f"{c}: {CONSENT_MODES[m]}" for c, m in modes.items())
+
+
+def parse_consent_option(text: str | None, sources: list[str]) -> tuple[dict[str, str], str | None]:
+    """Consent settings typed in the Option cell -> ({column: setting}, error).
+
+    "opt-outs only" (or "out", "both", "full", "in", ...) sets the column when consent has one; "Email Opt In:
+    opt-ins only; Unsubscribed = out" sets each named column (case-insensitive). Blank sets nothing. Unknown columns
+    or settings, or a setting without a column name when consent has several columns (it would silently change
+    them all), give an error and nothing is set.
+    """
+    text = (text or "").strip()
+    if not text:
+        return {}, None
+    if parse_consent_mode(text):
+        if len(sources) > 1:
+            return {}, ("consent has several columns: name each one, e.g. Email Opt In: opt-ins only; Unsubscribed: "
+                        "opt-outs only")
+        return {c: parse_consent_mode(text) for c in sources}, None
+    by_lower = {c.lower(): c for c in sources}
+    modes: dict[str, str] = {}
+    for chunk in [c for c in re.split(r"[;\n]", text) if c.strip()]:
+        m = re.match(r"^(.*?)\s*[:=]\s*([^:=]*)$", chunk.strip())
+        col = by_lower.get(m.group(1).strip().lower()) if m else None
+        mode = parse_consent_mode(m.group(2)) if m else None
+        if col is None or mode is None:
+            return {}, ("consent settings look like: Email Opt In: opt-ins only; Unsubscribed: opt-outs only "
+                        "(settings: opt-ins only, opt-ins and opt-outs, opt-outs only)")
+        modes[col] = mode
+    return modes, None
 
 
 def option_text(fm: FieldMapping, f: FieldSpec) -> str:
@@ -85,6 +132,8 @@ def option_text(fm: FieldMapping, f: FieldSpec) -> str:
         return "; ".join(f"{m.get('from', '')}={m.get('to', '')}" for m in p.get("value_map", []))
     if t == "constant":
         return str(p.get("value", ""))
+    if t == "consent" or (t == "coalesce" and f.opt_out_choice):
+        return consent_option_text(fm)
     if t in ("copy", "coalesce", "each_row", "area_code"):
         # Copy-like transforms only have options for dates (how to read them) and phones (default country).
         # An explicit strptime pattern wins over a date order.
@@ -109,6 +158,9 @@ def parse_option(transform: str, f: FieldSpec, text: str | None) -> tuple[dict[s
         parse_option("split", f, ", #2")            -> ({"separator": ",", "index": 1}, None)
         parse_option("map_values", f, "Y=true; N=false")
             -> ({"value_map": [{"from": "Y", "to": "true"}, {"from": "N", "to": "false"}]}, None)
+        parse_option("map_values", consent, "DNT=opt-out; OK=")
+            -> ({"value_map": [{"from": "DNT", "to": "opt-out"}, {"from": "OK", "to": ""}]}, None)
+        parse_option("map_values", consent, "DNT=yes")    -> ({}, "for consent, translate each value to ...")
         parse_option("copy", date_field, "dmy")     -> ({"date_order": "DMY"}, None)
         parse_option("copy", date_field, "%d.%m.%Y") -> ({"input_format": "%d.%m.%Y"}, None)
         parse_option("copy", phone_field, "ca")     -> ({"region": "CA"}, None)
@@ -142,6 +194,21 @@ def parse_option(transform: str, f: FieldSpec, text: str | None) -> tuple[dict[s
                 return {}, "translations look like: Y=true; N=false"
             a, b = chunk.split("=", 1)
             pairs.append({"from": a.strip(), "to": b.strip()})
+        if f.opt_out_choice:
+            # Consent (0.23.0): a translation says what each value means — opt-in, opt-out or nothing. true / false
+            # / yes / no are refused: whether "DNT=yes" means "yes, opted out" or "yes, subscribed" depends on how
+            # the column is read, and each wrong reading flips who gets texted.
+            # "Active" is left out too: it reads as an opt-in, but "DNT=active" looks like "the DNT flag is active".
+            seen: dict[str, str] = {}
+            for p in pairs:
+                to = p["to"]
+                if (not p["from"] or (to and N.consent_reading(to) not in ("in", "out"))
+                        or N._boolean_key(to) == "active"):
+                    return {}, ("for consent, translate each value to opt-in, opt-out or nothing, e.g. "
+                                "DNT=opt-out; OK= (true / false and yes / no could be read either way)")
+                meaning = N.consent_reading(to) if to else ""
+                if seen.setdefault(p["from"].lower(), meaning) != meaning:
+                    return {}, f"'{p['from']}' is translated twice, to different things"
         return {"value_map": pairs}, None
     if transform == "constant":
         return {"value": text}, None
@@ -208,15 +275,26 @@ def apply_row_edit(schema: TargetSchema, mapping: Mapping, field_name: str, chan
             error = ("several phone columns always give one row per number" if f.type == "phone"
                      else f"'{LABELS[new_t]}' is only for the phone field")
             new_t = phone_rule(f.type, new_t)
+        if f.opt_out_choice and new_t == "coalesce":
+            # First non-empty is only kept as imports made before 0.23.0 stored it; a person mapping consent now
+            # gets its columns read together (an opt-out in any of them wins).
+            error = (f"{f.header} reads its columns together, each with its consent setting "
+                     f"('{LABELS['consent']}'); 'First non-empty' is only kept for imports made before 0.23.0")
+            new_t = "consent"
+        if consent_rule(f, new_t, len(fm.sources)) != new_t:
+            if new_t != "copy":  # a copy of consent columns simply is 'Consent columns'
+                error = (f"{f.header} reads each column with its own consent setting ('{LABELS['consent']}')"
+                         if f.opt_out_choice else f"'{LABELS[new_t]}' is only for consent")
+            new_t = consent_rule(f, new_t, len(fm.sources))
         if new_t != fm.transform:
             fm.transform = new_t
-            # Params of the old transform mean nothing to the new one; the field's own (the consent opt-out choice)
-            # stay.
+            # Params of the old transform mean nothing to the new one; the field's own (consent settings) stay.
             fm.params = {k: v for k, v in fm.params.items() if k in FIELD_PARAMS}
             if new_t in ("none", "constant"):
                 fm.sources = []
     # Sensible automatic transform when only sources were chosen.
-    several = "each_row" if f.type == "phone" else "coalesce"  # several phone columns → one row per number
+    # Several phone columns → one row per number; several consent columns → each with its setting, an opt-out wins.
+    several = "each_row" if f.type == "phone" else "consent" if f.opt_out_choice else "coalesce"
     if fm.transform == "none" and fm.sources:
         fm.transform = "copy" if len(fm.sources) == 1 else several
     elif fm.transform == "copy" and len(fm.sources) > 1:
@@ -231,8 +309,19 @@ def apply_row_edit(schema: TargetSchema, mapping: Mapping, field_name: str, chan
         # as is: the row stays incomplete and the Check column says what's missing.)
         fm.transform = "none"
         fm.params = {}
+    # Consent reading columns always uses "Consent columns" (or "Translate values"); no other field can. A First
+    # non-empty kept from an import made before 0.23.0 becomes it too once a person edits it.
+    fm.transform = consent_rule(f, fm.transform, len(fm.sources))
+    if f.opt_out_choice and fm.transform == "coalesce":
+        fm.transform = "consent"
 
-    if col_option in changes:
+    if col_option in changes and fm.transform == "consent":
+        # Consent settings typed in the Option cell; the other columns keep theirs.
+        modes, opt_error = parse_consent_option(changes[col_option], fm.sources)
+        if opt_error is None:
+            fm.params = {**fm.params, "modes": {**consent_modes(fm), **modes}}
+        error = error or opt_error
+    elif col_option in changes:
         # Parsed against the (possibly just changed) transform.
         params, opt_error = parse_option(fm.transform, f, changes[col_option])
         if opt_error is None:
@@ -242,8 +331,11 @@ def apply_row_edit(schema: TargetSchema, mapping: Mapping, field_name: str, chan
         # Default part (first name / street line) so the row is valid right away.
         fm.params = parse_option(fm.transform, f, "")[0]
 
-    if fm.sources != before.sources:
-        fm.params.pop("opt_outs", None)  # the consent choice was about the old column(s): ask again
+    # Consent settings belong to columns: a column keeps its setting while it stays, a new one has none yet.
+    if f.opt_out_choice and fm.transform not in ("none", "constant") and consent_modes(fm):
+        fm.params["modes"] = consent_modes(fm)
+    else:
+        fm.params.pop("modes", None)
     fm.origin = "user"
     fm.confidence = ""
     fm.reason = "set by reviewer"
@@ -271,7 +363,10 @@ def _without_column(fm: FieldMapping, column: str) -> FieldMapping:
     if not sources:
         return FieldMapping(origin="user", reason="set by reviewer")
     transform = fm.transform
-    fm = fm.model_copy(update={"params": {k: v for k, v in fm.params.items() if k != "opt_outs"}})  # ask again
+    if isinstance(fm.params.get("modes"), dict):
+        # The column takes its consent setting with it; the others keep theirs.
+        fm = fm.model_copy(update={"params": {**fm.params, "modes": {c: m for c, m in fm.params["modes"].items()
+                                                                      if c != column}}})
     if transform == "area_code" and all(is_area_code_header(s) for s in sources):
         return FieldMapping(origin="user", reason="set by reviewer")  # an area code alone is no phone number
     if transform == "area_code" and is_area_code_header(column) and not any(map(is_area_code_header, sources)):
@@ -279,13 +374,18 @@ def _without_column(fm: FieldMapping, column: str) -> FieldMapping:
     if transform in ("coalesce", "concat", "each_row", "area_code") and len(sources) == 1:
         transform = "copy"
     params = fm.params if transform == fm.transform else {}
+    if isinstance(fm.params.get("modes"), dict):
+        # Consent: the other columns keep their settings and are read together (a First non-empty kept from 0.22.0
+        # becomes that too, as with any edit by a person).
+        params = {**params, "modes": fm.params["modes"]}
+        transform = "consent" if transform in ("copy", "coalesce") else transform
     if check_transform(transform, sources, params):
         return FieldMapping(origin="user", reason="set by reviewer")
     return FieldMapping(sources=sources, transform=transform, params=params, origin="user", reason="set by reviewer")
 
 
 def apply_column_edit(schema: TargetSchema, mapping: Mapping, column: str, targets: list[str] | None = None,
-                      skip: bool | None = None) -> tuple[Mapping, list[str]]:
+                      skip: bool | None = None, settings: dict[str, str] | None = None) -> tuple[Mapping, list[str]]:
     """Edit the mapping from the source column's side (the "Columns in your file" table).
 
     targets: target field names this column should go to (None = unchanged, [] = not imported). A field that
@@ -294,6 +394,10 @@ def apply_column_edit(schema: TargetSchema, mapping: Mapping, column: str, targe
     code column ("Area Code") added to the phone field gives its 7-digit numbers their area code ('Phone + area
     code column').
     skip: True removes the column from every field and keeps it out (also of templates and Claude's suggestions).
+    settings: consent settings chosen with the column, {field name: "in" | "both" | "out"} (0.23.0; for fields with
+    ``opt_out_choice``). Consent columns add up like phone columns: the column is added to consent's other columns
+    with its setting (none = asked under the field table); choosing another setting for a column consent already
+    reads changes just that column's.
     Returns (new mapping, messages describing what changed).
 
     ``skip=False`` un-skips the column; choosing a target for a skipped column also un-skips it. ``skip=True``
@@ -343,12 +447,44 @@ def apply_column_edit(schema: TargetSchema, mapping: Mapping, column: str, targe
                 fields[name] = _without_column(fields[name], column)
                 messages.append(f"'{column}' no longer goes to {schema.field(name).header}.")
         # Fields that newly want this column.
+        settings = settings or {}
         for name in wanted:
-            if name in current:
-                continue  # already reads it: leave its transform and params alone
             f = schema.field(name)
             before = fields.get(name, FieldMapping())
+            mode = settings.get(name) if f.opt_out_choice and settings.get(name) in CONSENT_MODES else None
+            if name in current:
+                # Already reads it: leave its transform and params alone, except a newly chosen consent setting.
+                if mode and before.transform != "constant" and consent_modes(before).get(column) != mode:
+                    fields[name] = before.model_copy(update={
+                        "params": {**before.params, "modes": {**consent_modes(before), column: mode}},
+                        # A person's edit of a First non-empty kept from 0.22.0: its columns are now read together.
+                        "transform": "consent" if before.transform == "coalesce" else before.transform,
+                        "origin": "user", "confidence": "", "reason": "set by reviewer"})
+                    messages.append(f"{f.header}: '{column}' is now {CONSENT_MODES[mode]}.")
+                continue
             has_sources = before.transform not in ("none", "constant") and bool(before.sources)
+            if f.opt_out_choice:
+                # Consent columns add up, each with its own setting (an opt-out in any of them wins; a 'First
+                # non-empty' kept from an older import becomes that too). A translation or a fixed value is
+                # replaced: it can't take a second column.
+                keep = before.transform in ("consent", "coalesce") and has_sources
+                sources = [*before.sources, column] if keep else [column]
+                modes = {**(consent_modes(before) if keep else {}), **({column: mode} if mode else {})}
+                fields[name] = FieldMapping(sources=sources, transform="consent",
+                                            params={"modes": modes} if modes else {}, origin="user",
+                                            reason="set by reviewer")
+                how = CONSENT_MODES[mode] if mode else "choose its setting below the field table"
+                if keep and before.transform == "coalesce":
+                    # A First non-empty kept from an older import: from now on its columns are read together.
+                    messages.append(f"{f.header} now also reads '{column}' ({how}); its columns are now read "
+                                    "together: an opt-out in any of them wins (was first non-empty).")
+                elif keep:
+                    messages.append(f"{f.header} now also reads '{column}' ({how}).")
+                elif before.transform != "none":
+                    messages.append(f"{f.header} now comes from '{column}' ({how}; was {before._summary_text()}).")
+                else:
+                    messages.append(f"{f.header} now comes from '{column}' ({how}).")
+                continue
             if f.type == "phone" and has_sources:
                 # Phone columns add up: each different number becomes its own row. An area code column gives the
                 # 7-digit numbers their area code ('Phone + area code column', which also gives one row per number).
@@ -382,7 +518,8 @@ def row_problem(schema: TargetSchema, mapping: Mapping, field_name: str) -> str:
     * an invalid transform / sources / params combination, e.g. "'Combine columns' needs at least 2 source
       column(s)" (a How chosen before its columns);
     * "required — choose a source column" for an unmapped required field without a default;
-    * for consent (``opt_out_choice``), that its opt-out choice is still to be made (``mapping.opt_out_problem``).
+    * for consent (``opt_out_choice``), the columns whose consent setting is still to be chosen
+      (``mapping.consent_problem``).
 
     Fixed-blank fields never have a problem. (The "only one 'One row per phone number' field" rule is checked for
     the whole mapping by ``Mapping.problems``.)
@@ -391,9 +528,59 @@ def row_problem(schema: TargetSchema, mapping: Mapping, field_name: str) -> str:
     if f.fixed_blank:
         return ""
     fm = mapping.get(field_name)
-    p = check_transform(fm.transform, fm.sources, fm.params) or opt_out_problem(f, fm)
+    p = check_transform(fm.transform, fm.sources, fm.params) or consent_problem(f, fm)
     if p:
         return p
     if f.required and fm.transform == "none" and not f.default:
         return "required — choose a source column"
     return ""
+
+
+# "Goes to" of a consent column that has no setting yet (picked in the field grid): shown, and can be picked.
+NO_SETTING = "setting not chosen"
+
+
+def goes_to_options(sch: TargetSchema) -> list[str]:
+    """The choices of "Goes to" under Columns in your file: each field's output header, and for consent (fields
+    with opt_out_choice) one choice per consent setting ("consent — opt-ins only", ..., "consent — setting not
+    chosen"), so a consent column is mapped together with what it records."""
+    out = []
+    for f in sch.mappable_fields:
+        out += ([f"{f.header} — {label}" for label in [*CONSENT_MODES.values(), NO_SETTING]] if f.opt_out_choice
+                else [f.header])
+    return out
+
+
+def goes_to_cell(sch: TargetSchema, mapping: Mapping, column: str) -> list[str]:
+    """The "Goes to" cell of one column: the headers of the fields it feeds, consent with the column's setting."""
+    cell = []
+    for name in mapping.targets_of(column):
+        if name not in sch.field_names:
+            continue
+        f = sch.field(name)
+        mode = consent_modes(mapping.get(name)).get(column) if f.opt_out_choice else None
+        cell.append(f"{f.header} — {CONSENT_MODES[mode] if mode else NO_SETTING}" if f.opt_out_choice else f.header)
+    return cell
+
+
+def read_goes_to(sch: TargetSchema, labels: list[str]) -> tuple[list[str], dict[str, str]]:
+    """An edited "Goes to" cell -> (field names, {consent field: setting}). When several settings of one consent
+    field are picked, the last one picked counts ("setting not chosen" never replaces a setting)."""
+    names: list[str] = []
+    settings: dict[str, str] = {}
+    by_label = {}
+    for f in sch.mappable_fields:
+        if f.opt_out_choice:
+            by_label.update({f"{f.header} — {label}": (f.name, mode) for mode, label in CONSENT_MODES.items()})
+            by_label[f"{f.header} — {NO_SETTING}"] = (f.name, None)
+        else:
+            by_label[f.header] = (f.name, None)
+    for label in labels:
+        if label not in by_label:
+            continue
+        name, mode = by_label[label]
+        if name not in names:
+            names.append(name)
+        if mode:
+            settings[name] = mode
+    return names, settings
