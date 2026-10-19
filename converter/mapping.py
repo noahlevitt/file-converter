@@ -58,8 +58,22 @@ Origin = Literal["template", "rule", "ai", "user", ""]
 #   separator / index        - combine: joiner; split: separator and 0-based piece number
 #   value_map                - translate: [{"from": "Y", "to": "true"}, ...]
 #   value                    - fixed value for every row
-# The per-transform filter is FieldMapping.clean_params.
-ALLOWED_PARAMS = {"date_order", "input_format", "region", "part", "separator", "index", "value_map", "value"}
+#   opt_outs                 - boolean fields, whatever the transform (0.22.0): "import" writes false values
+#                              (opt-ins and opt-outs), "skip" leaves them blank (opt-ins only); see OPT_OUT_CHOICES
+# The per-transform filter is FieldMapping.clean_params (FIELD_PARAMS are kept for every transform).
+ALLOWED_PARAMS = {"date_order", "input_format", "region", "part", "separator", "index", "value_map", "value",
+                  "opt_outs"}
+# Params about the field rather than the transform: kept when "How" changes and for every transform.
+FIELD_PARAMS = {"opt_outs"}
+# The choices of a boolean field with opt_out_choice (consent), as shown to the reviewer.
+OPT_OUT_CHOICES = {"skip": "opt-ins only", "import": "opt-ins and opt-outs"}
+
+
+def opt_out_setting(params: dict) -> str | None:
+    """The opt-out choice stored in a field mapping's params ("skip" / "import"), or None when there is none or it
+    isn't one of OPT_OUT_CHOICES (a stray value from an old or hand-edited mapping is treated as no choice)."""
+    value = params.get("opt_outs")
+    return value if isinstance(value, str) and value in OPT_OUT_CHOICES else None
 
 
 def phone_rule(field_type: str, transform: str) -> str:
@@ -121,7 +135,7 @@ class FieldMapping(BaseModel):
         Example: transform "copy" with ``{"part": "first", "date_order": "DMY", "region": ""}`` ->
         ``{"date_order": "DMY"}``. Unknown transforms keep no params.
         """
-        allowed = set(TRANSFORMS[self.transform].params) if self.transform in TRANSFORMS else set()
+        allowed = set(TRANSFORMS[self.transform].params) | FIELD_PARAMS if self.transform in TRANSFORMS else set()
         return {k: v for k, v in self.params.items() if k in allowed and v not in (None, "", [])}
 
     def summary(self) -> str:
@@ -133,8 +147,15 @@ class FieldMapping(BaseModel):
             name_part first of "Customer Name"     -> "Part of a full name: Customer Name (first)"
             each_row of "Phone", "Phone 2"         -> "one row per value in Phone, Phone 2"
             constant "NY"                          -> "fixed value 'NY'"
+            copy of "Email Opt In", opt_outs skip  -> "Email Opt In — opt-ins only"
             not mapped                             -> "—"
         """
+        text = self._summary_text()
+        choice = opt_out_setting(self.params) if self.transform != "none" else None
+        return f"{text} — {OPT_OUT_CHOICES[choice]}" if choice else text
+
+    def _summary_text(self) -> str:
+        """:meth:`summary` without the opt-out choice."""
         if self.transform == "none":
             return "—"
         if self.transform == "constant":
@@ -252,7 +273,10 @@ class Mapping(BaseModel):
             if f.manual_only and fm.transform != "none" and fm.origin != "user":
                 out[f.name] = FieldMapping(reason="mapped by hand only")
                 continue
+            n_sources = len(fm.sources)
             fm.sources = [c for c in map(find, fm.sources) if c and c.lower() not in skip]
+            if len(fm.sources) != n_sources:
+                fm.params.pop("opt_outs", None)  # a consent column is gone: the choice was about all of them
             if f.type == "phone" and fm.origin != "user":
                 fm.sources = [c for c in fm.sources if not is_fax_column(c)]  # a fax line can't receive texts
             if fm.transform not in TRANSFORMS:
@@ -269,6 +293,8 @@ class Mapping(BaseModel):
             elif check_transform(fm.transform, fm.sources, fm.params):
                 fm = FieldMapping()  # invalid combination (e.g. a copy of two columns): better unmapped than wrong
             fm.params = fm.clean_params()
+            if f.type != "boolean" or opt_out_setting(fm.params) is None:
+                fm.params.pop("opt_outs", None)  # only boolean fields have it, and only these two values
             out[f.name] = fm
         notes = {find(c): n for c, n in self.column_notes.items() if find(c) and n.strip()}
         return Mapping(fields=out, column_notes=notes, general_note=self.general_note, excluded_columns=excluded)
@@ -281,12 +307,15 @@ class Mapping(BaseModel):
         * more than one field using "One row per phone number" - rows can only be expanded for one field, so
           every such field after the first gets a message naming the field that already does.
 
+        * a mapped field with ``opt_out_choice`` (consent) whose opt-out choice hasn't been made
+          (:func:`opt_out_problem`).
+
         Fixed-blank fields are never checked. Example: ``{"phone_number": "required field has no source column"}``.
         """
         issues = {}
         for f in schema.mappable_fields:
             fm = self.get(f.name)
-            p = check_transform(fm.transform, fm.sources, fm.params)
+            p = check_transform(fm.transform, fm.sources, fm.params) or opt_out_problem(f, fm)
             if p:
                 issues[f.name] = p
             elif f.required and fm.transform == "none" and not f.default:
@@ -398,6 +427,18 @@ def _pair_key(column: str) -> str:
     column: "Home Area Code" → "home", "Home Phone" → "home", "Cell Area Code" → "mobile", "Area Code (2)" →
     "2", "Phone 2" → "2", "Area Code" → "", "Phone" → ""."""
     return " ".join(_PAIR_SAME.get(w, w) for w in _header_words(column) if w not in _PAIR_DROP)
+
+
+def opt_out_problem(f: FieldSpec, fm: FieldMapping) -> str | None:
+    """The message when a field with ``opt_out_choice`` (consent) is mapped but its opt-out choice isn't made yet.
+
+    Whoever maps consent must say what its false values do: "opt-ins only" (left blank: an email opt-in column's
+    "No" isn't a text opt-out) or "opt-ins and opt-outs" (written: the customer is opted out). Neither is assumed,
+    because each wrong guess is costly: opting out people who never opted out of texts, or texting people who did.
+    """
+    if f.opt_out_choice and fm.transform != "none" and opt_out_setting(fm.params) is None:
+        return "choose Opt-ins only or Opt-ins and opt-outs (below the table)"
+    return None
 
 
 def area_code_columns(sources: list[str], records: list[dict[str, str]]) -> list[int]:
