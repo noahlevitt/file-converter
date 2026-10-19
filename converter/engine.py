@@ -98,7 +98,7 @@ from typing import Any, Callable
 import pandas as pd
 
 from . import normalizers as N
-from .mapping import Mapping, area_code_pairs
+from .mapping import Mapping, area_code_pairs, opt_out_problem
 from .schema import TargetSchema
 from .transforms import apply_transform
 
@@ -121,6 +121,7 @@ CELL_DEFAULT = "def"    # filled from a default or fixed value
 CELL_FIXED = "fix"      # user-approved AI fix
 CELL_REPAIRED = "rpr"   # repaired from a likely typo (e.g. a phone digit typed twice) — worth a look
 CELL_BLANKED = "blk"    # invalid optional value, left blank
+CELL_OPTOUT = "out"     # a false value (opt-out) left blank because consent was mapped as "opt-ins only" (0.22.0)
 CELL_REJECT = "rej"     # invalid or missing required value → row rejected
 # Possible values of the audit's _status column. "empty" rows (every cell blank) are skipped, not rejected.
 ROW_STATUSES = ("imported", "rejected", "duplicate", "empty")
@@ -187,6 +188,9 @@ class ConversionResult:
     skipped_counts: Counter = field(default_factory=Counter)  # why extra values were skipped: "Header: reason"
     repaired_values: int = 0  # values repaired from likely typos (each marked in the audit)
     repaired_counts: Counter = field(default_factory=Counter)  # how values were repaired: "Header: repaired: ..."
+    # False values (opt-outs) left blank because consent was mapped as "opt-ins only" (0.22.0). Counted on every
+    # non-empty row, like blanked_values (also rows then rejected for another reason or removed as duplicates).
+    opt_outs_left_blank: int = 0
 
     @property
     def has_bad_rows(self) -> bool:
@@ -221,6 +225,10 @@ class ConversionResult:
         if self.repaired_values:
             parts.append(f"{self.repaired_values:,} phone number{'s were' if self.repaired_values != 1 else ' was'} "
                          "repaired from likely typos — check them under Side by side → Problems only.")
+        if self.opt_outs_left_blank:
+            n = self.opt_outs_left_blank
+            parts.append(f"{n:,} consent value{'s' if n != 1 else ''} of false left blank (consent: opt-ins only), "
+                         "so this import opts nobody out.")
         return " ".join(parts)
 
     def summary_dict(self) -> dict[str, Any]:
@@ -243,6 +251,7 @@ class ConversionResult:
             "skipped": dict(self.skipped_counts.most_common()),
             "repaired_values": self.repaired_values,
             "repaired": dict(self.repaired_counts.most_common()),
+            "opt_outs_left_blank": self.opt_outs_left_blank,
             "message": self.flag_message(),
         }
 
@@ -400,8 +409,11 @@ def convert(
             out, err = cache[v]
             if f is each_field and i in fax_rows:
                 out, err = "", N.FAX_REASON  # the row's only number is a fax line
+            # Consent mapped as "opt-ins only": a false value (an opt-out) is left blank, so it opts nobody out.
+            opt_out = (not err and f.type == "boolean" and params.get("opt_outs") == "skip" and out != ""
+                       and out == f.false_value)
             # Cell status, in order of precedence: invalid (rejected or blanked, per the field's on_invalid) >
-            # approved fix > repaired typo > fixed value > derived > unchanged/reformatted.
+            # opt-out left blank > approved fix > repaired typo > fixed value > derived > unchanged/reformatted.
             if err:
                 rejected = f.on_invalid == "reject"
                 issues[i].append(RowIssue(f.name, v, err, rejected))
@@ -409,6 +421,9 @@ def convert(
                     failed_values.setdefault(f.name, set()).add(v)
                 out = ""
                 statuses.append(CELL_REJECT if rejected else CELL_BLANKED)
+            elif opt_out:
+                out = ""
+                statuses.append(CELL_OPTOUT)
             elif v in fixes:
                 statuses.append(CELL_FIXED)
             elif v in ctx.get("repairs", {}):
@@ -580,6 +595,7 @@ def convert(
         skipped_counts=skipped_counts,
         repaired_values=sum(repaired_counts.values()),
         repaired_counts=repaired_counts,
+        opt_outs_left_blank=sum(status_cols[f.name].count(CELL_OPTOUT) for f in schema.fields),
     )
 
 
@@ -789,6 +805,11 @@ def preview_values(df: pd.DataFrame, schema: TargetSchema, mapping: Mapping, lim
             continue
         if fm.transform == "none" and not f.default:
             out[f.name] = ""
+            continue
+        if opt_out_problem(f, fm):
+            # Consent before anyone chose what its "no" means: its false values would neither surely be written
+            # nor surely be left blank, so no sample is shown.
+            out[f.name] = "choose below what a no means"
             continue
         # Samples come from the output (accepted rows only), so a field shows nothing when every row was rejected.
         vals = [v for v in res.output[f.header].tolist() if v][:limit] if not res.output.empty else []
