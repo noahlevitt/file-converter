@@ -32,7 +32,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from .mapping import FieldMapping, Mapping, is_area_code_header, phone_rule
+from .mapping import FIELD_PARAMS, FieldMapping, Mapping, is_area_code_header, opt_out_problem, phone_rule
 from .schema import FieldSpec, TargetSchema
 from .transforms import ADDRESS_PARTS, DATE_ORDERS, NAME_PARTS, TRANSFORMS, check_transform
 
@@ -210,7 +210,9 @@ def apply_row_edit(schema: TargetSchema, mapping: Mapping, field_name: str, chan
             new_t = phone_rule(f.type, new_t)
         if new_t != fm.transform:
             fm.transform = new_t
-            fm.params = {}  # params of the old transform mean nothing to the new one
+            # Params of the old transform mean nothing to the new one; the field's own (the consent opt-out choice)
+            # stay.
+            fm.params = {k: v for k, v in fm.params.items() if k in FIELD_PARAMS}
             if new_t in ("none", "constant"):
                 fm.sources = []
     # Sensible automatic transform when only sources were chosen.
@@ -234,12 +236,14 @@ def apply_row_edit(schema: TargetSchema, mapping: Mapping, field_name: str, chan
         # Parsed against the (possibly just changed) transform.
         params, opt_error = parse_option(fm.transform, f, changes[col_option])
         if opt_error is None:
-            fm.params = params
+            fm.params = {**{k: v for k, v in fm.params.items() if k in FIELD_PARAMS}, **params}
         error = error or opt_error  # report the first problem
     elif fm.transform in ("name_part", "address_part") and "part" not in fm.params:
         # Default part (first name / street line) so the row is valid right away.
         fm.params = parse_option(fm.transform, f, "")[0]
 
+    if fm.sources != before.sources:
+        fm.params.pop("opt_outs", None)  # the consent choice was about the old column(s): ask again
     fm.origin = "user"
     fm.confidence = ""
     fm.reason = "set by reviewer"
@@ -267,6 +271,7 @@ def _without_column(fm: FieldMapping, column: str) -> FieldMapping:
     if not sources:
         return FieldMapping(origin="user", reason="set by reviewer")
     transform = fm.transform
+    fm = fm.model_copy(update={"params": {k: v for k, v in fm.params.items() if k != "opt_outs"}})  # ask again
     if transform == "area_code" and all(is_area_code_header(s) for s in sources):
         return FieldMapping(origin="user", reason="set by reviewer")  # an area code alone is no phone number
     if transform == "area_code" and is_area_code_header(column) and not any(map(is_area_code_header, sources)):
@@ -376,7 +381,8 @@ def row_problem(schema: TargetSchema, mapping: Mapping, field_name: str) -> str:
 
     * an invalid transform / sources / params combination, e.g. "'Combine columns' needs at least 2 source
       column(s)" (a How chosen before its columns);
-    * "required — choose a source column" for an unmapped required field without a default.
+    * "required — choose a source column" for an unmapped required field without a default;
+    * for consent (``opt_out_choice``), that its opt-out choice is still to be made (``mapping.opt_out_problem``).
 
     Fixed-blank fields never have a problem. (The "only one 'One row per phone number' field" rule is checked for
     the whole mapping by ``Mapping.problems``.)
@@ -385,7 +391,7 @@ def row_problem(schema: TargetSchema, mapping: Mapping, field_name: str) -> str:
     if f.fixed_blank:
         return ""
     fm = mapping.get(field_name)
-    p = check_transform(fm.transform, fm.sources, fm.params)
+    p = check_transform(fm.transform, fm.sources, fm.params) or opt_out_problem(f, fm)
     if p:
         return p
     if f.required and fm.transform == "none" and not f.default:
