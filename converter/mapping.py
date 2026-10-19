@@ -41,7 +41,7 @@ import re
 from typing import Any, Literal
 
 import pandas as pd
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from . import normalizers as N
 from .schema import FieldSpec, TargetSchema
@@ -58,22 +58,65 @@ Origin = Literal["template", "rule", "ai", "user", ""]
 #   separator / index        - combine: joiner; split: separator and 0-based piece number
 #   value_map                - translate: [{"from": "Y", "to": "true"}, ...]
 #   value                    - fixed value for every row
-#   opt_outs                 - boolean fields, whatever the transform (0.22.0): "import" writes false values
-#                              (opt-ins and opt-outs), "skip" leaves them blank (opt-ins only); see OPT_OUT_CHOICES
+#   modes                    - consent (fields with opt_out_choice, 0.23.0): the consent setting of each source
+#                              column, {column: "in" | "both" | "out"}; see CONSENT_MODES
 # The per-transform filter is FieldMapping.clean_params (FIELD_PARAMS are kept for every transform).
 ALLOWED_PARAMS = {"date_order", "input_format", "region", "part", "separator", "index", "value_map", "value",
-                  "opt_outs"}
+                  "modes"}
 # Params about the field rather than the transform: kept when "How" changes and for every transform.
-FIELD_PARAMS = {"opt_outs"}
-# The choices of a boolean field with opt_out_choice (consent), as shown to the reviewer.
-OPT_OUT_CHOICES = {"skip": "opt-ins only", "import": "opt-ins and opt-outs"}
+FIELD_PARAMS = {"modes"}
+# The consent settings (0.23.0): what a consent column records, chosen by whoever maps it, for each column.
+#   in   - opt-ins only:          yes -> true (subscribed); no -> blank (changes nothing). E.g. Email Opt In: not
+#                                 opting into email isn't opting out of texts.
+#   both - opt-ins and opt-outs:  yes -> true; no -> false (unsubscribed). A column of text opt-ins and opt-outs.
+#   out  - opt-outs only:         yes -> false (unsubscribed); no -> blank. E.g. Unsubscribed, Opt Out, Do Not Text.
+# Values that name a status ("Subscribed", "Opted out") keep their own meaning; see engine._consent_cell.
+CONSENT_MODES = {"in": "opt-ins only", "both": "opt-ins and opt-outs", "out": "opt-outs only"}
+# What else a reviewer may type for each setting (compared without case, spaces, hyphens or underscores).
+_MODE_WORDS = {"in": {"in", "optinsonly", "optinonly", "optins", "optin"},
+               "both": {"both", "optinsandoptouts", "optinandoptout", "full", "all", "inandout"},
+               "out": {"out", "optoutsonly", "optoutonly", "optouts", "optout"}}
 
 
-def opt_out_setting(params: dict) -> str | None:
-    """The opt-out choice stored in a field mapping's params ("skip" / "import"), or None when there is none or it
-    isn't one of OPT_OUT_CHOICES (a stray value from an old or hand-edited mapping is treated as no choice)."""
-    value = params.get("opt_outs")
-    return value if isinstance(value, str) and value in OPT_OUT_CHOICES else None
+def parse_consent_mode(text: object) -> str | None:
+    """A consent setting from what a person typed or picked: "Opt-ins only" / "in" -> "in", "Opt-ins and opt-outs"
+    / "both" / "full" -> "both", "Opt-outs only" / "out" -> "out"; None when it isn't one."""
+    if not isinstance(text, str):
+        return None
+    key = re.sub(r"[\s\-_]+", "", text.strip().lower())
+    return next((m for m, words in _MODE_WORDS.items() if key in words), None)
+
+
+def consent_modes(fm: FieldMapping) -> dict[str, str]:
+    """The consent setting of each of the field mapping's source columns that has a valid one, in source order.
+
+    A stray value (from an old or hand-edited mapping) or a column that no longer feeds the field doesn't count.
+    Example: sources ["Email Opt In", "Unsubscribed"], params {"modes": {"Email Opt In": "in", "Unsubscribed":
+    "out", "Gone": "in"}} -> {"Email Opt In": "in", "Unsubscribed": "out"}.
+    """
+    modes = fm.params.get("modes")
+    if not isinstance(modes, dict):
+        return {}
+    return {s: modes[s] for s in fm.sources if isinstance(modes.get(s), str) and modes[s] in CONSENT_MODES}
+
+
+def consent_rule(f: FieldSpec, transform: str, n_sources: int) -> str:
+    """The transform a field actually uses, for consent's per-column settings (0.23.0).
+
+    * A field with ``opt_out_choice`` (consent) that reads columns uses "consent" (each column with its own setting,
+      an opt-out in any of them wins) whatever How was picked, except "Translate values" (one column, its
+      translation then its setting) and "First non-empty" of several columns (the first filled column decides, with
+      its setting: how imports made before 0.23.0 combined consent columns, so their re-runs give the same result).
+      "Leave blank" and "Fixed value" stay.
+    * Any other field can't use "consent": it becomes a copy (one column) or "First non-empty" (several).
+    """
+    if f.opt_out_choice:
+        if transform == "coalesce" and n_sources > 1:
+            return transform
+        return transform if transform in ("none", "constant", "map_values", "consent") else "consent"
+    if transform == "consent":
+        return "copy" if n_sources <= 1 else "coalesce"
+    return transform
 
 
 def phone_rule(field_type: str, transform: str) -> str:
@@ -127,6 +170,21 @@ class FieldMapping(BaseModel):
     # Short explanation shown to the reviewer, e.g. "header 'Mobile' matches" or "set by reviewer".
     reason: str = ""
 
+    @model_validator(mode="before")
+    @classmethod
+    def _consent_from_0_22(cls, data: Any) -> Any:
+        """A mapping saved by 0.22.0 had one consent choice for all its columns ("opt_outs": "skip" = opt-ins only,
+        "import" = opt-ins and opt-outs); since 0.23.0 each column has its own setting ("modes"). The old choice
+        becomes the setting of each of its columns (a fixed value needs none)."""
+        if isinstance(data, dict) and isinstance(data.get("params"), dict) and "opt_outs" in data["params"]:
+            params = dict(data["params"])
+            old = params.pop("opt_outs")
+            mode = {"skip": "in", "import": "both"}.get(old) if isinstance(old, str) else None
+            if mode and not params.get("modes"):
+                params["modes"] = {s: mode for s in data.get("sources") or [] if isinstance(s, str)}
+            data = {**data, "params": params}
+        return data
+
     def clean_params(self) -> dict[str, Any]:
         """Params the current transform actually reads, without empty values.
 
@@ -147,20 +205,29 @@ class FieldMapping(BaseModel):
             name_part first of "Customer Name"     -> "Part of a full name: Customer Name (first)"
             each_row of "Phone", "Phone 2"         -> "one row per value in Phone, Phone 2"
             constant "NY"                          -> "fixed value 'NY'"
-            copy of "Email Opt In", opt_outs skip  -> "Email Opt In — opt-ins only"
+            consent of "Email Opt In" (in), "Unsubscribed" (out)
+                                                   -> "Email Opt In (opt-ins only) + Unsubscribed (opt-outs only)"
+            map_values of "SMS" (both)             -> "Translate values: SMS (opt-ins and opt-outs)"
             not mapped                             -> "—"
         """
-        text = self._summary_text()
-        choice = opt_out_setting(self.params) if self.transform != "none" else None
-        return f"{text} — {OPT_OUT_CHOICES[choice]}" if choice else text
+        modes = consent_modes(self)
+        if self.transform == "consent":
+            return " + ".join(f"{s} ({CONSENT_MODES[modes[s]] if s in modes else 'setting not chosen'})"
+                              for s in self.sources) or "—"
+        if self.transform in ("copy", "coalesce", "map_values") and modes:
+            # Consent mapped another way (Translate values, First non-empty, or as saved before 0.23.0): each
+            # column with its setting.
+            return self._summary_text([f"{s} ({CONSENT_MODES[modes[s]]})" if s in modes else s for s in self.sources])
+        return self._summary_text()
 
-    def _summary_text(self) -> str:
-        """:meth:`summary` without the opt-out choice."""
+    def _summary_text(self, names: list[str] | None = None) -> str:
+        """:meth:`summary` without consent settings (``names``: the sources as they are to be shown)."""
+        names = list(self.sources) if names is None else names
         if self.transform == "none":
             return "—"
         if self.transform == "constant":
             return f"fixed value '{self.params.get('value', '')}'"
-        src = " + ".join(self.sources)
+        src = " + ".join(names)
         info = TRANSFORMS.get(self.transform)
         extra = ""
         if self.transform in ("name_part", "address_part"):
@@ -169,11 +236,11 @@ class FieldMapping(BaseModel):
             # Pieces are stored 0-based but shown 1-based ("piece 1" = first piece).
             extra = f" (split on '{self.params.get('separator', ',')}', piece {int(self.params.get('index') or 0) + 1})"
         elif self.transform == "coalesce":
-            return "first non-empty of " + ", ".join(self.sources)
+            return "first non-empty of " + ", ".join(names)
         elif self.transform == "each_row":
-            return "one row per value in " + ", ".join(self.sources)
+            return "one row per value in " + ", ".join(names)
         elif self.transform == "area_code":
-            return "Phone + area code column: " + ", ".join(self.sources)
+            return "Phone + area code column: " + ", ".join(names)
         # A plain copy shows just the column; other transforms are prefixed with their UI label.
         label = "" if self.transform == "copy" else f"{info.label if info else self.transform}: "
         return f"{label}{src}{extra}"
@@ -234,13 +301,17 @@ class Mapping(BaseModel):
            an old template, Claude or the rules never import fax numbers.
         3. An unknown transform becomes "none"; "none" and "constant" never keep sources.
         4. :func:`phone_rule`: "First non-empty" on a phone field becomes "One row per phone number", and
-           "One row per phone number" on any other field becomes "First non-empty".
+           "One row per phone number" on any other field becomes "First non-empty". :func:`consent_rule`: consent
+           reading columns uses "consent" (each column with its own setting; "Translate values" stays), and no
+           other field can.
         5. A multi-column transform (coalesce / concat / each_row / area_code) left with one source becomes a plain
            copy (e.g. a template for "Phone" + "Phone 2" used on a file that only has "Phone"); 'Phone + area code
            column' left with only its area code column (:func:`is_area_code_header`) is not mapped.
         6. A transform that needs sources but has none left, or that :func:`~converter.transforms.check_transform`
            rejects (wrong number of columns, bad part name, ...), resets the field to "not mapped".
-        7. Params are reduced to those the transform reads (:meth:`FieldMapping.clean_params`).
+        7. Params are reduced to those the transform reads (:meth:`FieldMapping.clean_params`). Consent settings
+           (``modes``) are kept only on consent, for its columns in the file's spelling; a column's setting goes
+           with it, so the other columns keep theirs.
 
         Fields not in the schema are dropped. Excluded columns and column notes are kept only for columns in this
         file (in the file's spelling; blank notes dropped); the general note is kept as is.
@@ -273,17 +344,24 @@ class Mapping(BaseModel):
             if f.manual_only and fm.transform != "none" and fm.origin != "user":
                 out[f.name] = FieldMapping(reason="mapped by hand only")
                 continue
-            n_sources = len(fm.sources)
+            modes = fm.params.get("modes")
             fm.sources = [c for c in map(find, fm.sources) if c and c.lower() not in skip]
-            if len(fm.sources) != n_sources:
-                fm.params.pop("opt_outs", None)  # a consent column is gone: the choice was about all of them
+            if isinstance(modes, dict):
+                # Consent settings follow their columns (the file's spelling); a column that is gone takes its own.
+                # Two different settings that land on one column ("Opt Out" and "Opt-Out") count as none: asked.
+                found: dict[str, Any] = {}
+                for c, m in modes.items():
+                    col = find(c) if isinstance(c, str) else None
+                    if col:
+                        found[col] = m if found.get(col, m) == m else None
+                fm.params["modes"] = {c: m for c, m in found.items() if m is not None}
             if f.type == "phone" and fm.origin != "user":
                 fm.sources = [c for c in fm.sources if not is_fax_column(c)]  # a fax line can't receive texts
             if fm.transform not in TRANSFORMS:
                 fm.transform = "none"
             if fm.transform in ("none", "constant"):
                 fm.sources = []
-            fm.transform = phone_rule(f.type, fm.transform)
+            fm.transform = consent_rule(f, phone_rule(f.type, fm.transform), len(fm.sources))
             if fm.transform == "area_code" and fm.sources and all(is_area_code_header(c) for c in fm.sources):
                 fm = FieldMapping()  # only the area code column is left: no numbers to give it to
             if fm.transform in ("coalesce", "concat", "each_row", "area_code") and len(fm.sources) == 1:
@@ -293,8 +371,10 @@ class Mapping(BaseModel):
             elif check_transform(fm.transform, fm.sources, fm.params):
                 fm = FieldMapping()  # invalid combination (e.g. a copy of two columns): better unmapped than wrong
             fm.params = fm.clean_params()
-            if f.type != "boolean" or opt_out_setting(fm.params) is None:
-                fm.params.pop("opt_outs", None)  # only boolean fields have it, and only these two values
+            if f.opt_out_choice and fm.sources and consent_modes(fm):
+                fm.params["modes"] = consent_modes(fm)  # only the columns that feed it, each with a valid setting
+            else:
+                fm.params.pop("modes", None)  # only consent has settings, and only for its columns
             out[f.name] = fm
         notes = {find(c): n for c, n in self.column_notes.items() if find(c) and n.strip()}
         return Mapping(fields=out, column_notes=notes, general_note=self.general_note, excluded_columns=excluded)
@@ -307,15 +387,15 @@ class Mapping(BaseModel):
         * more than one field using "One row per phone number" - rows can only be expanded for one field, so
           every such field after the first gets a message naming the field that already does.
 
-        * a mapped field with ``opt_out_choice`` (consent) whose opt-out choice hasn't been made
-          (:func:`opt_out_problem`).
+        * consent (a field with ``opt_out_choice``) reading a column that has no consent setting yet
+          (:func:`consent_problem`).
 
         Fixed-blank fields are never checked. Example: ``{"phone_number": "required field has no source column"}``.
         """
         issues = {}
         for f in schema.mappable_fields:
             fm = self.get(f.name)
-            p = check_transform(fm.transform, fm.sources, fm.params) or opt_out_problem(f, fm)
+            p = check_transform(fm.transform, fm.sources, fm.params) or consent_problem(f, fm)
             if p:
                 issues[f.name] = p
             elif f.required and fm.transform == "none" and not f.default:
@@ -330,12 +410,17 @@ class Mapping(BaseModel):
         """A copy without the hand-mapped-only fields (consent, last_contacted): what a saved template may keep.
 
         A template is applied automatically to the next file, and these fields must only ever be filled by a person
-        choosing the column for that file, so they are left out of templates.
+        choosing the column for that file, so they are left out of templates. Consent settings (``opt_out_choice``)
+        are left out too, also on a field a custom format doesn't make manual_only.
         """
         out = self.model_copy(deep=True)
         for f in schema.fields:
             if f.manual_only:
                 out.fields[f.name] = FieldMapping()
+            elif f.opt_out_choice and f.name in out.fields:
+                # A consent setting is chosen by a person for each file, even where a custom format lets templates
+                # keep the column (no manual_only): the next file asks again.
+                out.fields[f.name].params.pop("modes", None)
         return out
 
     def row_field(self, schema: TargetSchema) -> FieldSpec | None:
@@ -429,16 +514,29 @@ def _pair_key(column: str) -> str:
     return " ".join(_PAIR_SAME.get(w, w) for w in _header_words(column) if w not in _PAIR_DROP)
 
 
-def opt_out_problem(f: FieldSpec, fm: FieldMapping) -> str | None:
-    """The message when a field with ``opt_out_choice`` (consent) is mapped but its opt-out choice isn't made yet.
+def consent_missing(f: FieldSpec, fm: FieldMapping) -> list[str]:
+    """The columns of a consent mapping (a field with ``opt_out_choice``) that have no consent setting yet, in
+    source order; [] for any other field, an unmapped one or a fixed value (which needs none)."""
+    if not f.opt_out_choice or fm.transform in ("none", "constant"):
+        return []
+    modes = consent_modes(fm)
+    return [s for s in fm.sources if s not in modes]
 
-    Whoever maps consent must say what its false values do: "opt-ins only" (left blank: an email opt-in column's
-    "No" isn't a text opt-out) or "opt-ins and opt-outs" (written: the customer is opted out). Neither is assumed,
-    because each wrong guess is costly: opting out people who never opted out of texts, or texting people who did.
+
+def consent_problem(f: FieldSpec, fm: FieldMapping) -> str | None:
+    """The message when consent reads a column whose consent setting isn't chosen yet, else None.
+
+    Whoever maps a column to consent must say what it records: opt-ins only (a no is left blank: an email opt-in
+    column's "No" isn't a text opt-out), opt-ins and opt-outs (a no opts the customer out) or opt-outs only (an
+    Unsubscribed column: a yes opts the customer out, a no is left blank). Nothing is assumed, because each wrong
+    guess is costly: opting out people who never opted out of texts, or texting people who did.
     """
-    if f.opt_out_choice and fm.transform != "none" and opt_out_setting(fm.params) is None:
-        return "choose Opt-ins only or Opt-ins and opt-outs (below the table)"
-    return None
+    missing = consent_missing(f, fm)
+    if not missing:
+        return None
+    cols = ", ".join(f"'{c}'" for c in missing)
+    return f"choose what {cols} record{'s' if len(missing) == 1 else ''}: opt-ins only, opt-ins and opt-outs or " \
+           "opt-outs only (below the table)"
 
 
 def area_code_columns(sources: list[str], records: list[dict[str, str]]) -> list[int]:
