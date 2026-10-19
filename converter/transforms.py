@@ -109,6 +109,12 @@ TRANSFORMS: dict[str, TransformInfo] = {
         # map_values: value_map=[{"from": "Y", "to": "true"}]: "y" -> "true" (case-insensitive), "N" -> "N".
         TransformInfo("map_values", "Translate values", "Replace specific source values with output values "
                       "(e.g. 'Y' → 'true'); unlisted values pass through.", 1, 1, ("value_map",)),
+        # consent (0.23.0): consent only (mapping.consent_rule). Each column is read with its own consent setting
+        # (params "modes", see mapping.CONSENT_MODES) and an opt-out in any column wins; engine._consent_cell does
+        # that. apply_transform alone treats it like coalesce.
+        TransformInfo("consent", "Consent columns", "Consent only: each column is read with its own consent setting "
+                      "(opt-ins only / opt-ins and opt-outs / opt-outs only); with several columns, an opt-out in "
+                      "any of them wins.", 1, None),
         # constant: every row gets params["value"], e.g. value="NY" -> "NY" for each row.
         TransformInfo("constant", "Fixed value", "Every row gets the same fixed value.", 0, 0, ("value",)),
     ]
@@ -229,6 +235,7 @@ def apply_transform(transform: str, row: dict[str, str], sources: list[str], par
         * copy:         "  Ana " -> "Ana" (if several sources are ever given, non-empty values are space-joined)
         * coalesce:     ["", "2024-01-15"] -> "2024-01-15" (first non-empty, in source order)
         * each_row:     same as coalesce here; engine._expand_rows creates the extra rows before this is used
+        * consent:      same as coalesce here; the engine reads each column with its consent setting instead
         * area_code:    ["516", "555-0177"] -> "(516) 555-0177" (first phone cell, with the row's area code; the
                         engine expands rows for the phone field and applies the area code to every number)
         * concat:       ["516", "555-0100"] + separator "-" -> "516-555-0100"; empty values are skipped
@@ -243,7 +250,7 @@ def apply_transform(transform: str, row: dict[str, str], sources: list[str], par
         return ""
     if transform == "copy":
         return " ".join(v for v in vals if v)
-    if transform in ("coalesce", "each_row"):  # each_row: the engine expands rows; alone it acts like coalesce
+    if transform in ("coalesce", "each_row", "consent"):  # each_row / consent: the engine handles them properly
         return next((v for v in vals if v), "")
     if transform == "area_code":
         area, phones = split_area_code(vals)
