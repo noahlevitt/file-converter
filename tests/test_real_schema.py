@@ -133,8 +133,10 @@ def test_consent_is_only_ever_set_by_a_person(real_schema):
         assert auto.normalized(real_schema, list(df.columns)).get("consent").transform == "none"
 
     # The reviewer maps it in the grid: values become true / false, unknown values stay blank.
-    m2, err = apply_row_edit(real_schema, m, "consent", {"Source column(s)": ["Consent"]}, "How", "Source column(s)",
-                             "Option")
+    # (0.23.0: with the column's consent setting, typed here in the Option cell.)
+    m2, err = apply_row_edit(real_schema, m, "consent", {"Source column(s)": ["Consent"],
+                                                         "Option": "opt-ins and opt-outs"},
+                             "How", "Source column(s)", "Option")
     assert not err and m2.get("consent").origin == "user"
     assert convert(df, real_schema, m2).output["consent"].tolist() == ["true", "false", "false", ""]
 
