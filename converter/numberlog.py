@@ -28,7 +28,7 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 
 from . import normalizers as N
-from .mapping import Mapping
+from .mapping import OPT_OUT_CHOICES, Mapping, opt_out_setting
 from .schema import FieldSpec, TargetSchema
 from .storage import ImportRecord, Store
 
@@ -49,7 +49,8 @@ def consent_field(schema: TargetSchema) -> FieldSpec | None:
 def consent_source(schema: TargetSchema, mapping: Mapping) -> str:
     """Where an import's consent values came from, in words, or "" when consent wasn't mapped (always blank).
 
-    Examples: "SMS Opt In" (copied), "Translate values: SMS Opt In (Y=true; N=false)", "fixed value 'true'".
+    Examples: "SMS Opt In" (copied), "Translate values: SMS Opt In (Y=true; N=false)", "fixed value 'true'",
+    "Email Opt In — opt-ins only" (false values were left blank, 0.22.0).
     """
     f = consent_field(schema)
     if f is None or f.fixed_blank:
@@ -57,10 +58,11 @@ def consent_source(schema: TargetSchema, mapping: Mapping) -> str:
     fm = mapping.get(f.name)
     if fm.transform == "none" or (f.manual_only and fm.origin != "user"):
         return ""  # not mapped, or mapped by something other than a person, which a manual-only field ignores
-    text = fm.summary()
+    choice = opt_out_setting(fm.params)
+    text = fm.summary().removesuffix(f" — {OPT_OUT_CHOICES[choice]}") if choice else fm.summary()
     if fm.transform == "map_values" and fm.params.get("value_map"):
         text += " (" + "; ".join(f"{m.get('from', '')}={m.get('to', '')}" for m in fm.params["value_map"]) + ")"
-    return text
+    return f"{text} — {OPT_OUT_CHOICES[choice]}" if choice else text
 
 
 def _consent_cells(audit: pd.DataFrame, schema: TargetSchema, source: pd.DataFrame | None,
