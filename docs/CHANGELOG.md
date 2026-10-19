@@ -3,6 +3,46 @@
 What changed in each version. The running version is shown in the app's sidebar. Each version is tagged in git
 (`vX.Y.Z`).
 
+## 0.23.0 — consent settings per column: opt-ins only, opt-ins and opt-outs, opt-outs only
+
+- **Each consent column now has its own setting, chosen when it is mapped.** 0.22.0 had one choice for the whole
+  file and no way to import a column of opt-outs. Now every column sent to consent says what it records:
+  - **Opt-ins only** (e.g. *Email Opt In*): yes → `true`; no → blank.
+  - **Opt-ins and opt-outs** (a column of text opt-ins and opt-outs): yes → `true`; no → `false`.
+  - **Opt-outs only** (new; e.g. *Unsubscribed*, *Opt Out*, *Do Not Text*): yes → `false`; no → blank.
+
+  Values that name a status keep their meaning in every setting (*Subscribed* and *Active* are opt-ins, *Opted
+  out* an opt-out); the setting decides which ones are imported. So does a translated value: on consent,
+  *Translate values* now takes only **opt-in**, **opt-out** or nothing (`DNT=opt-out; OK=`), because true / false
+  and yes / no could be read either way. Translations saved before 0.23.0 keep their meaning (`true` / yes
+  subscribed, `false` / no opted out), so a re-run can't turn them around. An empty cell is never translated. A fixed value needs no
+  setting.
+- **Chosen with the column mapping.** Under *Columns in your file*, *Goes to* offers `consent — opt-ins only`,
+  `consent — opt-ins and opt-outs` and `consent — opt-outs only`; consent columns add up like phone columns. Under
+  the field table each consent column has its own question, and the grid's Option cell takes the settings too
+  (`Email Opt In: opt-ins only; Unsubscribed: opt-outs only`; a setting alone only when consent has one column).
+  Start import stays disabled until every consent column has one; a column added later is asked for, one removed
+  takes its setting with it. Templates never keep a setting.
+- **Several consent columns are read together**, row by row: an opt-out in any of them wins (`false`), otherwise
+  an opt-in (`true`), otherwise blank. *Email Opt In* = Y with *Unsubscribed* = Yes gives `false`. The grid's How
+  for consent is the new **Consent columns** (a copy or *First non-empty* on consent becomes it). Imports made with
+  0.22.0 that combined consent columns with *First non-empty* keep it when re-run as they are (the first column
+  with a value decides), so they give the same result; any change to their consent turns it into *Consent
+  columns*.
+- **Reports:** the result banner and the summary file count consent in the converted file ("Consent in the
+  converted file: 120 true (subscribed), 15 false (unsubscribed), 300 left blank by the consent settings"); *What
+  changed* counts every row read, like its other columns.
+  *Side by side* shows a value left blank by its setting in teal and a `false` from an opt-outs-only column in
+  pink, with the deciding column ("Unsubscribed: Yes"); *What changed* counts both. Number history, *Mapping used*
+  and *What changed* show each column's setting, also for imports mapped before 0.23.0 once they have one.
+- **Yes/no values:** `-1` is no longer read as 1 (it can mean "unknown"); *Active* is an opt-in in every setting,
+  so an opt-outs-only column never unsubscribes it.
+- **Imports made with 0.22.0** keep their choice: opt-ins only becomes each column's *opt-ins only*, opt-ins and
+  opt-outs each column's *opt-ins and opt-outs*, and *First non-empty* stays. Re-running an import from before
+  0.22.0 asks for each consent column's setting first (naming its translation, if it has one) and then reads its
+  columns together.
+- All 406 test files give identical results (consent is only ever mapped by a person).
+
 ## 0.22.0 — consent: opt-ins only, or opt-ins and opt-outs
 
 - **Whoever maps consent now says what a "no" means.** A client's *Email Opt In* column says whether the customer
