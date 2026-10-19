@@ -27,7 +27,8 @@ CSV = (b"Name,Phone,SMS Opt In\n"
        b"Di,917-555-1234,\n")
 
 CONSENT = FieldMapping(sources=["SMS Opt In"], transform="map_values",
-                       params={"value_map": [{"from": "Y", "to": "true"}, {"from": "N", "to": "false"}]},
+                       params={"value_map": [{"from": "Y", "to": "true"}, {"from": "N", "to": "false"}],
+                               "modes": {"SMS Opt In": "both"}},
                        origin="user")  # consent is only ever mapped by a person
 
 
@@ -59,7 +60,7 @@ def test_completed_import_records_its_numbers(tmp_path, real_schema):
     [e] = res.entries
     assert (e["import_id"], e["filename"], e["username"], e["file_row"]) == (iid, "guests.csv", "noah", 2)
     assert (e["phone_value"], e["consent"], e["consent_value"]) == ("(516) 555-0177", "true", "Y")
-    assert e["consent_from"] == "Translate values: SMS Opt In (Y=true; N=false)"
+    assert e["consent_from"] == "Translate values: SMS Opt In (Y=true; N=false) (opt-ins and opt-outs)"
     assert e["imported_at"] == rec.finished_at
 
     bo = numberlog.lookup(st, "(631) 555-0188", real_schema).entries
@@ -159,7 +160,7 @@ def test_unknown_number(tmp_path, real_schema):
 
 def test_consent_source(real_schema):
     assert numberlog.consent_source(real_schema, Mapping(fields={"consent": CONSENT})) == (
-        "Translate values: SMS Opt In (Y=true; N=false)")
+        "Translate values: SMS Opt In (Y=true; N=false) (opt-ins and opt-outs)")
     assert numberlog.consent_source(real_schema, Mapping(fields={
         "consent": FieldMapping(sources=["Opt In"], transform="copy", origin="user")})) == "Opt In"
     assert numberlog.consent_source(real_schema, Mapping(fields={
@@ -229,7 +230,7 @@ def test_area_code_column_file_in_the_history(tmp_path, real_schema):
     st = Store(tmp_path / "c.db")
     m = Mapping(fields={"phone_number": FieldMapping(sources=["Area Code", "Phone"], transform="area_code"),
                         "consent": FieldMapping(sources=["Opt In"], transform="map_values", origin="user",
-                                                params=CONSENT.params)})
+                                                params={**CONSENT.params, "modes": {"Opt In": "both"}})})
     iid = st.create_import(username="noah", filename="split.csv", data=data, schema_label=real_schema.label,
                            schema_json=real_schema.model_dump_json(), mapping=m, read_options={"header_row": "auto"})
     run_import(st, iid)
