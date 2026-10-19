@@ -158,6 +158,7 @@ The numbers below it are:
     - green: fix you approved;
     - **orange: repaired from a likely typo — check it;**
     - yellow: invalid, left blank;
+    - teal: a consent "no" left blank because consent was mapped as opt-ins only;
     - red: invalid or missing, row rejected.
   - **Original values:** with **Show original under changed values** on, the original is shown under each changed
     value. Hover over any cell for details.
@@ -177,9 +178,10 @@ The numbers below it are:
   1. Click **Suggest fixes**. Claude proposes reformatted versions of values the converter couldn't read, for
      example a phone written as words.
   2. Each suggestion is re-checked. Suggestions that change the data instead of reformatting it are refused.
+     Yes/no fields such as consent are never sent: an unreadable consent value stays blank.
   3. **Apply fixes and re-run** creates a new import with the approved fixes.
 - **Re-run this import:** runs the same file and mapping again with the current rules, as a new import. The
-  original stays as it was.
+  original stays as it was. An import made before 0.22.0 with consent mapped first asks what a consent "no" means.
 
 ## Looking up a number (Number history)
 
@@ -193,7 +195,7 @@ every import the number was converted in, newest first:
 | Row | the row in the client's file, numbered as Excel shows it |
 | Number in file | the number as written in the file (with the area code in front when it came from an area code column) |
 | Consent sent | `true` (subscribed), `false` (opted out) or blank (no change) |
-| Consent in file / Consent from | the consent cell as written in the file, and the column (and translation) it came from; *not mapped* when nobody mapped consent |
+| Consent in file / Consent from | the consent cell as written in the file, and the column (and translation) it came from, with the choice made for it (*opt-ins only*: a "no" was sent blank); *not mapped* when nobody mapped consent |
 
 Select a row to open that import. **Download (CSV)** saves the table with exact times (UTC), e.g. to answer a
 complaint. Look up one number at a time. Numbers are recorded since version 0.21.0; earlier imports are included
@@ -292,9 +294,22 @@ the field grid or with **Goes to** under **Columns in your file**. Nothing autom
 not Claude, not a default and not a saved template (templates leave them out, so you choose again for each file).
 
 - **consent:** only map a column that really records the customer's consent. Values become `true` (subscribes the
-  customer) or `false` (opts them out); Y/N, yes/no, 1/0, opted in/out and subscribed/unsubscribed are understood.
+  customer) or `false` (opts them out); Y/N, yes/no, true/false, 1/0, opted in/out, opt-in/opt-out and
+  subscribed/unsubscribed are understood (case, spaces, hyphens and underscores don't matter).
   Anything else is left blank, which changes nobody's consent. What was sent for each number, and from which
   column and row, can be looked up later under **Number history**.
+- **What a "no" means (consent only).** Once consent has a column, a question appears under the field table:
+  - **Opt-ins only:** yes → `true`; no → left blank, so the import unsubscribes nobody. Use it for a column such as
+    *Email Opt In* or *Newsletter*: a customer who didn't opt into email hasn't opted out of texts.
+  - **Opt-ins and opt-outs:** yes → `true`; no → `false`, which **opts the customer out of texts**. Only for a
+    column that records text (SMS) opt-ins and opt-outs.
+
+  Nothing is chosen for you, and **Start import** stays disabled until you choose ("choose Opt-ins only or
+  Opt-ins and opt-outs"); until then the grid's preview for consent reads "choose below what a no means".
+  Choosing another column for consent, or removing one of its columns, asks again. Re-running an import made
+  before 0.22.0 asks the same question on the import's page before the *Re-run* buttons work. With opt-ins only,
+  *Side by side* shows each "no" that was left blank in teal, and the result banner and summary count them
+  ("2 consent values of false left blank (consent: opt-ins only), so this import opts nobody out").
 - **last_contacted:** when *we* last texted the customer (e.g. *Last Campaign Sent*). Files almost never have it.
 
 ## Templates, target format, users
