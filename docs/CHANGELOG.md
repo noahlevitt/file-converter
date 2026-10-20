@@ -3,6 +3,19 @@
 What changed in each version. The running version is shown in the app's sidebar. Each version is tagged in git
 (`vX.Y.Z`).
 
+## 0.24.0 — New import shows what it is doing with a big file
+
+- **A box under the upload shows each step while a file is read.** Before, after a big file was uploaded the page
+  looked idle for several seconds (a 150,000-row CSV: about 6 s; longer when Claude matches the columns), with only
+  Streamlit's small "Running" in the corner. Now it shows ⏳ *Reading the file*, *Looking at the values of … rows*
+  (with the column it is on) and *Matching columns to the import format* (saying when Claude is asked), each ticked
+  ✓ with how long it took, and goes away when the file is ready. Also after **Re-read file** and a page reload.
+- **Reading a big file is faster:** profiling the columns cleans each different value once instead of every cell
+  (most cells repeat), and the reader no longer cleans every cell twice. The 150,000-row CSV went from about 6 s to
+  about 3 s; a 100,000-row .xlsx from about 7 s to about 6 s (most of that is reading the spreadsheet itself).
+  Results are exactly the same (checked on the 400 generated files).
+- All 406 test files give identical results.
+
 ## 0.23.1 — the mapping tables keep their place
 
 - **Editing a row of a mapping table no longer jumps back to the first row.** Both tables on New import (the field
