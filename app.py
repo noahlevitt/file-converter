@@ -61,6 +61,10 @@ import hashlib
 import json
 import logging
 import os
+import time
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from datetime import timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -434,14 +438,15 @@ def restore_draft(draft_id: str) -> None:
     saved = draft.state
     try:
         args = saved["read_args"]
-        rr = read_file(ss.file_name, ss.file_bytes, sheet=args.get("sheet"), header_row=args.get("header_row", "auto"))
+        with file_progress("Picking up where you left off: reading") as progress:
+            rr, profiles = read_and_profile(progress, args.get("sheet"), args.get("header_row", "auto"))
         mapping = Mapping.model_validate(saved["mapping"]).normalized(schema, list(rr.df.columns))
         map_meta = dict(saved["map_meta"])
     except Exception:  # no state saved yet, or it doesn't fit any more: start the mapping over for this file
         load_and_map()
         return
     ss.read, ss.read_error, ss.read_args = rr, None, args
-    ss.profiles = profile_columns(rr.df, n_samples=settings.ai_sample_values)
+    ss.profiles = profiles
     ss.mapping, ss.map_meta = mapping, map_meta
     ss.template_name = saved.get("template_name") or Path(ss.file_name).stem
     ss.timezone = saved.get("timezone") if saved.get("timezone") in ZONE_LABEL else "America/New_York"
@@ -450,6 +455,57 @@ def restore_draft(draft_id: str) -> None:
     ss.multi_cells, ss.pending, ss.notes_result, ss.check_result, ss.edit_errors = {}, None, None, None, []
     ss.draft_saved = json.dumps(saved, sort_keys=True)
     ss.editor_version += 1
+
+
+class FileProgress:
+    """What the page shows while a file is read and mapped (0.24.0): a box with a spinner under the uploader, each
+    step on its own line (⏳ while it runs, ✓ and how long it took when done), and how far profiling got.
+
+    Without it the page looked idle: on a 150,000-row file reading and mapping take several seconds (longer with
+    Claude), and Streamlit only shows a small "Running" in the corner. Used by load_and_map (upload, Re-read file)
+    and restore_draft (a browser refresh). The box is removed when the work is done: the page below it then shows
+    the file.
+    """
+
+    def __init__(self, box) -> None:
+        self.box = box
+
+    def step(self, text: str, work: Callable[[Callable[[str], None]], object]) -> object:
+        """Run ``work`` with a line saying what it does; ``work`` gets a function to replace that line's text (e.g.
+        "column 7 of 20") while it runs. Returns what ``work`` returns; an exception leaves the line as it was."""
+        line = self.box.empty()
+        line.markdown(f"⏳ {text}…")
+        started = time.monotonic()
+        result = work(lambda detail: line.markdown(f"⏳ {text}… {detail}"))
+        secs = time.monotonic() - started
+        took = f"{secs:.1f} s" if secs < 60 else fmt_duration(timedelta(seconds=secs))
+        line.markdown(f"✓ {text} · {took}")
+        return result
+
+
+@contextmanager
+def file_progress(action: str) -> Iterator[FileProgress]:
+    """Show a FileProgress box while the block runs: "<action> **file** (size)…" with a spinner, removed after."""
+    slot = st.empty()
+    with slot.status(f"{action} **{ss.file_name}** ({fmt_size(len(ss.file_bytes))})… large files take a moment",
+                     expanded=True) as box:
+        yield FileProgress(box)
+    slot.empty()
+
+
+def read_and_profile(progress: FileProgress, sheet: str | None, header_row: int | None | str):
+    """Read the current file and profile its columns, each as a step of ``progress``. Returns (ReadResult,
+    profiles); a ReadError is raised as it is."""
+    rr = progress.step("Reading the file", lambda _: read_file(ss.file_name, ss.file_bytes, sheet=sheet,
+                                                                header_row=header_row))
+    rows, cols = len(rr.df), len(rr.df.columns)
+    # The number of sample values per column is the same setting that limits what Claude is shown, so the samples
+    # in the UI match what Claude would see.
+    profiles = progress.step(
+        f"Looking at the values of {rows:,} rows in {cols} column{'s' if cols != 1 else ''}",
+        lambda show: profile_columns(rr.df, n_samples=settings.ai_sample_values,
+                                     progress=lambda i, n, _: show(f"column {i} of {n}")))
+    return rr, profiles
 
 
 def load_and_map(sheet: str | None = None, header_row: int | None | str = "auto", use_ai: bool = True) -> None:
@@ -465,24 +521,26 @@ def load_and_map(sheet: str | None = None, header_row: int | None | str = "auto"
     reviewer made to the old mapping are discarded, which is what "Re-read file" should do.
 
     A ReadError (unsupported type, empty or unreadable file) is stored for the page to show rather than raised.
+    While it works, a FileProgress box shows each step (0.24.0).
     """
-    try:
-        rr = read_file(ss.file_name, ss.file_bytes, sheet=sheet, header_row=header_row)
-    except ReadError as exc:
-        ss.read = None
-        ss.read_error = str(exc)
-        return
+    ai = bool(use_ai and assistant and settings.ai_auto_map)
+    with file_progress("Reading") as progress:
+        try:
+            rr, profiles = read_and_profile(progress, sheet, header_row)
+        except ReadError as exc:
+            ss.read = None
+            ss.read_error = str(exc)
+            return
+        # Order inside initial_mapping: a saved template with exactly these headers wins outright (no Claude
+        # call); otherwise rules, seeded from a similar template if there is one, then Claude only when
+        # AI_AUTO_MAP is on.
+        sug = progress.step("Matching columns to the import format" + (" (asking Claude, can take up to a minute)"
+                                                                        if ai else ""),
+                            lambda _: initial_mapping(schema, rr.df, profiles, store, assistant, use_ai=ai))
     ss.read_error = None
     ss.read = rr
     ss.read_args = {"sheet": sheet, "header_row": header_row}  # as requested, so a restored draft reads the same
-    # The number of sample values per column is the same setting that limits what Claude is shown, so the
-    # samples in the UI match what Claude would see.
-    ss.profiles = profile_columns(rr.df, n_samples=settings.ai_sample_values)
-    # Order inside initial_mapping: a saved template with exactly these headers wins outright (no Claude call);
-    # otherwise rules, seeded from a similar template if there is one, then Claude only when AI_AUTO_MAP is on.
-    with st.spinner("Matching columns" + (" (asking Claude)…" if use_ai and assistant and settings.ai_auto_map
-                                          else "…")):
-        sug = initial_mapping(schema, rr.df, ss.profiles, store, assistant, use_ai=use_ai and settings.ai_auto_map)
+    ss.profiles = profiles
     ss.mapping = sug.mapping
     ss.map_meta = {"source": sug.source, "notes": sug.notes,
                    "template": sug.template.name if sug.template else None, "similarity": sug.similarity}
