@@ -4,7 +4,7 @@ For whoever picks this repository up next: a person, or Claude in a new chat. It
 other documents don't: how changes are made and delivered, the decisions the business made, and what is still
 open. It also explains how to start a separate project from this code while this one keeps being updated.
 
-**State:** version 0.23.1 (see [CHANGELOG.md](CHANGELOG.md)), about 1,090 tests. Repository:
+**State:** version 0.24.0 (see [CHANGELOG.md](CHANGELOG.md)), about 1,100 tests. Repository:
 github.com/noahlevitt/file-converter. Owner: Noah Levitt. Last updated 2026-10-19. Update this file with every
 release (section 4 in particular).
 
@@ -69,7 +69,7 @@ their docstrings removed before and after.
 
 **Delivery** (when the changes can't be pushed directly)
 - Changes go to Noah as a git bundle, `file-converter-updateN.bundle`, numbered in order. This file came with
-  update33, so the next is `file-converter-update34.bundle`; update this line with each bundle.
+  update34, so the next is `file-converter-update35.bundle`; update this line with each bundle.
 
   ```bash
   tags=$(git tag --list 'v0.*' | sort -V | awk -F. '$2>=6')
@@ -152,6 +152,10 @@ this project's engine in its `converter/` folder, next to this app (it uses port
   `editor.py`, `engine.py`, `normalizers.py`, `compare.py`, `output.py`, `checks.py`, `ai.py` and `numberlog.py`
   (`git diff v0.21.2 v0.23.0`). `schema.py` has its additions there, and its number history is replaced by a
   `sink`, so those two need care.
+- **Not yet taken there: 0.24.0** (New import shows each step while a big file is read; profiling and reading
+  faster, same results). It runs the same New import page, so it applies: `app.py` (`FileProgress`,
+  `load_and_map`, `restore_draft`), `converter/mapping.py` (`profile_columns`) and `converter/reader.py`
+  (`build_frame`, `_clean_cell`); `git diff v0.23.1 v0.24.0`.
 - **Fixes found there that apply here** go in section 4. The last one, the mapping tables jumping back to their
   first row (its 1.0.2), was taken here in 0.23.1.
 - Its decisions (section 2 of its handoff) are its own; the ones here don't apply to it unless confirmed there.
