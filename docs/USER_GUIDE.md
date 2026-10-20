@@ -26,6 +26,11 @@ other computers and after you sign in again). Until you choose, the converter fo
 On **New import**, drag the file onto the upload box or click to choose it. Accepted: `.csv`, `.tsv`, `.tab`,
 `.txt`, `.xlsx`, `.xlsm`, `.xlsb`, `.xls`, `.ods`. One file at a time.
 
+While the file is read, a box under the upload box shows what is happening: ⏳ *Reading the file*, then *Looking at
+the values of … rows* (with the column it is on) and *Matching columns to the import format*, each ticked ✓ with
+the time it took. It goes away when the file is ready. A 150,000-row file takes a few seconds; when Claude helps
+match the columns, up to a minute more. The same box shows after **Re-read file** and when the page is reloaded.
+
 The **File** section shows what was detected: rows, columns, sheet, text encoding and delimiter. Check two things
 here:
 
