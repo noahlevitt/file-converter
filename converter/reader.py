@@ -477,7 +477,8 @@ def _clean_cell(value: str) -> str:
     a file that was put together from several exports; both would otherwise make "Phone" and "Phone " different
     headers or hide an empty cell. Example: ``"  Ana\\u00a0Lee "`` -> ``"Ana Lee"``.
     """
-    value = value.replace(" ", " ").replace("﻿", "")
+    if "\u00a0" in value or "\ufeff" in value:  # rare: checking first is much faster on big files (0.24.0)
+        value = value.replace("\u00a0", " ").replace("\ufeff", "")
     return value.strip()
 
 
@@ -779,10 +780,11 @@ def _unique_headers(raw: list[str]) -> list[str]:
     return out
 
 
-def build_frame(grid: list[list[str]], header_row: int | None) -> pd.DataFrame:
+def build_frame(grid: list[list[str]], header_row: int | None, cleaned: bool = False) -> pd.DataFrame:
     """Turn the raw grid into the text-only DataFrame, using row ``header_row`` (0-based) as the header.
 
-    * Cells are cleaned (:func:`_clean_cell`) and short rows are padded, so ragged files still give a rectangle;
+    * Cells are cleaned (:func:`_clean_cell`; ``cleaned=True``: the caller already did, as :func:`read_file` does)
+      and short rows are padded, so ragged files still give a rectangle;
       values beyond the header's width end up in extra "Column N" columns instead of being lost.
     * ``header_row=None``: columns are named "Column 1", "Column 2", ... and every row is data. Otherwise rows
       above the header (titles, blank lines) are discarded and the rows after it are the data.
@@ -792,7 +794,8 @@ def build_frame(grid: list[list[str]], header_row: int | None) -> pd.DataFrame:
     Example: ``build_frame([["Name", "Phone", ""], ["Ana", "2015550111", ""]], 0)`` -> columns
     ["Name", "Phone"], one row.
     """
-    grid = [[_clean_cell(c) for c in row] for row in grid]
+    if not cleaned:
+        grid = [[_clean_cell(c) for c in row] for row in grid]
     # Pad every row to the widest row.
     width = max((len(r) for r in grid), default=0)
     grid = [r + [""] * (width - len(r)) for r in grid]
@@ -891,7 +894,7 @@ def read_file(
     if isinstance(hr, int) and hr >= len(cleaned):
         raise ReadError(f"Header row {hr + 1} is past the end of the file ({len(cleaned)} rows).")
 
-    df = build_frame(cleaned, hr)
+    df = build_frame(cleaned, hr, cleaned=True)
     warnings = list(read_warnings)  # e.g. a quote mark that is never closed (text files)
     if isinstance(hr, int) and ext in TEXT_EXTENSIONS:
         # Ragged rows: data rows with values past the number of named header columns. In a CSV that almost always
