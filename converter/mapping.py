@@ -38,6 +38,8 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections import Counter
+from collections.abc import Callable
 from typing import Any, Literal
 
 import pandas as pd
@@ -673,11 +675,14 @@ class ColumnProfile(BaseModel):
         return t, self.shares[t]
 
 
-def profile_columns(df: pd.DataFrame, sample_size: int = 300, n_samples: int = 15) -> list[ColumnProfile]:
+def profile_columns(df: pd.DataFrame, sample_size: int = 300, n_samples: int = 15,
+                    progress: Callable[[int, int, str], None] | None = None) -> list[ColumnProfile]:
     """Profile every column of the (text-only) DataFrame, in column order.
 
     Inputs: ``df`` from ``reader.read_file``; ``sample_size`` = how many distinct values are tested for their
-    type; ``n_samples`` = how many distinct values are kept as examples (shown to the reviewer and to Claude).
+    type; ``n_samples`` = how many distinct values are kept as examples (shown to the reviewer and to Claude);
+    ``progress`` = called as (column number from 1, number of columns, column name) before each column, so the
+    New import page can show how far it got on a big file (0.24.0).
 
     Why distinct values: the type shares say what KINDS of values a column holds, so a value repeated on 500 rows
     counts once and can't drown out the rest; testing at most ``sample_size`` values keeps big files fast.
@@ -687,11 +692,16 @@ def profile_columns(df: pd.DataFrame, sample_size: int = 300, n_samples: int = 1
     """
     profiles = []
     total = len(df)
-    for col in df.columns:
-        # Clean every cell the same way the converter will (whitespace collapsed, "null"/"n/a"/"-" -> "").
-        series = [N.clean_text(v) for v in df[col].tolist()]
-        non_empty = [v for v in series if v]
-        uniq = list(dict.fromkeys(non_empty))  # distinct values, in order of first appearance
+    for i, col in enumerate(df.columns, start=1):
+        if progress:
+            progress(i, len(df.columns), col)
+        # Clean every cell the same way the converter will (whitespace collapsed, "null"/"n/a"/"-" -> ""). Each
+        # distinct cell is cleaned once (0.24.0): contact files repeat values a lot, and on a 150,000-row file
+        # cleaning every cell was most of the wait. Counter keeps the cells in order of first appearance.
+        counts = Counter(df[col].tolist())
+        cleaned = {raw: N.clean_text(raw) for raw in counts}
+        non_empty_count = sum(n for raw, n in counts.items() if cleaned[raw])
+        uniq = list(dict.fromkeys(v for v in cleaned.values() if v))  # distinct values, in order of first appearance
         sample = uniq[:sample_size]
         shares: dict[str, float] = {}
         if sample:
@@ -709,12 +719,12 @@ def profile_columns(df: pd.DataFrame, sample_size: int = 300, n_samples: int = 1
         profiles.append(
             ColumnProfile(
                 name=col,
-                non_empty=len(non_empty),
+                non_empty=non_empty_count,
                 total=total,
                 unique=len(uniq),
                 samples=[v[:120] for v in uniq[:n_samples]],
                 shares={k: round(v, 3) for k, v in shares.items()},
-                max_length=max((len(v) for v in non_empty), default=0),
+                max_length=max((len(v) for v in uniq), default=0),
             )
         )
     return profiles
